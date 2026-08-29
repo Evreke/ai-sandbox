@@ -1,0 +1,34 @@
+{
+  "name": "pi-grill-deck",
+  "version": "1.2.1",
+  "description": "Interactive question deck for pi — grill the user round by round: all questions of a frontier in one TUI, recommendation fast-accept, defer, structured answers back to the model.",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "grilling",
+    "interview",
+    "requirements"
+  ],
+  "license": "MIT",
+  "files": [
+    "index.ts",
+    "onboarding.md",
+    "README.md",
+    "ATTRIBUTION.md",
+    "skills"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  }
+}
