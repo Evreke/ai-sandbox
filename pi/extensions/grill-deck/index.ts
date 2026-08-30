@@ -34,38 +34,19 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-
-// ---------------------------------------------------------------- types
-
-interface DeckQuestion {
-	id: string;
-	title: string;
-	body?: string;
-	choices?: string[];
-	recommendation?: string;
-}
-
-type AnswerKind = "accepted" | "choice" | "custom" | "deferred";
-
-interface DeckAnswer {
-	id: string;
-	kind: AnswerKind;
-	label: string;
-	choiceIndex?: number;
-}
-
-interface DeckOutcome {
-	cancelled: boolean;
-	answers: DeckAnswer[];
-}
-
-interface RoundRecord {
-	round: number;
-	topic?: string;
-	questions: DeckQuestion[];
-	answers: DeckAnswer[];
-	revised?: boolean;
-}
+import {
+	type AnswerKind,
+	answersToText,
+	clean,
+	type DeckAnswer,
+	type DeckQuestion,
+	isPlainObject,
+	MAX_QUESTIONS,
+	parseAnswer,
+	parseRoundRecord,
+	sanitizeQuestion,
+	type RoundRecord,
+} from "./lib.ts";
 
 // ---------------------------------------------------------------- state
 
@@ -114,37 +95,12 @@ function updateWidget(ctx: ExtensionContext): void {
 	ctx.ui.setWidget("grill-deck", [line]);
 }
 
-function answersToText(round: number, questions: DeckQuestion[], answers: DeckAnswer[]): string {
-	const byId = new Map(questions.map((q) => [q.id, q]));
-	const lines = answers.map((a) => {
-		const q = byId.get(a.id);
-		const title = q ? ` (${q.title})` : "";
-		switch (a.kind) {
-			case "accepted":
-				return `${a.id}${title}: accepted your recommendation — "${a.label}"`;
-			case "choice":
-				return `${a.id}${title}: chose option ${a.choiceIndex} — "${a.label}"`;
-			case "custom":
-				return `${a.id}${title}: user wrote — "${a.label}"`;
-			case "deferred":
-				return `${a.id}${title}: DEFERRED — user wants to decide later; treat as still open`;
-		}
-	});
-	return [
-		`Grill deck round ${round} answers:`,
-		...lines,
-		"",
-		"Deferred questions remain open in the design tree. Recompute the frontier and start the next round by calling grill_deck again with the new frontier. When the frontier is empty, summarize the shared understanding and wait for the user's confirmation before acting on it.",
-	].join("\n");
+interface DeckOutcome {
+	cancelled: boolean;
+	answers: DeckAnswer[];
 }
 
 // ---------------------------------------------------------------- deck UI
-
-interface DeckHandle {
-	render(width: number): string[];
-	invalidate(): void;
-	handleInput(data: string): void;
-}
 
 function openDeck(
 	ctx: { ui: ExtensionContext["ui"]; mode: string },
@@ -177,7 +133,7 @@ function openDeck(
 			if (!inputQuestionId) return;
 			const trimmed = value.trim();
 			if (trimmed) {
-				answers.set(inputQuestionId, { id: inputQuestionId, kind: "custom", label: trimmed });
+				answers.set(inputQuestionId, { id: inputQuestionId, kind: "custom", label: clean(trimmed) });
 			}
 			inputQuestionId = null;
 			editor.setText("");
@@ -435,7 +391,8 @@ function openDeck(
 
 			lines.push(theme.fg("accent", "─".repeat(w)));
 			lines.push(
-				theme.fg("accent", theme.bold(` grill deck · ${questions.length} questions · ${answeredCount} answered `)),
+				theme.fg("accent", theme.bold(` grill deck · ${questions.length} questions · ${answeredCount} answered `)) +
+					theme.fg("dim", "· model-authored — verify before accepting"),
 			);
 			lines.push(theme.fg("accent", "─".repeat(w)));
 
@@ -528,12 +485,20 @@ export default function grillDeck(pi: ExtensionAPI) {
 		for (const entry of ctx.sessionManager.getBranch()) {
 			if (entry.type !== "custom") continue;
 			if (entry.customType === "grill-deck-round") {
-				const d = entry.data as RoundRecord;
-				if (d && Array.isArray(d.questions)) rounds.push({ ...d });
+				const record = parseRoundRecord(entry.data);
+				if (record) rounds.push(record);
 			} else if (entry.customType === "grill-deck-revision") {
-				const d = entry.data as { round: number; answers: DeckAnswer[] };
+				const d: unknown = entry.data;
+				if (!isPlainObject(d)) continue;
+				if (typeof d.round !== "number" || !Number.isInteger(d.round) || d.round < 1) continue;
+				if (!Array.isArray(d.answers)) continue;
+				const answers: DeckAnswer[] = [];
+				for (const a of d.answers) {
+					const parsed = parseAnswer(a);
+					if (parsed) answers.push(parsed);
+				}
 				const rec = rounds.find((r) => r.round === d.round);
-				if (rec && Array.isArray(d.answers)) rec.answers = d.answers;
+				if (rec) rec.answers = answers;
 			}
 		}
 	}
@@ -555,13 +520,23 @@ export default function grillDeck(pi: ExtensionAPI) {
 		parameters: GrillDeckParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const questions = (params.questions ?? []).map((q, i) => ({
-				id: q.id || `Q${i + 1}`,
-				title: q.title,
-				body: q.body,
-				choices: q.choices,
-				recommendation: q.recommendation,
-			}));
+			const raw = params.questions ?? [];
+			if (raw.length > MAX_QUESTIONS) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Too many questions (${raw.length}). A deck is one screen — send at most ${MAX_QUESTIONS} per call; keep the rest for a later round.`,
+						},
+					],
+					details: { cancelled: true },
+				};
+			}
+			const questions = raw.map((q, i) => {
+				const sanitized = sanitizeQuestion(q);
+				if (!sanitized.id) sanitized.id = `Q${i + 1}`;
+				return sanitized;
+			});
 
 			if (ctx.mode !== "tui") {
 				return {
@@ -604,7 +579,7 @@ export default function grillDeck(pi: ExtensionAPI) {
 			const round = rounds.length + 1;
 			const record: RoundRecord = {
 				round,
-				topic: params.topic,
+				topic: params.topic == null ? undefined : clean(params.topic),
 				questions,
 				answers: outcome.answers,
 			};
@@ -619,8 +594,9 @@ export default function grillDeck(pi: ExtensionAPI) {
 		},
 
 		renderCall(args, theme, _context) {
-			const qs = ((args as { questions?: DeckQuestion[] } | undefined)?.questions ?? []) as DeckQuestion[];
-			const topic = (args as { topic?: string } | undefined)?.topic;
+			const rawArgs: Record<string, unknown> = isPlainObject(args) ? args : {};
+			const qs = Array.isArray(rawArgs.questions) ? rawArgs.questions : [];
+			const topic = typeof rawArgs.topic === "string" ? truncatePlain(clean(rawArgs.topic), 80) : undefined;
 			let text = theme.fg("toolTitle", theme.bold("grill_deck "));
 			text += theme.fg("muted", `${qs.length} question${qs.length === 1 ? "" : "s"}`);
 			if (topic) text += theme.fg("dim", ` — ${topic}`);

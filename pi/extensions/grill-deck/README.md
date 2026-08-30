@@ -13,13 +13,13 @@ of questions (checklists, requirement gathering, triage).
 ## Install
 
 ```bash
-pi install npm:pi-grill-deck@1.0.0
+pi install npm:@evreke/pi-grill-deck@1.3.1
 ```
 
 or project-scoped (shared with your team via `.pi/settings.json`):
 
 ```bash
-pi install -l npm:pi-grill-deck@1.0.0
+pi install -l npm:@evreke/pi-grill-deck@1.3.1
 ```
 
 New sessions pick it up automatically; `/reload` hot-loads it into the current one.
@@ -31,7 +31,7 @@ replaced by the deck — every question of the round on one screen, the focused
 one expanded with the agent's recommendation:
 
 ```
- grill deck · 5 questions · 1 answered
+ grill deck · 5 questions · 1 answered · model-authored — verify before accepting
 ─────────────────────────────────────
   ✓ Q1 Scope: what does 'PR review format' actually cover?
         (a) + (b) + (c) — description template…
@@ -78,7 +78,8 @@ understanding and wait for the user's confirmation before acting.
 ## Skills included
 
 This package bundles two skills from **[mattpocock/skills](https://github.com/mattpocock/skills)**
-(MIT — see [ATTRIBUTION.md](./ATTRIBUTION.md)), copied verbatim:
+(MIT — see [ATTRIBUTION.md](./ATTRIBUTION.md)), copied verbatim from a pinned
+upstream commit:
 
 - **`grilling`** — the interview methodology: map decisions as a design tree,
   work the frontier in rounds, dispatch sub-agents for facts, don't act until
@@ -89,16 +90,39 @@ Together with the bundled `grill_deck` tool this gives you the complete
 workflow out of one install: the skill drives *what* to ask and in which
 order, the tool presents each round as an interactive deck. The tool's prompt
 guidelines tell the model to use the deck for grilling rounds — the skill text
-stays untouched, so upstream updates remain a verbatim re-copy.
+stays untouched at the pinned snapshot; to update, re-copy from a chosen
+upstream commit (upstream `main` has moved ahead of the pin).
 
-If you already installed the skills separately (e.g. via
-`setup-matt-pocock-skills`), disable the duplicate copy with `pi config`.
+**Skill collisions:** pi discovers skills in order — agent
+(`~/.pi/agent/skills/`, `~/.agents/skills/`), then project, then packages —
+and on a name collision warns and keeps the **first** skill found. So if you
+already installed `grilling`/`grill-me` globally (e.g. straight from
+`mattpocock/skills`), your copies win and the bundled ones are skipped (you'll
+see a collision note at startup). That is safe by design: the bundled copies
+are a pinned fallback for users who have neither, and can never override
+yours. You can toggle package resources explicitly with `pi config`.
+
+## Trust & security
+
+Everything inside a deck — question text, choices, recommendations — is
+authored by the model. It is rendered as-is except for terminal escape
+sequences, which are stripped so they can't spoof UI state or touch your
+clipboard, and the deck header reminds you to verify before accepting.
+Rounds are capped at 32 questions / 2,000-character fields, and data replayed
+from the session file is validated before it reaches the UI or the model.
+The full security audit is maintained in the development repository.
 
 ## How it works
 
 Each submitted round is appended to the pi session as a custom entry
 (`grill-deck-round`, revisions as `grill-deck-revision`) and rebuilt on
 `session_start` — state survives `/compact`, `/resume`, and restarts.
+
+## Development
+
+Pure logic (sanitization, session-replay validation, answer formatting) lives
+in `lib.ts`, unit-tested with `npm test` (Vitest). `REGRESSION.md` documents
+the interactive TUI checklist to run before a release.
 
 ## Docs
 

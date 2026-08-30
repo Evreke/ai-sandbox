@@ -6,7 +6,7 @@ pattern with a structured TUI: the agent hands all questions of a round to
 one tool, you answer them in a single screen, and the agent gets clean
 structured answers back.
 
-Built for [grilling](../../skills/grilling/SKILL.md)-style sessions —
+Built for [grilling](./skills/grilling/SKILL.md)-style sessions —
 design-tree interviews where each round presents the whole *frontier* of
 askable questions — but it works for any batch of questions (checklists,
 requirement gathering, triage).
@@ -21,7 +21,8 @@ When the agent starts a round, the editor is replaced by the deck:
 
 ```
 ───────────────────────────────────────────────────────────────
- grill deck · 5 questions · 1 answered
+ grill deck · 5 questions · 1 answered · model-authored — verify before
+ accepting
 ───────────────────────────────────────────────────────────────
   ✓ Q1 Scope: what does 'PR review format' actually cover?
         (a) + (b) + (c) — description template, comment conv…
@@ -141,16 +142,16 @@ the user's confirmation before acting on it**.
 
 ```bash
 # from the enterprise npm registry (user scope)
-pi install npm:pi-grill-deck@1.0.0
+pi install npm:@evreke/pi-grill-deck@1.3.1
 
 # or project scope, shared with your team via .pi/settings.json
-pi install -l npm:pi-grill-deck@1.0.0
+pi install -l npm:@evreke/pi-grill-deck@1.3.1
 
 # update
-pi update npm:pi-grill-deck
+pi update npm:@evreke/pi-grill-deck
 
 # uninstall
-pi remove npm:pi-grill-deck
+pi remove npm:@evreke/pi-grill-deck
 ```
 
 Manual install (no registry) — copy the package files into the global
