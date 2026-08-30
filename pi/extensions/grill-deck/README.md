@@ -43,24 +43,20 @@ one expanded with the agent's recommendation:
 
 Answer with single keystrokes, submit, and the agent recomputes the frontier
 and opens the next deck. Deferred questions stay visibly open in the design
-tree and come back in a later round. A progress widget lives above your editor:
-
-```
-⚑ grill: 2 rounds · settled 12 · deferred 1 (Q3) · /grill to review
-```
+tree and come back in a later round.
 
 ### Keys
 
 | Key | Action |
 |---|---|
 | `↑` `↓` | move between questions |
-| `Enter` | **accept the recommendation** (opens options when there is none or to revise) |
-| `Space` | open the options view (browse choices, custom, defer) |
+| `Enter` | open the options view — recommendation pre-highlighted as option 1 |
+| `a` | accept the recommendation (quick path, no options view) |
 | `A` | accept **all** recommendations at once |
 | `1`–`9` | pick a numbered option (in options view) |
 | `e` | write a custom answer (free text, saved verbatim) |
 | `s` | defer — keep the question open for a later round |
-| `ctrl+s` | submit the round |
+| `ctrl+s` | submit manually — a fresh deck also auto-submits once every question is answered or deferred (a `/grill` revision session always uses `ctrl+s` so several answers can be changed first) |
 | `Esc` | cancel the deck |
 
 `/grill` reopens the last deck with answers prefilled for review/revision.

@@ -7,11 +7,13 @@
  *
  *   ↑↓ move between questions
  *   Enter      expand focused question into its options
+ *              (recommendation pre-highlighted as option 1)
  *   a          accept the recommendation (quick path)
  *   A          accept ALL recommendations at once
  *   e          write a custom answer
  *   s          defer — keep the question open for a later round
- *   ctrl+s     submit the round (every question answered or deferred)
+ *   ctrl+s     submit the round (also submits automatically once every
+ *              question is answered or deferred)
  *   Esc        cancel the deck
  *
  * The tool returns structured answers to the model, so there is no parsing of
@@ -19,8 +21,7 @@
  *
  * State: each submitted round is persisted as a session entry
  * ("grill-deck-round", revisions as "grill-deck-revision"), rebuilt on
- * session_start. A widget above the editor shows live progress, and
- * `/grill` reopens the last deck to review/revise answers.
+ * session_start. `/grill` reopens the last deck to review/revise answers.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -76,25 +77,6 @@ function truncatePlain(s: string, max: number): string {
 	return s.length <= max ? s : s.slice(0, Math.max(0, max - 1)) + "…";
 }
 
-function updateWidget(ctx: ExtensionContext): void {
-	if (ctx.mode !== "tui") return;
-	if (rounds.length === 0) {
-		ctx.ui.setWidget("grill-deck", undefined);
-		return;
-	}
-	const all = rounds.flatMap((r) => r.answers);
-	const deferred = all.filter((a) => a.kind === "deferred");
-	const settled = all.length - deferred.length;
-	const last = rounds[rounds.length - 1];
-	const line =
-		`⚑ grill: ${rounds.length} round${rounds.length === 1 ? "" : "s"}` +
-		` · settled ${settled}` +
-		` · deferred ${deferred.length}` +
-		(deferred.length > 0 ? ` (${deferred.map((a) => a.id).join(", ")})` : "") +
-		` · last R${last.round}: ${last.topic ?? "untitled"} · /grill to review`;
-	ctx.ui.setWidget("grill-deck", [line]);
-}
-
 interface DeckOutcome {
 	cancelled: boolean;
 	answers: DeckAnswer[];
@@ -140,6 +122,7 @@ function openDeck(
 			mode = "list";
 			advance();
 			refresh();
+			maybeAutoSubmit();
 		};
 
 		function refresh() {
@@ -198,6 +181,7 @@ function openDeck(
 			mode = "list";
 			advance();
 			refresh();
+			maybeAutoSubmit();
 		}
 
 		function acceptOne(q: DeckQuestion) {
@@ -210,6 +194,7 @@ function openDeck(
 			statusMsg = "";
 			advance();
 			refresh();
+			maybeAutoSubmit();
 		}
 
 		function acceptAll() {
@@ -222,6 +207,7 @@ function openDeck(
 			}
 			statusMsg = n > 0 ? `Accepted ${n} recommendation${n === 1 ? "" : "s"}` : "Nothing new to accept";
 			refresh();
+			maybeAutoSubmit();
 		}
 
 		function unanswered(): DeckQuestion[] {
@@ -236,6 +222,14 @@ function openDeck(
 				return;
 			}
 			done({ cancelled: false, answers: questions.map((q) => answers.get(q.id)!) });
+		}
+
+		// Fresh decks auto-submit once everything is settled. Revision decks
+		// (/grill with nothing open) keep ctrl+s so several answers can be
+		// changed before re-submitting.
+		const hadOpenAtStart = unanswered().length > 0;
+		function maybeAutoSubmit() {
+			if (hadOpenAtStart && unanswered().length === 0) submit();
 		}
 
 		function handleInput(data: string) {
@@ -302,22 +296,10 @@ function openDeck(
 				refresh();
 				return;
 			}
-			if (matchesKey(data, Key.enter)) {
-				const q = currentQ();
-				if (!q) return;
-				if (q.recommendation && !answers.has(q.id)) {
-					// Dominant action: Enter accepts the recommendation outright.
-					acceptOne(q);
-				} else {
-					// No recommendation (or revisiting an answered question):
-					// open the options view, pre-highlighting the current answer.
-					mode = "expand";
-					optCursor = optionIndexForCurrentAnswer(q);
-					refresh();
-				}
-				return;
-			}
-			if (data === " " || data === "o") {
+			// Enter (or hidden Space/o alias) opens the options view with the
+			// recommendation — or the current answer — pre-highlighted. Quick
+			// accept lives on 'a' / 'A'.
+			if (matchesKey(data, Key.enter) || data === " " || data === "o") {
 				const q = currentQ();
 				if (!q) return;
 				mode = "expand";
@@ -352,6 +334,7 @@ function openDeck(
 					statusMsg = "";
 					advance();
 					refresh();
+					maybeAutoSubmit();
 				}
 				return;
 			}
@@ -459,7 +442,7 @@ function openDeck(
 					? "↑↓ or 1-9 option · Enter select · Esc back"
 					: mode === "input"
 						? "Enter save answer · Esc back"
-						: "↑↓ move · Enter accept rec · Space options · A accept all · e write · s defer · ctrl+s submit · Esc cancel";
+						: "↑↓ move · Enter options · a accept rec · A accept all · e write · s defer · ctrl+s submit · Esc cancel";
 			addWrappedWithPrefix(lines, " ", theme.fg("dim", help), w);
 			lines.push(theme.fg("accent", "─".repeat(w)));
 
@@ -505,7 +488,6 @@ export default function grillDeck(pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		replayFromSession(ctx);
-		updateWidget(ctx);
 	});
 
 	pi.registerTool({
@@ -585,7 +567,6 @@ export default function grillDeck(pi: ExtensionAPI) {
 			};
 			rounds.push(record);
 			pi.appendEntry("grill-deck-round", record);
-			updateWidget(ctx);
 
 			return {
 				content: [{ type: "text", text: answersToText(round, questions, outcome.answers) }],
@@ -643,7 +624,6 @@ export default function grillDeck(pi: ExtensionAPI) {
 			last.answers = outcome.answers;
 			last.revised = true;
 			pi.appendEntry("grill-deck-revision", { round: last.round, answers: last.answers });
-			updateWidget(ctx);
 			pi.sendUserMessage(
 				`Revised answers for grill deck round ${last.round}:\n${answersToText(last.round, last.questions, last.answers)}`,
 			);

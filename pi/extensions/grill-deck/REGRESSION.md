@@ -24,14 +24,16 @@ paths to installed pi packages) as the type gate.
 
 | # | Steps | Expect |
 |---|---|---|
-| R1 | Prompt: call `grill_deck` with 3 questions, each with recommendation + 2 choices. Keys: `a`, `A`, `ctrl+s` | Header shows `model-authored — verify before accepting`; `Accepted N recommendations`; tool result `✓ Q1–Q3`; widget `⚑ grill: 1 round · settled 3 · deferred 0` |
-| R2 | 3 questions, Q2 without recommendation/choices. Keys: `s` (defer Q1), `enter` (Q2 → options view), `1` (custom), type text, `enter`, `a` (Q3), `ctrl+s` | Options view shows only custom+defer for Q2; result has DEFERRED / user-wrote / accepted lines; widget `settled 5 · deferred 1 (Q1)` |
-| R3 | New deck, then `esc` | "User cancelled the question deck. Do not immediately re-ask…" and the model doesn't re-ask; widget unchanged; no round entry in session file |
+| R1 | Prompt: call `grill_deck` with 3 questions, each with recommendation + 2 choices. Keys: `a`, `A` (deck auto-submits after `A`) | Header shows `model-authored — verify before accepting`; `Accepted N recommendations`; tool result `✓ Q1–Q3`; no widget line above the editor |
+| R2 | 3 questions, Q2 without recommendation/choices. Keys: `s` (defer Q1), `enter` (Q2 → options view, single Enter), `1` (custom), type text, `enter`, `a` (Q3 → auto-submit) | Options view shows only custom+defer for Q2; result has DEFERRED / user-wrote / accepted lines |
+| R3 | New deck, then `esc` | "User cancelled the question deck. Do not immediately re-ask…" and the model doesn't re-ask; no round entry in session file |
 | R4 | Prompt: call with 40 questions | Tool result rejects: "Too many questions (40)…" — no deck opens |
-| R5 | `/grill`, change one answer, `ctrl+s` | Deck reopens with answers prefilled; model receives "Revised answers for grill deck round N"; widget recount correct |
+| R5 | `/grill`, change one answer, `ctrl+s` | Deck reopens with answers prefilled; model receives "Revised answers for grill deck round N" |
 | R6 | Prompt the model to embed `ESC[31m` + BEL (JSON `\u001b`/`\u0007`) in a title | Title renders as plain text; `herdr pane read --format ansi` shows only theme styling — no `\x1b[31m`, no `\x07` |
-| R7 | Exit pi, restart with `-c` (continue) | Widget rebuilt from session replay |
+| R7 | Exit pi, restart with `-c` (continue) | Round history rebuilt from session replay; `/grill` still reopens the last round; no widget |
 | R8 | Poison a session entry's payload: set one answer's `kind` to `"hax"`, lace another's `label` with `ESC[31m`, restart with `-c` | Invalid answer dropped from counts; label renders sanitized; no escape sequences at ANSI level |
+| R9 | Fresh deck, defer every question with `s`; last `s` auto-submits | Result all DEFERRED; no ctrl+s needed |
+| R10 | `/grill` on a fully-settled round, change nothing, `esc` | Deck does NOT auto-submit on open; "No changes" after revise-without-changes path stays intact |
 
 ## Post-flight
 

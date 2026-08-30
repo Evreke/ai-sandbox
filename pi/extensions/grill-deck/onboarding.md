@@ -34,7 +34,7 @@ When the agent starts a round, the editor is replaced by the deck:
   · Q5 Enforcement level: advisory, required template, or CI
     gate?
 
- ↑↓ move · Enter accept rec · Space options · A accept all · e
+ ↑↓ move · Enter options · a accept rec · A accept all · e
  write · s defer · ctrl+s submit · Esc cancel
 ───────────────────────────────────────────────────────────────
 ```
@@ -42,31 +42,23 @@ When the agent starts a round, the editor is replaced by the deck:
 - `✓` = answered · `·` = open · `⤳` = deferred (deliberately left open)
 - The focused question (`>`) shows its body and the agent's `➡️` recommendation
 - You cannot submit while questions are open — answer or defer each one
+- The deck submits itself as soon as the last question is settled — no `ctrl+s` needed (revision sessions via `/grill` submit with `ctrl+s`)
 
 ### Keys
 
 | Key | Action |
 |---|---|
 | `↑` `↓` | move between questions |
-| `Enter` | **accept the recommendation** — the dominant action; opens the options view when the question has no recommendation or is already answered |
-| `Space` | open the options view (browse choices, custom answer, defer) |
-| `a` | same as `Enter` on a recommended question (explicit quick-accept) |
+| `Enter` | open the options view — the recommendation (or current answer) is pre-highlighted as option 1 |
+| `a` | accept the recommendation (explicit quick-accept, skips the options view) |
 | `1`–`9` | pick a numbered option (in options view) |
 | `e` | write a custom answer (free text, saved verbatim) |
 | `s` | defer — keep the question open for a later round |
-| `ctrl+s` | submit the round |
+| `ctrl+s` | submit manually — a fresh deck auto-submits once everything is answered or deferred; `/grill` revision sessions submit with `ctrl+s` |
 | `Esc` | cancel the deck (or leave the options/input view) |
 
 In expanded view you always get, in order: **★ accept recommendation**, the
 agent's choices, **✎ write a custom answer**, **⤳ defer**.
-
-### The widget
-
-After each submitted round a progress line appears above the editor:
-
-```
-⚑ grill: 2 rounds · settled 12 · deferred 1 (Q3) · last R2: PR review format — /grill to review
-```
 
 ### Reviewing or changing answers
 
@@ -133,8 +125,6 @@ the user's confirmation before acting on it**.
   entry (`grill-deck-round`; revisions as `grill-deck-revision`). State is
   rebuilt from the session on `session_start`, so it survives `/compact`,
   `/resume`, and restarts.
-- **Widget** — rendered via `ctx.ui.setWidget("grill-deck", …)`; the `/grill`
-  command reopens the last round via the same deck component.
 - **UI** — a `ctx.ui.custom()` component (pattern from the pi
   `questionnaire.ts` example); the embedded editor handles custom answers.
 
@@ -174,5 +164,4 @@ tool twice.
 |---|---|
 | Agent prints markdown questions instead of opening the deck | Tell it: "present every round through the grill_deck tool in a single call" |
 | `grill_deck 0 questions` flashes in the transcript | Cosmetic — the call header renders while arguments stream in |
-| No widget after a round | Widget needs TUI mode; check you're not in `--mode json`/`-p` |
 | Herdr automation: keys don't type text | `herdr agent send-keys` takes logical keys only (`a`, `enter`, `ctrl+s`); raw text goes through `herdr pane send-text <pane> "…"` |
