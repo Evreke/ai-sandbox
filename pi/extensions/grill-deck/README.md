@@ -13,13 +13,13 @@ of questions (checklists, requirement gathering, triage).
 ## Install
 
 ```bash
-pi install npm:@evreke/pi-grill-deck@1.3.1
+pi install npm:@evreke/pi-grill-deck
 ```
 
 or project-scoped (shared with your team via `.pi/settings.json`):
 
 ```bash
-pi install -l npm:@evreke/pi-grill-deck@1.3.1
+pi install -l npm:@evreke/pi-grill-deck
 ```
 
 New sessions pick it up automatically; `/reload` hot-loads it into the current one.
