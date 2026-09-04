@@ -373,9 +373,21 @@ function openDeck(
 			const answeredCount = questions.length - unanswered().length;
 
 			lines.push(theme.fg("accent", "─".repeat(w)));
+			// BUG_FIX_CONTEXT: header was pushed as a single untruncated line; on
+			// narrow terminals (e.g. 63 cols) its visible width (~81) exceeded the
+			// terminal width and pi's TUI doRender safety check crashed the whole UI
+			// ("Rendered line exceeds terminal width"). Symptom: TUI death on deck
+			// open in a narrow pane. Old code had no wrapping for this line, unlike
+			// all other content that went through wrapTextWithAnsi. Fix: wrap the
+			// header so overflow flows to a continuation line instead of crashing;
+			// wrapTextWithAnsi preserves ANSI styling across wrapped lines, so no
+			// text or color is lost (truncation would have dropped the suffix).
 			lines.push(
-				theme.fg("accent", theme.bold(` grill deck · ${questions.length} questions · ${answeredCount} answered `)) +
-					theme.fg("dim", "· model-authored — verify before accepting"),
+				...wrapTextWithAnsi(
+					theme.fg("accent", theme.bold(` grill deck · ${questions.length} questions · ${answeredCount} answered `)) +
+						theme.fg("dim", "· model-authored — verify before accepting"),
+					w,
+				),
 			);
 			lines.push(theme.fg("accent", "─".repeat(w)));
 
