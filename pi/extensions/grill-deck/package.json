@@ -1,6 +1,6 @@
 {
   "name": "@evreke/pi-grill-deck",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Interactive question deck for pi — grill the user round by round: all questions of a frontier in one TUI, recommendation fast-accept, defer, structured answers back to the model.",
   "keywords": [
     "pi-package",
