@@ -435,14 +435,17 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				// v1.5 (DESIGN.md §17): record the resolved-schema provenance as a plain
 				// JSON manifest key — ManifestWorker now declares the field (quality fix
 				// A7), so the entry type-checks without a cast.
+				// The E_TIER guard above guarantees provider/model/thinking are defined
+				// here (missing keys fail fast before spawn) — TS can't narrow through
+				// the filter, so assert with a comment instead of falsifying data.
 				const manifestEntry: ManifestWorker = {
 					name: params.name,
 					placement,
 					briefPath,
 					reportPath,
-					provider,
-					model,
-					thinking,
+					provider: provider as string,
+					model: model as string,
+					thinking: thinking as string,
 					startedAt: startedAtDate.toISOString(),
 					schemaProvenance,
 				};
@@ -465,9 +468,9 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				start = await transport.startAgent({
 					name: params.name,
 					paneId: placement.paneId,
-					provider,
-					model,
-					thinking,
+					provider: provider as string,
+					model: model as string,
+					thinking: thinking as string,
 					extraArgs: params.extraArgs,
 					timeoutMs: START_TIMEOUT_MS,
 				});
@@ -509,8 +512,9 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 					const tierMatch = briefText.match(/frontier tier|flash tier|execution tier/i);
 					if (tierMatch) {
 						const declared = /frontier/i.test(tierMatch[0]) ? "frontier" : "flash";
-						const ok = declared === "frontier" ? /frontier/i.test(model) : /flash|glm/i.test(model);
-						if (!ok) tierWarning = `brief declares ${declared} tier but worker runs ${model} — tier mismatch`;
+						const modelStr = model as string; // guaranteed by the E_TIER guard above
+						const ok = declared === "frontier" ? /frontier/i.test(modelStr) : /flash|glm/i.test(modelStr);
+						if (!ok) tierWarning = `brief declares ${declared} tier but worker runs ${modelStr} — tier mismatch`;
 					}
 				} catch {
 					// unreadable brief → guard is advisory, never blocks the run
