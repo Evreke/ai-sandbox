@@ -830,7 +830,35 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				timeoutMs,
 			});
 			let lastBeat = 0;
+			// v1.9b (§20.2): a mailbox question must interrupt the wait IMMEDIATELY —
+			// a worker that asks and then keeps "working" (poll loop / sleep while
+			// waiting for the answer) never settles, and the question check used to
+			// run only post-settle, burning the whole wait budget (field: 1500 s).
+			// The internal controller aborts the WAIT (never the worker) the moment
+			// a question file appears; the flow then routes to AWAITING_ANSWER.
+			const settleAbort = new AbortController();
+			const onExternalAbort = () => settleAbort.abort();
+			if (signal) {
+				if (signal.aborted) settleAbort.abort();
+				else signal.addEventListener("abort", onExternalAbort, { once: true });
+			}
+			let questionDetected = false;
+			const checkMailboxQuestion = (): boolean => {
+				if (questionDetected) return true;
+				try {
+					const q = readQuestion(questionPathFor(manifestDir, canonical));
+					if (q) {
+						questionDetected = true;
+						settleAbort.abort();
+						return true;
+					}
+				} catch {
+					/* advisory — a failed read never interrupts the wait */
+				}
+				return false;
+			};
 			const onPoll = (info: { status: AgentStatusName; started: boolean; elapsedMs: number }) => {
+				if (checkMailboxQuestion()) return;
 				const now = Date.now();
 				if (now - lastBeat < 10_000) return;
 				lastBeat = now;
@@ -862,7 +890,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			};
 			let settle;
 			try {
-				settle = await transport.waitSettle({ name: canonical, timeoutMs, signal, onPoll, proofSettled: settleProof });
+				settle = await transport.waitSettle({ name: canonical, timeoutMs, signal: settleAbort.signal, onPoll, proofSettled: settleProof });
 			} catch (err) {
 				if (signal?.aborted) return detach();
 				const b = gaugeSummary();
@@ -986,6 +1014,12 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			}
 
 			if (settle.timedOut) {
+				// v1.9b: a question pending even at timeout outranks E_TIMEOUT — the
+				// orchestrator's next action is answering, not retrying.
+				const timedOutQuestion = readQuestion(questionPathFor(manifestDir, canonical));
+				if (timedOutQuestion) {
+					questionDetected = true;
+				} else {
 				// E_TIMEOUT: not a spawn failure — the worker is simply still running
 				// (or its state is unknown: it may have exited / herdr is unreachable).
 				const statusLine =
@@ -1008,6 +1042,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 						...b.details,
 					},
 				);
+				}
 			}
 
 			// 7. Post-settle completion — ONE unified grace loop covering both the
