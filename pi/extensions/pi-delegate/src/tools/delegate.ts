@@ -43,6 +43,7 @@ import {
 	parseSessionUsage,
 	resolveContextWindow,
 	resolvePiSessionCandidates,
+	resolveSpawnDefaults,
 } from "../usage.ts";
 import { archiveReport } from "../archive.ts";
 import { notifyFleetIdle, renderDelegateLines } from "../ui/fleet-ui.ts";
@@ -101,9 +102,9 @@ const delegateParams = Type.Object({
 	repoPath: Type.Optional(Type.String({ description: "Repo to place the worker in (default session cwd)" })),
 	branch: Type.Optional(Type.String({ description: "Worktree branch (default delegate/<name>)" })),
 	base: Type.Optional(Type.String({ description: "Base ref for worktree placement (default HEAD)" })),
-	provider: Type.Optional(Type.String({ description: "Agent provider (default llm-platform-alpha)" })),
-	model: Type.Optional(Type.String({ description: "Agent model (default glm-5.3-flash)" })),
-	thinking: Type.Optional(Type.String({ description: "Thinking level (default high)" })),
+	provider: Type.Optional(Type.String({ description: "Agent provider (default: defaults.provider in ~/.pi/agent/pi-delegate.config.json, else llm-platform-alpha)" })),
+	model: Type.Optional(Type.String({ description: "Agent model (default: defaults.model in config, else glm-5.3-flash)" })),
+	thinking: Type.Optional(Type.String({ description: "Thinking level (default: defaults.thinking in config, else high)" })),
 	timeoutMs: Type.Optional(Type.Number({ description: "Settle timeout in ms (default 900000; probe 120000)" })),
 	budgetTokens: Type.Optional(Type.Number({ minimum: 1, description: "Optional OUTPUT-token cap (sum of assistant output); over-budget workers are refused on retry with E_BUDGET." })),
 	maxContextPct: Type.Optional(Type.Number({ minimum: 10, maximum: 99, description: "Context-window %% refusal line (default 80 — the operator restart habit). Re-spawning a worker at/over this context %% is refused with E_CONTEXT." })),
@@ -233,9 +234,12 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			const startedAtDate = new Date();
 			const isProbe = params.mode === "probe";
 			const timeoutMs = params.timeoutMs ?? (isProbe ? PROBE_TIMEOUT_MS : 900_000);
-			const provider = params.provider ?? "llm-platform-alpha";
-			const model = params.model ?? "glm-5.3-flash";
-			const thinking = params.thinking ?? "high";
+			// v1.9.1: spawn tier resolves explicit param → config default
+			// (~/.pi/agent/pi-delegate.config.json {"defaults": {…}}) → built-in.
+			const spawnDefaults = resolveSpawnDefaults();
+			const provider = params.provider ?? spawnDefaults.provider ?? "llm-platform-alpha";
+			const model = params.model ?? spawnDefaults.model ?? "glm-5.3-flash";
+			const thinking = params.thinking ?? spawnDefaults.thinking ?? "high";
 			const mode = params.mode ?? "worktree";
 			// Probe is not a placement mode: it uses the cheapest real placement (tab).
 			const placementMode: PlacementMode = mode === "probe" ? "tab" : mode;
@@ -272,7 +276,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			// recorded session tripped EITHER gauge — context % (primary, pi's own
 			// formula) or output budget (secondary, when set).
 			const maxPct = params.maxContextPct ?? CONTEXT_WARN_PCT;
-			const contextWindow = resolveContextWindow(params.model);
+			const contextWindow = resolveContextWindow(model);
 			const priorWorker = readManifest(manifestDir)?.workers.find(
 				(w) => w.name === params.name && typeof w.sessionPath === "string" && w.sessionPath.length > 0,
 			);

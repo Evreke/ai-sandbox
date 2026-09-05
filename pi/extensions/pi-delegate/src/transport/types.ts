@@ -219,7 +219,9 @@ export const DEFAULT_CONTEXT_WINDOW = 250_100;
 export const DEFAULT_BUDGET_TOKENS = 150_000;
 
 /** Config file location: ~/.pi/agent/pi-delegate.config.json,
- *  shape {"defaults": {"budgetTokens": number}}. Missing/corrupt → fallback. */
+ *  shape {"contextWindow": number, "defaults": {"budgetTokens": number,
+ *  "provider": string, "model": string, "thinking": string}}.
+ *  Missing/corrupt → fallbacks (per key). */
 export const BUDGET_CONFIG_PATH = ".pi/agent/pi-delegate.config.json";
 
 /** Fraction of budget above which terminal results carry a burn warning. */

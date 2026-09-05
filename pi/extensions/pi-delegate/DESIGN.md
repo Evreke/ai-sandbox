@@ -30,7 +30,7 @@ overlay (#5).
 | Transport | Thin `Transport` interface; herdr is impl #1 |
 | Code home | Local-only git repo `/root/projects/pi-delegate`; symlinked to `~/.pi/agent/extensions/pi-delegate/` |
 | DoD | Design approved → live end-to-end demo: extension spawns a real worker that completes a task |
-| Worker model | `--provider llm-platform-alpha --model glm-5.3-flash` (user override of default tier table, 2026-09-05) |
+| Worker model | `--provider llm-platform-alpha --model glm-5.3-flash` built-in; per-run override via ~/.pi/agent/pi-delegate.config.json `{"defaults": {"provider", "model", "thinking"}}` (v1.9.1) or explicit tool params (user override of default tier table, 2026-09-05) |
 | Call semantics | `delegate` **blocks** until worker settles; Esc detaches (worker keeps running, recoverable via `delegate_status`); fan-out = parallel tool calls |
 | Report contract | **Strict**: fixed JSON schema enforced by the tool on collect (format chosen by tech lead: JSON over XML — native model emission, trivial validation) |
 | Placement modes | `worktree` + `tab` only; pane splits cut (leaky geometry, no isolation; sub-orchestrator tab support is the valuable half) |
@@ -109,9 +109,9 @@ Parameters (typebox):
 | `repoPath` | string | cwd | base for worktree/tab placement |
 | `branch` | string | `delegate/<name>` | worktree branch name |
 | `base` | string | HEAD | non-HEAD base ref |
-| `provider` | string | `llm-platform-alpha` | |
-| `model` | string | `glm-5.3-flash` | |
-| `thinking` | string | `high` | |
+| `provider` | string | `defaults.provider` in config, else `llm-platform-alpha` | |
+| `model` | string | `defaults.model` in config, else `glm-5.3-flash` | |
+| `thinking` | string | `defaults.thinking` in config, else `high` | |
 | `timeoutMs` | number | 900000 | settle timeout for prompt (`agent wait`) |
 | `extraArgs` | string[] | `[]` | appended after `--` (e.g. `--session`) |
 

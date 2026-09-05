@@ -38,6 +38,7 @@ import {
 	overOutputBudget,
 	parseSessionUsage,
 	resolveContextWindow,
+	resolveSpawnDefaults,
 } from "../src/usage.ts";
 import { CONTEXT_WINDOWS, DEFAULT_CONTEXT_WINDOW } from "../src/transport/types.ts";
 
@@ -383,6 +384,76 @@ check(
 	formatBudgetLine({ ...zero, input: 999_999, cacheRead: 999_999, cacheWrite: 999_999 }, 150_000)
 		=== "budget 0% ↓0/150k",
 	formatBudgetLine({ ...zero, input: 999_999, cacheRead: 999_999, cacheWrite: 999_999 }, 150_000),
+);
+
+// ---------------------------------------------------------------------------
+// 7. resolveSpawnDefaults — worker tier config (v1.9.1), child-process with
+// $HOME set at spawn time (bun caches os.homedir(), same seam as section 2).
+// ---------------------------------------------------------------------------
+
+function spawnDefaultsInHome(configJson: string): unknown {
+	const home = mkdtempSync(join(tmpdir(), "usage-check-home-"));
+	const configDir = join(home, ".pi", "agent");
+	mkdirSync(configDir, { recursive: true });
+	if (configJson !== "") writeFileSync(join(configDir, "pi-delegate.config.json"), configJson);
+	const src = `import {resolveSpawnDefaults} from ${JSON.stringify(MOD)}; console.log(JSON.stringify(resolveSpawnDefaults()))`;
+	const res = spawnSync("bun", ["-e", src], { env: { ...process.env, HOME: home }, encoding: "utf8" });
+	rmSync(home, { recursive: true, force: true });
+	try {
+		return JSON.parse(res.stdout.toString().trim());
+	} catch {
+		return `SPAWN FAILED: ${res.stderr.toString().slice(0, 200)}`;
+	}
+}
+
+check(
+	"7a no config → all undefined",
+	JSON.stringify(spawnDefaultsInHome("")) === "{}",
+	JSON.stringify(spawnDefaultsInHome("")),
+);
+check(
+	"7b full defaults object → all three keys",
+	JSON.stringify(spawnDefaultsInHome(JSON.stringify({ defaults: { provider: "zai", model: "glm-5.3-flash", thinking: "medium" } })))
+		=== JSON.stringify({ provider: "zai", model: "glm-5.3-flash", thinking: "medium" }),
+	JSON.stringify(spawnDefaultsInHome(JSON.stringify({ defaults: { provider: "zai", model: "glm-5.3-flash", thinking: "medium" } }))),
+);
+check(
+	"7c partial defaults → only present keys",
+	JSON.stringify(spawnDefaultsInHome(JSON.stringify({ defaults: { provider: "zai" } }))) === JSON.stringify({ provider: "zai" }),
+	JSON.stringify(spawnDefaultsInHome(JSON.stringify({ defaults: { provider: "zai" } }))),
+);
+check(
+	"7d non-string values filtered",
+	JSON.stringify(spawnDefaultsInHome(JSON.stringify({ defaults: { provider: 42, model: null, thinking: true } }))) === "{}",
+	JSON.stringify(spawnDefaultsInHome(JSON.stringify({ defaults: { provider: 42, model: null, thinking: true } }))),
+);
+check(
+	"7e corrupt config → {} (never throws)",
+	JSON.stringify(spawnDefaultsInHome("not json{")) === "{}",
+	JSON.stringify(spawnDefaultsInHome("not json{")),
+);
+check(
+	"7f defaults not an object → {}",
+	JSON.stringify(spawnDefaultsInHome(JSON.stringify({ defaults: "zai" }))) === "{}",
+	JSON.stringify(spawnDefaultsInHome(JSON.stringify({ defaults: "zai" }))),
+);
+check(
+	"7g contextWindow key coexists (shared file)",
+	(() => {
+		const home = mkdtempSync(join(tmpdir(), "usage-check-home-"));
+		const configDir = join(home, ".pi", "agent");
+		mkdirSync(configDir, { recursive: true });
+		writeFileSync(
+			join(configDir, "pi-delegate.config.json"),
+			JSON.stringify({ contextWindow: 123456, defaults: { provider: "zai" } }),
+		);
+		const src =
+			`import {resolveContextWindow, resolveSpawnDefaults} from ${JSON.stringify(MOD)}; ` +
+			`console.log(JSON.stringify([resolveContextWindow(undefined), resolveSpawnDefaults()]))`;
+		const res = spawnSync("bun", ["-e", src], { env: { ...process.env, HOME: home }, encoding: "utf8" });
+		rmSync(home, { recursive: true, force: true });
+		return res.stdout.toString().trim() === JSON.stringify([123456, { provider: "zai" }]);
+	})(),
 );
 
 // ---------------------------------------------------------------------------

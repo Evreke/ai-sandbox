@@ -203,6 +203,31 @@ export function formatBudgetLine(usage: SessionUsage, budgetTokens?: number): st
 	return `budget ${pct}% ↓${fmtTokens(usage.output)}/${fmtTokens(budgetTokens)}`;
 }
 
+/**
+ * Worker spawn defaults (v1.9.1): optional
+ * `{"defaults": {"provider", "model", "thinking"}}` from
+ * ~/.pi/agent/pi-delegate.config.json — the same file as the contextWindow
+ * override (resolveContextWindow). Precedence in delegate: explicit tool
+ * param → config default → built-in tier (provider llm-platform-alpha,
+ * model glm-5.3-flash, thinking high). Tolerant: missing/corrupt/partial
+ * config → {} (never throws). NOTE: bun caches os.homedir() — tests must
+ * spawn a child process with $HOME set at spawn time (same as section 2).
+ */
+export function resolveSpawnDefaults(): { provider?: string; model?: string; thinking?: string } {
+	try {
+		const raw = readFileSync(join(homedir(), ".pi", "agent", "pi-delegate.config.json"), "utf8");
+		const cfg = JSON.parse(raw) as { defaults?: Record<string, unknown> };
+		const d = cfg.defaults;
+		const str = (v: unknown): string | undefined =>
+			typeof v === "string" && v.trim().length > 0 ? v : undefined;
+		return d !== null && typeof d === "object"
+			? { provider: str(d.provider), model: str(d.model), thinking: str(d.thinking) }
+			: {};
+	} catch {
+		return {}; // no config / corrupt config → built-in defaults, never throw
+	}
+}
+
 /** k-scaled token count (1-decimal under 100, integer above). */
 function fmtTokens(n: number): string {
 	if (n < 1000) return String(n);
