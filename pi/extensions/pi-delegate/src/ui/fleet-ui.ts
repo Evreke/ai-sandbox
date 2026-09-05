@@ -25,7 +25,7 @@ import type {
 	Theme,
 	ThemeColor,
 } from "@earendil-works/pi-coding-agent";
-import { fmtK, trunc } from "./text.ts";
+import { fmtK, trunc, visibleWidth } from "./text.ts";
 
 /** Data the UI needs per worker — supplied by the caller (state.ts + usage.ts). */
 export interface FleetRow {
@@ -134,7 +134,7 @@ export function mountFleetUI(ctx: ExtensionContext, deps: FleetUIDeps): () => vo
 	const showChip = (): void => {
 		ctx.ui.setWidget(
 			CHIP_KEY,
-			(_tui, theme) => ({
+			(tui, theme) => ({
 				invalidate: () => {},
 				render: () => {
 					const n = deps.getPlacedCount();
@@ -143,7 +143,13 @@ export function mountFleetUI(ctx: ExtensionContext, deps: FleetUIDeps): () => vo
 						(acc, r) => (typeof r.budgetPct === "number" && r.budgetPct > acc ? r.budgetPct : acc),
 						0,
 					);
-					return [theme.fg("accent", `⏵ ${n} placed workers · worst ctx burn ${worst}% · /delegate-fleet`)];
+					const line = `⏵ ${n} placed workers · worst ctx burn ${worst}% · /delegate-fleet`;
+					// Right-align to the terminal width when it is discoverable.
+					const cols = (tui as { terminal?: { columns?: number } } | undefined)?.terminal?.columns;
+					if (typeof cols === "number" && cols > visibleWidth(line) + 2) {
+						return [theme.fg("accent", " ".repeat(cols - visibleWidth(line)) + line)];
+					}
+					return [theme.fg("accent", line)];
 				},
 			}),
 			{ placement: "belowEditor" },
