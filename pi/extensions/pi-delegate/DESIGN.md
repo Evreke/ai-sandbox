@@ -408,8 +408,10 @@ archived tasks ("last task: <task> — N archived reports — ~/.pi/agent/delega
   no live workers remain, but the 2 s interval KEEPS RUNNING while idle (only
   dispose clears it) so the widget can re-mount on the next spawn without
   re-registering a timer.
-- **Footer chip** (`ctx.ui.setFooter`): `⏵ N workers · worst burn P% · /delegate-fleet`
-  (always present when extension loaded and N>0; discoverability for the overlay).
+- **Placed-chip widget** (`setWidget`, belowEditor — NOT `ctx.ui.setFooter`, which
+  REPLACES pi's native footer (context %, model, cost, cwd): rejected 2026-09-05
+  after it killed the native footer in the field): `⏵ N workers · worst ctx burn P% ·
+  /delegate-fleet`; clears at N=0; discoverability for the overlay.
 - **renderCall/renderResult** for delegate + delegate_status + delegate_mailbox:
   themed structured rendering — status-colored badges (E_* as warning/error),
   one-line verdict, herdr internals ONLY in collapsed details. Headline never
