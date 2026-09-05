@@ -24,6 +24,7 @@ const REFRESH_MS = 2000;
 /** Minimal structural slice of the TUI we need — avoids importing pi-tui. */
 interface RenderPoke {
 	requestRender(force?: boolean): void;
+	terminal?: { columns?: number; rows?: number };
 }
 
 export interface FleetDeps {
@@ -238,6 +239,7 @@ export function fitRow(content: string, innerW: number): string {
 
 class FleetOverlay {
 	private tui: RenderPoke | undefined;
+	private terminalRows: number | undefined;
 	private transport: Transport;
 	private theme: Theme;
 	private done: () => void;
@@ -248,6 +250,7 @@ class FleetOverlay {
 
 	constructor(tui: RenderPoke, transport: Transport, theme: Theme, done: () => void) {
 		this.tui = tui;
+		this.terminalRows = tui?.terminal?.rows;
 		this.transport = transport;
 		this.theme = theme;
 		this.done = done;
@@ -328,10 +331,21 @@ class FleetOverlay {
 			lines.push(row(` ${th.fg("dim", "no delegate workers known (no manifests under /tmp/exchange)")}`));
 		}
 
+		// Height fit (§15 fix): the box must never exceed the pane. Chrome =
+		// top border + header + blank + blank + legend + bottom border = 6 lines.
+		// Rows are pre-sorted blocked→working→idle→done→unknown, so the window
+		// keeps the most actionable workers visible; the rest collapse into an
+		// "... and N more" line.
+		const chromeLines = 6;
+		const maxVisible = Math.max(1, (this.terminalRows ?? 30) - chromeLines - 2);
+		const visibleRows = this.rows.slice(0, maxVisible);
+		const hiddenCount = this.rows.length - visibleRows.length;
+
 		// Column layout: name status branch report mail usage — fitted to innerW
-		// by the pure layoutFleetRows() (shrink priority + floors live there).
+		// by the pure layoutFleetRows() (shrink priority + floors live there),
+		// over the VISIBLE slice only.
 		const layout = layoutFleetRows(
-			this.rows.map((r) => ({
+			visibleRows.map((r) => ({
 				name: r.view.name,
 				branch: r.view.branch ?? "-",
 				input: r.input,
@@ -342,8 +356,8 @@ class FleetOverlay {
 			innerW,
 		);
 
-		for (let i = 0; i < this.rows.length; i++) {
-			const r = this.rows[i];
+		for (let i = 0; i < visibleRows.length; i++) {
+			const r = visibleRows[i];
 			const cell = layout.cells[i];
 			const name = th.fg("text", cell.name);
 			const status = th.fg(statusColor(r.view.status), pad7(r.view.status));
@@ -364,6 +378,13 @@ class FleetOverlay {
 			lines.push(row(` ${name} ${status} ${branch} ${report} ${mail}  ${usage}`));
 		}
 
+		if (hiddenCount > 0) {
+			lines.push(
+				row(
+					` ${th.fg("dim", trunc(`… and ${hiddenCount} more (trim the fleet: /delegate-teardown)`, innerW - 1))}`,
+				),
+			);
+		}
 		lines.push(row(""));
 		lines.push(
 			row(
