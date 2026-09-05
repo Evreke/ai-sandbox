@@ -199,6 +199,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			"delegate blocks until the worker settles; the worker's report file is the completion criterion, not the agent status — status fail in the report is still an honest completion.",
 			"If delegate returns E_REPORT_MISSING or E_REPORT_INVALID, do a diagnosed retry with root cause + fix shape (at most 2 repeats, then escalate); never repeat verbatim.",
 			"Run delegate once with mode 'probe' before any ≥3 fan-out — the probe is the smoke gate that catches dead panes and wrong model flags cheaply.",
+			"Probe workers NEVER write a report file — a 'probe OK/FAIL' result is final by itself; never wait for or read a probe's report-<name>.json (only real workers produce reports).",
 		],
 		parameters: delegateParams,
 		renderCall(args, theme: Theme) {
@@ -645,6 +646,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				void maybeNotifyFleetIdle();
 				return textResult(
 					`probe OK (detached after settle) — smoke gate passed before the abort (agent ${canonical}, smoke reply in session). ` +
+						"Probes write NO report file — this verdict is final; do not wait for or read report-<name>.json. " +
 						"Run one probe before any ≥3 fan-out." +
 						`${uniquified ? ` ${uniquified}` : ""}`,
 					{
@@ -761,7 +763,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 					return fail(
 						"E_START",
 						`probe FAIL — worker never started (prompt never consumed) for ${canonical}; ` +
-							"inspect via herdr agent read; do NOT fan out." +
+							"inspect via herdr agent read; do NOT fan out. Probes write no report file." +
 							`${uniquified ? ` ${uniquified}` : ""}` +
 							`${manifestWarning ? ` Warning: ${manifestWarning}` : ""}`,
 						{ probe: "fail", canonical, placement, neverStarted: true, elapsedMs },
@@ -777,7 +779,9 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				if (live === "idle" || live === "done") {
 					void maybeNotifyFleetIdle();
 					return textResult(
-						`probe OK — safe to fan out (agent ${canonical}, status ${live}). ${reminder}` +
+						`probe OK — safe to fan out (agent ${canonical}, status ${live}). ` +
+							"Probes write NO report file — this verdict is final; do not wait for or read report-<name>.json. " +
+							`${reminder}` +
 							`${uniquified ? ` ${uniquified}` : ""}` +
 							`${manifestWarning ? ` Warning: ${manifestWarning}` : ""}`,
 						{
@@ -796,7 +800,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 					"E_START",
 					`probe FAIL — agent ${canonical} status ${live}` +
 						`${settle.timedOut ? " (settle timed out)" : ""}: pane/agent did not reach a healthy state. ` +
-						"Check pane readiness and model flags (provider/model/thinking); fix before fanning out. " +
+						"Check pane readiness and model flags (provider/model/thinking); fix before fanning out. Probes write no report file. " +
 						`${reminder}${uniquified ? ` ${uniquified}` : ""}` +
 						`${manifestWarning ? ` Warning: ${manifestWarning}` : ""}`,
 					{ probe: "fail", canonical, placement, status: live, timedOut: settle.timedOut, elapsedMs },
