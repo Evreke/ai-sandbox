@@ -279,6 +279,7 @@ export class HerdrTransport implements Transport {
 		let last: AgentStatusName = "unknown";
 		let started = false;
 		let sessionPath: string | undefined;
+		let sessionLookupDone = false;
 		while (Date.now() < deadline) {
 			if (req.signal?.aborted) {
 				// Abort detaches the wait, never the worker (DESIGN.md §5.1).
@@ -302,15 +303,41 @@ export class HerdrTransport implements Transport {
 			}
 			if (status) last = status;
 			if (status && STARTED.includes(status)) started = true;
-			// v1.8: unexplained idle — prove life from the session before declaring
-			// the wait unstartable. Only reached while started is still false, so the
-			// normal flow never pays for the extra `agent get` + file read.
-			if (!started && status === "idle") {
-				if (sessionPath === undefined) {
+			// v1.8/v1.9: the start-up gate can never open when herdr never reports
+			// working/blocked/done for the worker. Two live shapes: herdr ages
+			// done→idle within minutes (§19.1b), and current builds never report
+			// working for pi workers at all — field 2026-09-05 (m03-search-
+			// investigation): three finished fan-out workers (reports on disk) kept
+			// their watchers spinning the FULL budget at status=idle/unknown, then
+			// false-reported neverStarted. Prove life out-of-band instead:
+			//   1. caller-owned completion proof (v1.9, §19.1c) — the report file for
+			//      THIS run (mtime after spawn) is the completion criterion (tool
+			//      contract); the proof is authoritative and exact per worker.
+			//   2. session-reply proof (v1.8, §19.1b) — an assistant message in the
+			//      worker's session JSONL proves the prompt was consumed.
+			// Only reached while started is still false, so a healthy wait never
+			// pays for the extra checks.
+			if (!started && (status === undefined || !STARTED.includes(status))) {
+				if (req.proofSettled) {
+					let proven = false;
+					try {
+						proven = await req.proofSettled();
+					} catch {
+						proven = false; // a throwing proof never blocks the wait
+					}
+					if (proven) {
+						req.onPoll?.({ status: status ?? "idle", started: true, elapsedMs: Date.now() - startedAt });
+						return { status: "idle", timedOut: false, finishedBeforeWatch: true };
+					}
+				}
+				if (sessionLookupDone === false) {
+					// Resolve once per wait: negative results are stable per herdr build
+					// (no agent_session in the result shape), positives are immutable.
+					sessionLookupDone = true;
 					sessionPath = await this.resolveSessionPath(req.name).catch(() => undefined);
 				}
 				if (sessionPath && sessionHasReply(sessionPath)) {
-					req.onPoll?.({ status: "idle", started: true, elapsedMs: Date.now() - startedAt });
+					req.onPoll?.({ status: status ?? "idle", started: true, elapsedMs: Date.now() - startedAt });
 					return { status: "idle", timedOut: false, finishedBeforeWatch: true };
 				}
 			}

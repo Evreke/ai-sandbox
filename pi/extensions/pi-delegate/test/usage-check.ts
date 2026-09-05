@@ -32,6 +32,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	contextPct,
+	formatBudgetLine,
 	formatGaugeLine,
 	overContext,
 	overOutputBudget,
@@ -347,6 +348,41 @@ check(
 	formatGaugeLine({ ...zero, input: 250_000, output: 150_000, lastTotalTokens: 240_000 }, DEFAULT_CONTEXT_WINDOW)
 		=== "ctx 96% ↑250k ↓150k",
 	formatGaugeLine({ ...zero, input: 250_000, output: 150_000, lastTotalTokens: 240_000 }, DEFAULT_CONTEXT_WINDOW),
+);
+
+// ---------------------------------------------------------------------------
+// 6. formatBudgetLine — heartbeat budget progress (v1.9b): "budget 45%
+// ↓67.5k/150k"; unset/invalid budget → ""; 999% cap; output is the budgeted
+// quantity (input/cache never appear).
+// ---------------------------------------------------------------------------
+
+check(
+	"6a exact 'budget 45% ↓67.5k/150k' shape",
+	formatBudgetLine({ ...zero, output: 67_500 }, 150_000) === "budget 45% ↓67.5k/150k",
+	formatBudgetLine({ ...zero, output: 67_500 }, 150_000),
+);
+check("6b unset budget → empty", formatBudgetLine({ ...zero, output: 67_500 }, undefined) === "");
+check(
+	"6c invalid budgets → empty (0 / NaN / negative)",
+	formatBudgetLine({ ...zero, output: 67_500 }, 0) === "" &&
+		formatBudgetLine({ ...zero, output: 67_500 }, Number.NaN) === "" &&
+		formatBudgetLine({ ...zero, output: 67_500 }, -5) === "",
+);
+check(
+	"6d zero output → 0%",
+	formatBudgetLine({ ...zero }, 150_000) === "budget 0% ↓0/150k",
+	formatBudgetLine({ ...zero }, 150_000),
+);
+check(
+	"6e over-budget clamps at 999% (and keeps the exact cap rendering)",
+	formatBudgetLine({ ...zero, output: 500_000 }, 150_000) === "budget 333% ↓500k/150k",
+	formatBudgetLine({ ...zero, output: 500_000 }, 150_000),
+);
+check(
+	"6f input/cache never leak into the budget line",
+	formatBudgetLine({ ...zero, input: 999_999, cacheRead: 999_999, cacheWrite: 999_999 }, 150_000)
+		=== "budget 0% ↓0/150k",
+	formatBudgetLine({ ...zero, input: 999_999, cacheRead: 999_999, cacheWrite: 999_999 }, 150_000),
 );
 
 // ---------------------------------------------------------------------------

@@ -408,6 +408,54 @@ settle)` instead of a bare Detached; (b) `waitSettle` accepts `onPoll` and
 delegate emits a ~10 s heartbeat (status + elapsed + "Esc detaches safely") so
 a blocking wait never looks frozen.
 
+### 19.1c v1.9 — herdr builds that never report working (field 2026-09-05,
+m03-search-investigation)
+The §19.1b salvage assumed herdr exposes the worker's session path. Field run
+on the promobile workspace falsified BOTH halves of the detection chain for
+`--kind pi` workers:
+  1. herdr NEVER reported working/blocked/done — not during the work, not at
+     completion (agents sat at `idle` from spawn to finish; the orchestrator
+     itself showed "⠴ Working" while `agent list` said `idle`). The §19.1
+     start-up gate therefore never opened.
+  2. `agent get` / `agent start` carry NO `agent_session` on this build —
+     `resolveSessionPath` always returned undefined, so the session-reply
+     salvage was dead code (and the gauges/budget governor silently off).
+Net effect: three finished fan-out workers (reports on disk at minutes 9–11)
+kept their watchers spinning the FULL budget (1500 s) at `status=idle (prompt
+not yet observed consumed)`, then false-reported neverStarted E_TIMEOUT —
+workers done, delegate "waiting for workers". search-be had already burned
+25 min the same way.
+Fix (two independent layers, either alone is sufficient):
+  - `waitSettle` accepts `proofSettled?: () => Promise<boolean>` — a
+    caller-owned completion proof, polled in the start-up phase on EVERY slice
+    whose observation cannot prove life (idle/unknown/unresolved, not just
+    idle). True → settle `{status:"idle", finishedBeforeWatch:true}`. Throws
+    are treated as false; the observation gate keeps precedence (a normally
+    observed working→…→settled run never consults the proof).
+  - delegate supplies the proof: report file mtime ≥ spawn time (the tool
+    contract: "the worker's report file is the completion criterion") with
+    collectReport's canonical→requested path fallback; session reply
+    (`parseSessionUsage(...).turns > 0`) as the backup for probes. mtime ≥
+    spawn keeps stale same-name reports from false-settling a fresh worker.
+  - `resolvePiSessionCandidates` (usage.ts) restores the session path from
+    pi's own storage (`~/.pi/agent/sessions/--<munged-cwd>--/<created>_<uuid>.jsonl`,
+    creation within [spawn−5 s, spawn+10 min], closest-first) when herdr
+    exposes none; the resolved path is backfilled into the manifest so
+    gauges, budget accounting and probe salvage work again. Parallel same-cwd
+    fan-outs can share a window — attribution is best-effort; the report
+    proof is the exact criterion.
+neverStarted stays honest: proof requires evidence written after spawn, so a
+worker that never consumed the prompt still times out to E_PROMPT_STALLED.
+UX companion (v1.9b): the ~10 s wait heartbeat now carries the live dual gauge
+(ctx% ↑in ↓out) and budget progress (`budget 45% ↓67.5k/150k`) parsed from the
+worker's session JSONL each beat — the wait is an observable burn-down. The
+budget is shown against the call's budgetTokens, else the §14 default
+(150k, `budgetSource: "call" | "default"` in details); DISPLAY only —
+enforcement (overOutputBudget) still requires an explicit budget. The
+misleading "(prompt not yet observed consumed)" prose was dropped: on builds
+that never report working (above) it rendered on every beat and read as an
+error. All heartbeat lines flow through renderResult's clampLines (§19.5).
+
 ### 19.5 v1.8b — transcript/widget line-width clamping (field crash)
 pi-tui passes the available width to `component.render(width)` and CRASHES the
 whole process (uncaughtException "Rendered line N exceeds terminal width") when

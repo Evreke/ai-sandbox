@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DelegateErrorImpl, createHerdrTransport } from "../src/transport/herdr.ts";
 import { archiveReport, archiveRoot, listArchivedTasks } from "../src/archive.ts";
+import { resolvePiSessionCandidates } from "../src/usage.ts";
 import type { StartReq } from "../src/transport/types.ts";
 
 let failures = 0;
@@ -255,6 +256,125 @@ try {
 			JSON.stringify(r),
 		);
 	}
+
+	// -------------------------------------------------------------------------
+	// §19.1c (v1.9) — caller-owned completion proof. Field 2026-09-05
+	// (m03-search-investigation): current herdr builds never report working for
+	// pi workers AND expose no agent_session, so the observation gate never
+	// opened and the v1.8 session proof never fired — three finished fan-out
+	// workers (reports on disk) kept their watchers spinning the FULL budget at
+	// status=idle/unknown "prompt not yet observed consumed", then
+	// false-reported neverStarted. The caller (delegate tool) now supplies a
+	// completion proof: report file newer than spawn = finished.
+	// -------------------------------------------------------------------------
+
+	// Real-build shape: agent get exposes NO session path at all.
+	rmSync(join(STUB_DIR, "get-session"), { force: true });
+
+	// P1 idle-forever + proof fires on the second slice → settles fast.
+	scriptWait(["idle"]);
+	{
+		const t0 = Date.now();
+		let calls = 0;
+		const r = await t.waitSettle({
+			name: "w-proof-idle",
+			timeoutMs: 9_000,
+			proofSettled: async () => ++calls >= 2,
+		});
+		check(
+			"P1 proofSettled rescues an idle-never-working watcher (finishedBeforeWatch)",
+			r.status === "idle" && r.timedOut === false && r.finishedBeforeWatch === true && r.neverStarted === undefined,
+			JSON.stringify(r),
+		);
+		check("P1b settled long before the budget expired", Date.now() - t0 < 6_000, `${Date.now() - t0}ms`);
+	}
+
+	// P2 unresolved statuses (the search-be shape: herdr unknown/unreachable
+	// slices) + proof → settles without any idle observation.
+	scriptWait(["unknown"]);
+	{
+		const r = await t.waitSettle({ name: "w-proof-unknown", timeoutMs: 9_000, proofSettled: async () => true });
+		check(
+			"P2 proof covers unresolved-status slices (no idle observation needed)",
+			r.status === "idle" && r.timedOut === false && r.finishedBeforeWatch === true,
+			JSON.stringify(r),
+		);
+	}
+
+	// P3 a never-true proof must NOT settle — D3's protection intact.
+	scriptWait(["idle"]);
+	{
+		const r = await t.waitSettle({ name: "w-proof-false", timeoutMs: 2_500, proofSettled: async () => false });
+		check(
+			"P3 false proof keeps neverStarted semantics (no false salvage)",
+			r.status === "unknown" && r.timedOut === true && r.neverStarted === true,
+			JSON.stringify(r),
+		);
+	}
+
+	// P4 a throwing proof is treated as false, never blocks the wait.
+	scriptWait(["idle"]);
+	{
+		const r = await t.waitSettle({
+			name: "w-proof-throw",
+			timeoutMs: 2_500,
+			proofSettled: async () => {
+				throw new Error("boom");
+			},
+		});
+		check("P4 throwing proof tolerated (neverStarted, no crash)", r.neverStarted === true, JSON.stringify(r));
+	}
+
+	// P5 the observation gate keeps precedence: a normally-observed run settles
+	// through the ordinary path — the proof is never even consulted.
+	scriptWait(["working", "idle"]);
+	{
+		let calls = 0;
+		const r = await t.waitSettle({
+			name: "w-proof-normal",
+			timeoutMs: 9_000,
+			proofSettled: async () => {
+				calls++;
+				return true;
+			},
+		});
+		check(
+			"P5 observed working→idle settles normally, no finishedBeforeWatch",
+			r.status === "idle" && r.timedOut === false && r.finishedBeforeWatch === undefined,
+			JSON.stringify(r),
+		);
+		check("P5b proof never consulted when observations prove life", calls === 0, `${calls} calls`);
+	}
+
+	// P6 resolvePiSessionCandidates — the pi session-storage fallback that
+	// restores the session path on herdr builds without agent_session.
+	const piRoot = mkdtempSync(join(tmpdir(), "qa-pisess-"));
+	const sessCwdDir = join(piRoot, "--tmp-proj-x--");
+	mkdirSync(sessCwdDir, { recursive: true });
+	const sessA = join(sessCwdDir, "2026-09-05T15-17-36-415Z_aaaa.jsonl");
+	const sessB = join(sessCwdDir, "2026-09-05T15-43-02-015Z_bbbb.jsonl");
+	const sessC = join(sessCwdDir, "2026-09-05T15-43-05-774Z_cccc.jsonl");
+	writeFileSync(sessA, "{}\n");
+	writeFileSync(sessB, "{}\n");
+	writeFileSync(sessC, "{}\n");
+	writeFileSync(join(sessCwdDir, "not-a-session.txt"), "noise\n");
+	const spawnA = Date.parse("2026-09-05T15:17:35.000Z");
+	check(
+		"P6 resolver finds the in-window session (munged cwd, closest-first)",
+		JSON.stringify(resolvePiSessionCandidates("/tmp/proj/x", spawnA, { sessionsRoot: piRoot })) === JSON.stringify([sessA]),
+		JSON.stringify(resolvePiSessionCandidates("/tmp/proj/x", spawnA, { sessionsRoot: piRoot })),
+	);
+	const spawnBC = Date.parse("2026-09-05T15:43:03.000Z");
+	check(
+		"P6b parallel same-cwd fan-out: both in-window sessions, closest-first",
+		JSON.stringify(resolvePiSessionCandidates("/tmp/proj/x", spawnBC, { sessionsRoot: piRoot })) === JSON.stringify([sessB, sessC]),
+		JSON.stringify(resolvePiSessionCandidates("/tmp/proj/x", spawnBC, { sessionsRoot: piRoot })),
+	);
+	check(
+		"P6c missing sessions dir → [] (never throws)",
+		JSON.stringify(resolvePiSessionCandidates("/nope", Date.now(), { sessionsRoot: piRoot })) === "[]",
+	);
+	rmSync(piRoot, { recursive: true, force: true });
 
 	rmSync(sessDir, { recursive: true, force: true });
 

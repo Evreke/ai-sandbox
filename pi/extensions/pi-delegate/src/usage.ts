@@ -12,7 +12,7 @@
  *   TERTIARY  turns = assistant-message count (loop/thrash detector)
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { SessionUsage } from "./transport/types.ts";
@@ -139,9 +139,68 @@ export function resolveContextWindow(modelId?: string): number {
 	return DEFAULT_CONTEXT_WINDOW;
 }
 
+/**
+ * v1.9 (DESIGN.md §19.1c): resolve candidate pi session JSONL paths for a
+ * worker that was spawned at startedAtMs with working directory workerCwd.
+ *
+ * pi stores sessions at
+ *   ~/.pi/agent/sessions/<munged-cwd>/<createdISO>_<uuid>.jsonl
+ * (munge: leading "/" stripped, "/" → "-", other chars preserved, wrapped in
+ * "--…--"; e.g. /home/x/pro → --home-x-pro--). herdr builds without
+ * agent_session in their agent get/start results leave the transport's
+ * sessionPath undefined — this filesystem fallback restores the session-reply
+ * proof, the gauges and probe salvage.
+ *
+ * Candidates: creation timestamp within [startedAt - 5s, startedAt + windowMs]
+ * (the orchestrator's own older session is excluded by the window), sorted
+ * closest-to-startedAt first. Parallel same-cwd fan-outs can share a window —
+ * callers must treat the list as best-effort attribution (the report file
+ * proof is the exact completion criterion). Tolerant: missing/unreadable dir,
+ * unparseable names → [] (never throws).
+ */
+export function resolvePiSessionCandidates(
+	workerCwd: string,
+	startedAtMs: number,
+	opts?: { sessionsRoot?: string; windowMs?: number },
+): string[] {
+	const sessionsRoot = opts?.sessionsRoot ?? join(homedir(), ".pi", "agent", "sessions");
+	const windowMs = opts?.windowMs ?? 10 * 60_000;
+	const munged = workerCwd.replace(/^\//, "").replace(/\//g, "-");
+	let entries: string[];
+	try {
+		entries = readdirSync(join(sessionsRoot, `--${munged}--`));
+	} catch {
+		return [];
+	}
+	const candidates: Array<{ path: string; delta: number }> = [];
+	for (const name of entries) {
+		// <YYYY-MM-DD>T<HH-MM-SS-mmm>Z_<uuid>.jsonl — pi's session file names.
+		const m = /^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z_.+\.jsonl$/.exec(name);
+		if (!m) continue;
+		const ts = Date.parse(`${m[1]}T${m[2]}:${m[3]}:${m[4]}.${m[5]}Z`);
+		if (!Number.isFinite(ts)) continue;
+		const delta = ts - startedAtMs;
+		if (delta < -5_000 || delta > windowMs) continue;
+		candidates.push({ path: join(sessionsRoot, `--${munged}--`, name), delta });
+	}
+	return candidates.sort((a, b) => Math.abs(a.delta) - Math.abs(b.delta)).map((c) => c.path);
+}
+
 export function formatGaugeLine(usage: SessionUsage, contextWindow: number): string {
 	const pct = contextPct(usage, contextWindow);
 	return `ctx ${pct === null ? "?%" : pct + "%"} ↑${fmtTokens(usage.input)} ↓${fmtTokens(usage.output)}`;
+}
+
+/**
+ * Human budget-progress line for the settle heartbeat (v1.9b), e.g.
+ * "budget 45% ↓67.5k/150k". Output tokens are the budgeted quantity
+ * (DESIGN.md §14/§20). Empty when no cap is set (nothing to progress
+ * against) — callers resolve the §14 default themselves for display.
+ */
+export function formatBudgetLine(usage: SessionUsage, budgetTokens?: number): string {
+	if (budgetTokens === undefined || !Number.isFinite(budgetTokens) || budgetTokens <= 0) return "";
+	const pct = Math.min(999, Math.round((usage.output / budgetTokens) * 100));
+	return `budget ${pct}% ↓${fmtTokens(usage.output)}/${fmtTokens(budgetTokens)}`;
 }
 
 /** k-scaled token count (1-decimal under 100, integer above). */

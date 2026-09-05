@@ -95,8 +95,10 @@ export interface SettleResult {
 	neverStarted?: boolean;
 	/** v1.8 (DESIGN.md §19.1b): true when the agent was ALREADY finished when the
 	 *  watcher attached (herdr ages done→idle within minutes, so a late watcher
-	 *  can never observe working/done). Proven by an assistant reply in the
-	 *  session JSONL — the opposite of neverStarted, not a failure. */
+	 *  can never observe working/done — and current builds never report working
+	 *  for pi workers at all, §19.1c). Proven by the caller's completion proof
+	 *  (proofSettled: report file newer than spawn) or by an assistant reply in
+	 *  the session JSONL — the opposite of neverStarted, not a failure. */
 	finishedBeforeWatch?: boolean;
 }
 
@@ -140,6 +142,16 @@ export interface Transport {
 		 *  so a long blocking wait can stream liveness via onUpdate instead of
 		 *  looking frozen. Throttling is the caller's job; never throws. */
 		onPoll?: (info: { status: AgentStatusName; started: boolean; elapsedMs: number }) => void;
+		/** v1.9 (DESIGN.md §19.1c): caller-owned completion proof, polled in the
+		 *  start-up phase on every slice whose observation cannot prove life
+		 *  (idle/unknown/unresolved — herdr builds that never report working for
+		 *  pi workers would otherwise spin the full budget against a finished
+		 *  worker). True → settle {status:"idle", finishedBeforeWatch:true}.
+		 *  Must be cheap, side-effect-free, and answer from evidence written
+		 *  AFTER this spawn (report mtime ≥ spawn time / session reply), so a
+		 *  stale artifact can never false-settle a fresh worker. Throws are
+		 *  treated as false. */
+		proofSettled?: () => Promise<boolean>;
 	}): Promise<SettleResult>;
 	getStatus(name: string): Promise<AgentStatus | null>;
 	/** Recent pane output for a worker (terminal snapshot, few hundred lines tail).

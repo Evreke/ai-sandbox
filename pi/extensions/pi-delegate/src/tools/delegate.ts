@@ -36,11 +36,13 @@ import {
 } from "../exchange.ts";
 import {
 	contextPct,
+	formatBudgetLine,
 	formatGaugeLine,
 	overContext,
 	overOutputBudget,
 	parseSessionUsage,
 	resolveContextWindow,
+	resolvePiSessionCandidates,
 } from "../usage.ts";
 import { archiveReport } from "../archive.ts";
 import { notifyFleetIdle, renderDelegateLines } from "../ui/fleet-ui.ts";
@@ -50,6 +52,7 @@ import {
 	CONTEXT_CRITICAL_PCT,
 	CONTEXT_TURNS_WARN,
 	CONTEXT_WARN_PCT,
+	DEFAULT_BUDGET_TOKENS,
 	WORKER_NAME_RE,
 	briefPrompt,
 	type AgentStatusName,
@@ -422,7 +425,11 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			// Budget accounting source (DESIGN.md §14): the worker's session JSONL
 			// path, captured by the transport from the herdr agent start result
 			// (result.agent.agent_session.value) and recorded in the manifest below.
-			const sessionPath = start.sessionPath;
+			// v1.9: mutable — when herdr exposes no session path (current builds:
+			// no agent_session in agent get/start results), the pi-storage fallback
+			// below resolves it so gauges, budget accounting and probe salvage
+			// keep working.
+			let sessionPath: string | undefined = start.sessionPath;
 			const uniquified = canonical !== params.name
 				? `Note: herdr uniquified the requested name "${params.name}" → "${canonical}".`
 				: "";
@@ -681,6 +688,56 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 					{ canonical, placement, stderr: errText(err) },
 				);
 			}
+			// v1.9 (DESIGN.md §19.1c): current herdr builds do not expose the
+			// worker's session path (agent get/start carry no agent_session) —
+			// resolve it from pi's session storage so the aged-finish proof, the
+			// dual gauges and probe salvage keep working. Best-effort: no candidate
+			// → features degrade exactly as before, never fail.
+			if (!sessionPath) {
+				const guessed = resolvePiSessionCandidates(placement.checkoutPath, startedAtDate.getTime())[0];
+				if (guessed) {
+					sessionPath = guessed;
+					try {
+						await updateManifest(manifestDir, (m) => ({
+							...m,
+							workers: m.workers.map((w) => (w.name === canonical ? { ...w, sessionPath: guessed } : w)),
+						}));
+					} catch {
+						// manifest is best-effort bookkeeping — proof/gauges already have the path
+					}
+				}
+			}
+
+			// Completion proof for the settle watch (§19.1c): the report file for
+			// THIS run (mtime after spawn) is the completion criterion per the tool
+			// contract; the session reply is the backup proof for probes and
+			// report-less finishes. herdr builds that never report working for pi
+			// workers otherwise spin the whole budget against a finished worker.
+			const settleProof = async (): Promise<boolean> => {
+				if (!isProbe) {
+					// canonical-name path first, requested-name fallback (same order as
+					// collectReport): mtime ≥ spawn time proves THIS run wrote it — a
+					// stale report from an earlier same-name attempt is older.
+					const paths = canonical !== params.name
+						? [reportPath, reportPathFor(manifestDir, params.name)]
+						: [reportPath];
+					for (const p of paths) {
+						try {
+							if ((await stat(p)).mtimeMs >= startedAtDate.getTime()) return true;
+						} catch {
+							// missing → next candidate
+						}
+					}
+				}
+				// Session-reply proof (probes have no report file). Assumes a fresh
+				// session per worker (the default): pre-existing turns would prove an
+				// earlier session, not this prompt.
+				const sp = sessionPath
+					?? resolvePiSessionCandidates(placement.checkoutPath, startedAtDate.getTime())[0];
+				if (sp) sessionPath = sp;
+				return sp ? parseSessionUsage(sp).turns > 0 : false;
+			};
+
 			if (signal?.aborted) {
 				// Abort between prompt submission and settle — the smoke/task reply may
 				// already be in the session: salvage it before falling back to detach.
@@ -693,6 +750,15 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			// v1.8 heartbeat: onPoll fires per slice; throttle to one step per ~10s
 			// so a long blocking wait visibly shows worker liveness instead of
 			// silence (the #1 trigger for operators killing a healthy wait).
+			// v1.9b: each beat carries the live dual gauge (ctx% ↑in ↓out) and
+			// budget progress parsed from the worker's session JSONL — the wait is
+			// an observable burn-down, not a black box. The misleading
+			// "(prompt not yet observed consumed)" prose was dropped: on herdr
+			// builds that never report working for pi workers (§19.1c) it rendered
+			// on every beat and read as an error.
+			// Budget shown against the call's cap, else the §14 default — DISPLAY
+			// only; enforcement (overOutputBudget) still requires explicit budgetTokens.
+			const beatBudget = params.budgetTokens ?? DEFAULT_BUDGET_TOKENS;
 			step(`Waiting for ${canonical} to settle (timeout ${timeoutMs} ms)…`, {
 				phase: "wait",
 				canonical,
@@ -703,17 +769,35 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				const now = Date.now();
 				if (now - lastBeat < 10_000) return;
 				lastBeat = now;
+				// Lazy session-path resolution: on herdr builds without agent_session
+				// the pi-storage fallback may only succeed once the file exists.
+				if (!sessionPath) {
+					sessionPath = resolvePiSessionCandidates(placement.checkoutPath, startedAtDate.getTime())[0];
+				}
+				let gaugeSegment = "";
+				let gaugeDetails: Record<string, unknown> = {};
+				if (sessionPath) {
+					const usage = parseSessionUsage(sessionPath);
+					gaugeSegment = ` · ${formatGaugeLine(usage, contextWindow)}`;
+					const budgetLine = formatBudgetLine(usage, beatBudget);
+					if (budgetLine) gaugeSegment += ` · ${budgetLine}`;
+					gaugeDetails = {
+						usage,
+						contextWindow,
+						budget: beatBudget,
+						budgetSource: params.budgetTokens !== undefined ? "call" : "default",
+					};
+				}
 				step(
-					`waiting for ${canonical}: status=${info.status}` +
-						`${info.started ? "" : " (prompt not yet observed consumed)"}` +
+					`waiting for ${canonical}: status=${info.status}${gaugeSegment}` +
 						` (${Math.round(info.elapsedMs / 1000)}s / ${Math.round(timeoutMs / 1000)}s)` +
 						" — Esc detaches safely, the worker survives",
-					{ phase: "wait-heartbeat", canonical, ...info },
+					{ phase: "wait-heartbeat", canonical, ...info, ...gaugeDetails },
 				);
 			};
 			let settle;
 			try {
-				settle = await transport.waitSettle({ name: canonical, timeoutMs, signal, onPoll });
+				settle = await transport.waitSettle({ name: canonical, timeoutMs, signal, onPoll, proofSettled: settleProof });
 			} catch (err) {
 				if (signal?.aborted) return detach();
 				const b = gaugeSummary();
