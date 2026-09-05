@@ -252,6 +252,8 @@ export class HerdrTransport implements Transport {
 		timeoutMs: number;
 		signal?: AbortSignal;
 		onPoll?: (info: { status: AgentStatusName; started: boolean; elapsedMs: number }) => void;
+		/** v1.9: out-of-band settled-proof (report mtime ≥ spawn / session reply). */
+		proofSettled?: () => Promise<boolean>;
 	}): Promise<SettleResult> {
 		// D3 (DESIGN.md §19.1) — two-phase state machine against the
 		// settle-before-start race: the first `agent wait --until idle…` slice can
