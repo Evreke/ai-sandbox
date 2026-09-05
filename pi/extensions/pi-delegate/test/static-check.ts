@@ -63,6 +63,19 @@ const indexImportsHerdr = readFileSync(resolve(ROOT, "index.ts"), "utf8").includ
 check("T1.1b index.ts DOES import transport/herdr.ts (transport injection point)", indexImportsHerdr);
 
 // ---------------------------------------------------------------------------
+// 1.5 No hardcoded worker tier in src/ (v1.9.2)
+// ---------------------------------------------------------------------------
+
+const tierOffenders = listTsFiles(resolve(ROOT, "src")).filter((f) =>
+	readFileSync(f, "utf8").includes("llm-platform-alpha"),
+);
+check(
+	"T1.5 src/ contains no hardcoded worker tier provider (config tiers/defaults + E_TIER instead)",
+	tierOffenders.length === 0,
+	tierOffenders.join(", "),
+);
+
+// ---------------------------------------------------------------------------
 // 2. status.ts read-only
 // ---------------------------------------------------------------------------
 

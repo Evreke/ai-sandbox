@@ -39,6 +39,7 @@ import {
 	parseSessionUsage,
 	resolveContextWindow,
 	resolveSpawnDefaults,
+	resolveTierTable,
 } from "../src/usage.ts";
 import { CONTEXT_WINDOWS, DEFAULT_CONTEXT_WINDOW } from "../src/transport/types.ts";
 
@@ -436,6 +437,72 @@ check(
 	"7f defaults not an object → {}",
 	JSON.stringify(spawnDefaultsInHome(JSON.stringify({ defaults: "zai" }))) === "{}",
 	JSON.stringify(spawnDefaultsInHome(JSON.stringify({ defaults: "zai" }))),
+);
+check(
+	"7h defaults.tier surfaced for the tiers table",
+	JSON.stringify(spawnDefaultsInHome(JSON.stringify({ defaults: { tier: "flash" } }))) === JSON.stringify({ tier: "flash" }),
+	JSON.stringify(spawnDefaultsInHome(JSON.stringify({ defaults: { tier: "flash" } }))),
+);
+
+// ---------------------------------------------------------------------------
+// 8. resolveTierTable — multiple named worker tiers (v1.9.2), child-process
+// with $HOME at spawn time (same seam as sections 2 and 7).
+// ---------------------------------------------------------------------------
+
+function tierTableInHome(configJson: string): unknown {
+	const home = mkdtempSync(join(tmpdir(), "usage-check-home-"));
+	const configDir = join(home, ".pi", "agent");
+	mkdirSync(configDir, { recursive: true });
+	if (configJson !== "") writeFileSync(join(configDir, "pi-delegate.config.json"), configJson);
+	const src = `import {resolveTierTable} from ${JSON.stringify(MOD)}; console.log(JSON.stringify(resolveTierTable()))`;
+	const res = spawnSync("bun", ["-e", src], { env: { ...process.env, HOME: home }, encoding: "utf8" });
+	rmSync(home, { recursive: true, force: true });
+	try {
+		return JSON.parse(res.stdout.toString().trim());
+	} catch {
+		return `SPAWN FAILED: ${res.stderr.toString().slice(0, 200)}`;
+	}
+}
+
+check(
+	"8a no config → no tiers",
+	JSON.stringify(tierTableInHome("")) === "{}",
+	JSON.stringify(tierTableInHome("")),
+);
+const multiTierCfg = JSON.stringify({
+	tiers: {
+		flash: { provider: "zai", model: "glm-5.3-flash", thinking: "high" },
+		frontier: { provider: "zai", model: "glm-5.6", thinking: "high" },
+	},
+});
+check(
+	"8b multiple tiers round-trip verbatim",
+	JSON.stringify(tierTableInHome(multiTierCfg)) === JSON.stringify(tierTableInHome(multiTierCfg)) &&
+		(() => {
+			const t = tierTableInHome(multiTierCfg) as Record<string, Record<string, string>>;
+			return t.flash?.provider === "zai" && t.flash?.model === "glm-5.3-flash" && t.frontier?.model === "glm-5.6";
+		})(),
+	JSON.stringify(tierTableInHome(multiTierCfg)),
+);
+check(
+	"8c partial tier entries kept, empty ones dropped",
+	(() => {
+		const t = tierTableInHome(
+			JSON.stringify({ tiers: { cheap: { provider: "zai" }, broken: {}, alsoBad: { model: 42 } } }),
+		) as Record<string, Record<string, string>>;
+		return JSON.stringify(t) === JSON.stringify({ cheap: { provider: "zai" } });
+	})(),
+	JSON.stringify(tierTableInHome(JSON.stringify({ tiers: { cheap: { provider: "zai" }, broken: {} } }))),
+);
+check(
+	"8d corrupt config → {} (never throws)",
+	JSON.stringify(tierTableInHome("not json{")) === "{}",
+	JSON.stringify(tierTableInHome("not json{")),
+);
+check(
+	"8e tiers not an object → {}",
+	JSON.stringify(tierTableInHome(JSON.stringify({ tiers: "flash" }))) === "{}",
+	JSON.stringify(tierTableInHome(JSON.stringify({ tiers: "flash" }))),
 );
 check(
 	"7g contextWindow key coexists (shared file)",

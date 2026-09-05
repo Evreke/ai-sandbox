@@ -170,6 +170,7 @@ export interface Transport {
 export type DelegateErrorCode =
 	| "E_BRIEF"
 	| "E_NAME"
+	| "E_TIER"
 	| "E_PLACE"
 	| "E_START"
 	| "E_PROMPT_STALLED"
@@ -178,6 +179,16 @@ export type DelegateErrorCode =
 	| "E_REPORT_INVALID"
 	| "E_BUDGET"
 	| "E_CONTEXT";
+
+/** Named worker tier from the config's `tiers` table (v1.9.2): a
+ *  provider/model/thinking combination. Any key may be absent — unresolved
+ *  keys fall through to the config's `defaults` section. There is NO built-in
+ *  tier: environments without config fail fast with E_TIER. */
+export interface SpawnTier {
+	provider?: string;
+	model?: string;
+	thinking?: string;
+}
 
 export interface DelegateError extends Error {
 	code: DelegateErrorCode;
@@ -219,9 +230,11 @@ export const DEFAULT_CONTEXT_WINDOW = 250_100;
 export const DEFAULT_BUDGET_TOKENS = 150_000;
 
 /** Config file location: ~/.pi/agent/pi-delegate.config.json,
- *  shape {"contextWindow": number, "defaults": {"budgetTokens": number,
- *  "provider": string, "model": string, "thinking": string}}.
- *  Missing/corrupt → fallbacks (per key). */
+ *  shape {"contextWindow": number, "defaults": {"tier": string,
+ *  "budgetTokens": number, "provider": string, "model": string,
+ *  "thinking": string}, "tiers": {"<name>": SpawnTier}}.
+ *  Missing/corrupt → fallbacks (per key); an unconfigured environment has NO
+ *  built-in worker tier — delegate refuses with E_TIER. */
 export const BUDGET_CONFIG_PATH = ".pi/agent/pi-delegate.config.json";
 
 /** Fraction of budget above which terminal results carry a burn warning. */

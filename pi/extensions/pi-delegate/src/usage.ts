@@ -15,7 +15,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { SessionUsage } from "./transport/types.ts";
+import type { SessionUsage, SpawnTier } from "./transport/types.ts";
 import {
 	CONTEXT_WINDOWS,
 	DEFAULT_CONTEXT_WINDOW,
@@ -204,16 +204,22 @@ export function formatBudgetLine(usage: SessionUsage, budgetTokens?: number): st
 }
 
 /**
- * Worker spawn defaults (v1.9.1): optional
- * `{"defaults": {"provider", "model", "thinking"}}` from
+ * Worker spawn defaults (v1.9.1, tier key added v1.9.2): optional
+ * `{"defaults": {"tier", "provider", "model", "thinking"}}` from
  * ~/.pi/agent/pi-delegate.config.json — the same file as the contextWindow
  * override (resolveContextWindow). Precedence in delegate: explicit tool
- * param → config default → built-in tier (provider llm-platform-alpha,
- * model glm-5.3-flash, thinking high). Tolerant: missing/corrupt/partial
- * config → {} (never throws). NOTE: bun caches os.homedir() — tests must
- * spawn a child process with $HOME set at spawn time (same as section 2).
+ * param → tiers[defaults.tier] → these per-key defaults. There is NO built-in
+ * tier — an unconfigured environment fails with E_TIER. Tolerant:
+ * missing/corrupt/partial config → {} (never throws). NOTE: bun caches
+ * os.homedir() — tests must spawn a child process with $HOME set at spawn
+ * time (same as section 2).
  */
-export function resolveSpawnDefaults(): { provider?: string; model?: string; thinking?: string } {
+export function resolveSpawnDefaults(): {
+	provider?: string;
+	model?: string;
+	thinking?: string;
+	tier?: string;
+} {
 	try {
 		const raw = readFileSync(join(homedir(), ".pi", "agent", "pi-delegate.config.json"), "utf8");
 		const cfg = JSON.parse(raw) as { defaults?: Record<string, unknown> };
@@ -221,10 +227,48 @@ export function resolveSpawnDefaults(): { provider?: string; model?: string; thi
 		const str = (v: unknown): string | undefined =>
 			typeof v === "string" && v.trim().length > 0 ? v : undefined;
 		return d !== null && typeof d === "object"
-			? { provider: str(d.provider), model: str(d.model), thinking: str(d.thinking) }
+			? {
+					provider: str(d.provider),
+					model: str(d.model),
+					thinking: str(d.thinking),
+					tier: str(d.tier),
+				}
 			: {};
 	} catch {
 		return {}; // no config / corrupt config → built-in defaults, never throw
+	}
+}
+
+/**
+ * Named worker tiers (v1.9.2): the `"tiers"` table from
+ * ~/.pi/agent/pi-delegate.config.json — multiple provider/model/thinking
+ * combinations the operator maintains in one place. Entries with no valid
+ * field are dropped; corrupt config → {} (never throws). Same $HOME caching
+ * caveat as resolveSpawnDefaults.
+ */
+export function resolveTierTable(): Record<string, SpawnTier> {
+	try {
+		const raw = readFileSync(join(homedir(), ".pi", "agent", "pi-delegate.config.json"), "utf8");
+		const cfg = JSON.parse(raw) as { tiers?: unknown };
+		if (cfg.tiers === null || typeof cfg.tiers !== "object") return {};
+		const str = (v: unknown): string | undefined =>
+			typeof v === "string" && v.trim().length > 0 ? v : undefined;
+		const out: Record<string, SpawnTier> = {};
+		for (const [name, entry] of Object.entries(cfg.tiers as Record<string, unknown>)) {
+			if (name.trim().length === 0 || entry === null || typeof entry !== "object") continue;
+			const e = entry as Record<string, unknown>;
+			const tier: SpawnTier = {
+				provider: str(e.provider),
+				model: str(e.model),
+				thinking: str(e.thinking),
+			};
+			if (tier.provider !== undefined || tier.model !== undefined || tier.thinking !== undefined) {
+				out[name] = tier;
+			}
+		}
+		return out;
+	} catch {
+		return {}; // no config / corrupt config → no tiers, never throw
 	}
 }
 

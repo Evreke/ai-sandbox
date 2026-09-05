@@ -44,6 +44,7 @@ import {
 	resolveContextWindow,
 	resolvePiSessionCandidates,
 	resolveSpawnDefaults,
+	resolveTierTable,
 } from "../usage.ts";
 import { archiveReport } from "../archive.ts";
 import { notifyFleetIdle, renderDelegateLines } from "../ui/fleet-ui.ts";
@@ -60,6 +61,7 @@ import {
 	type DelegateError,
 	type Placement,
 	type PlacementMode,
+	type SpawnTier,
 	type Transport,
 	type SessionUsage,
 	type WorkerReport,
@@ -102,9 +104,10 @@ const delegateParams = Type.Object({
 	repoPath: Type.Optional(Type.String({ description: "Repo to place the worker in (default session cwd)" })),
 	branch: Type.Optional(Type.String({ description: "Worktree branch (default delegate/<name>)" })),
 	base: Type.Optional(Type.String({ description: "Base ref for worktree placement (default HEAD)" })),
-	provider: Type.Optional(Type.String({ description: "Agent provider (default: defaults.provider in ~/.pi/agent/pi-delegate.config.json, else llm-platform-alpha)" })),
-	model: Type.Optional(Type.String({ description: "Agent model (default: defaults.model in config, else glm-5.3-flash)" })),
-	thinking: Type.Optional(Type.String({ description: "Thinking level (default: defaults.thinking in config, else high)" })),
+	tier: Type.Optional(Type.String({ description: "Named worker tier from the pi-delegate.config.json tiers table (e.g. flash, frontier); beats defaults, loses to explicit provider/model/thinking" })),
+	provider: Type.Optional(Type.String({ description: "Agent provider override; otherwise the configured tier/defaults decide (see ~/.pi/agent/pi-delegate.config.json) — no built-in default" })),
+	model: Type.Optional(Type.String({ description: "Agent model override; otherwise the configured tier/defaults decide (see ~/.pi/agent/pi-delegate.config.json) — no built-in default" })),
+	thinking: Type.Optional(Type.String({ description: "Thinking level override; otherwise the configured tier/defaults decide (see ~/.pi/agent/pi-delegate.config.json) — no built-in default" })),
 	timeoutMs: Type.Optional(Type.Number({ description: "Settle timeout in ms (default 900000; probe 120000)" })),
 	budgetTokens: Type.Optional(Type.Number({ minimum: 1, description: "Optional OUTPUT-token cap (sum of assistant output); over-budget workers are refused on retry with E_BUDGET." })),
 	maxContextPct: Type.Optional(Type.Number({ minimum: 10, maximum: 99, description: "Context-window %% refusal line (default 80 — the operator restart habit). Re-spawning a worker at/over this context %% is refused with E_CONTEXT." })),
@@ -234,12 +237,51 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			const startedAtDate = new Date();
 			const isProbe = params.mode === "probe";
 			const timeoutMs = params.timeoutMs ?? (isProbe ? PROBE_TIMEOUT_MS : 900_000);
-			// v1.9.1: spawn tier resolves explicit param → config default
-			// (~/.pi/agent/pi-delegate.config.json {"defaults": {…}}) → built-in.
+			// v1.9.2 tier resolution — explicit params > tiers[<tier>] > defaults,
+			// per key. There is NO built-in worker tier: an unconfigured environment
+			// fails fast with E_TIER here (before touching herdr) instead of
+			// silently spawning a provider the operator never chose.
 			const spawnDefaults = resolveSpawnDefaults();
-			const provider = params.provider ?? spawnDefaults.provider ?? "llm-platform-alpha";
-			const model = params.model ?? spawnDefaults.model ?? "glm-5.3-flash";
-			const thinking = params.thinking ?? spawnDefaults.thinking ?? "high";
+			const tierTable = resolveTierTable();
+			const requestedTier = params.tier ?? spawnDefaults.tier;
+			let tierEntry: SpawnTier | undefined;
+			if (requestedTier !== undefined) {
+				tierEntry = tierTable[requestedTier];
+				if (tierEntry === undefined) {
+					const available = Object.keys(tierTable).sort();
+					return fail(
+						"E_TIER",
+						`E_TIER — unknown worker tier "${requestedTier}"` +
+							` (configured tiers: ${available.length > 0 ? available.join(", ") : "none"}). ` +
+							"Add it to ~/.pi/agent/pi-delegate.config.json under \"tiers\", drop the tier param, " +
+							"or pass provider/model/thinking explicitly.",
+						{ tier: requestedTier, availableTiers: available, name: params.name },
+					);
+				}
+			}
+			const pickTier = (
+				explicit: string | undefined,
+				fromTier: string | undefined,
+				fromDefaults: string | undefined,
+			): string | undefined => explicit ?? fromTier ?? fromDefaults;
+			const provider = pickTier(params.provider, tierEntry?.provider, spawnDefaults.provider);
+			const model = pickTier(params.model, tierEntry?.model, spawnDefaults.model);
+			const thinking = pickTier(params.thinking, tierEntry?.thinking, spawnDefaults.thinking);
+			const missingTierKeys = [
+				provider === undefined ? "provider" : undefined,
+				model === undefined ? "model" : undefined,
+				thinking === undefined ? "thinking" : undefined,
+			].filter((k): k is string => typeof k === "string");
+			if (missingTierKeys.length > 0) {
+				return fail(
+					"E_TIER",
+					`E_TIER — no worker ${missingTierKeys.join("/")} configured (no built-in tier exists). ` +
+						"Set \"tiers\" / \"defaults\" in ~/.pi/agent/pi-delegate.config.json, e.g. " +
+						'{"tiers": {"flash": {"provider": "zai", "model": "glm-5.3-flash", "thinking": "high"}}, ' +
+						"\"defaults\": {\"tier\": \"flash\"}} — or pass provider/model/thinking explicitly.",
+					{ missing: missingTierKeys, name: params.name },
+				);
+			}
 			const mode = params.mode ?? "worktree";
 			// Probe is not a placement mode: it uses the cheapest real placement (tab).
 			const placementMode: PlacementMode = mode === "probe" ? "tab" : mode;

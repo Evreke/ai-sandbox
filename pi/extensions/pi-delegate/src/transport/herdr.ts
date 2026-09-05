@@ -115,6 +115,8 @@ function delegateError(code: DelegateErrorCode, message: string, cause?: unknown
 const GUIDANCE: Record<DelegateErrorCode, string> = {
 	E_BRIEF: "Write the brief file first, then retry the delegate call.",
 	E_NAME: "Use the returned canonical name.",
+	E_TIER:
+		"Add tiers/defaults to ~/.pi/agent/pi-delegate.config.json or pass provider/model/thinking explicitly on the delegate call.",
 	E_PLACE:
 		"Placement failed; herdr stderr is attached. Reconcile via `herdr workspace list` before retrying.",
 	E_START: "Check pane readiness (pane must sit at an interactive shell prompt); retry is a new delegate call.",

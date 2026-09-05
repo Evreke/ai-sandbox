@@ -30,7 +30,7 @@ overlay (#5).
 | Transport | Thin `Transport` interface; herdr is impl #1 |
 | Code home | Local-only git repo `/root/projects/pi-delegate`; symlinked to `~/.pi/agent/extensions/pi-delegate/` |
 | DoD | Design approved → live end-to-end demo: extension spawns a real worker that completes a task |
-| Worker model | `--provider llm-platform-alpha --model glm-5.3-flash` built-in; per-run override via ~/.pi/agent/pi-delegate.config.json `{"defaults": {"provider", "model", "thinking"}}` (v1.9.1) or explicit tool params (user override of default tier table, 2026-09-05) |
+| Worker model | named tiers in ~/.pi/agent/pi-delegate.config.json: `{"tiers": {"<name>": {"provider", "model", "thinking"}}, "defaults": {"tier": "<name>"}}`; explicit `tier`/`provider`/`model`/`thinking` params win per key; **no built-in tier since v1.9.2** — unconfigured → E_TIER (the llm-platform-alpha/glm-5.3-flash hardcode was removed) |
 | Call semantics | `delegate` **blocks** until worker settles; Esc detaches (worker keeps running, recoverable via `delegate_status`); fan-out = parallel tool calls |
 | Report contract | **Strict**: fixed JSON schema enforced by the tool on collect (format chosen by tech lead: JSON over XML — native model emission, trivial validation) |
 | Placement modes | `worktree` + `tab` only; pane splits cut (leaky geometry, no isolation; sub-orchestrator tab support is the valuable half) |
@@ -109,9 +109,10 @@ Parameters (typebox):
 | `repoPath` | string | cwd | base for worktree/tab placement |
 | `branch` | string | `delegate/<name>` | worktree branch name |
 | `base` | string | HEAD | non-HEAD base ref |
-| `provider` | string | `defaults.provider` in config, else `llm-platform-alpha` | |
-| `model` | string | `defaults.model` in config, else `glm-5.3-flash` | |
-| `thinking` | string | `defaults.thinking` in config, else `high` | |
+| `tier` | string | `defaults.tier` in config | names an entry in the `tiers` table; unknown → E_TIER |
+| `provider` | string | tier/defaults-resolved | no built-in |
+| `model` | string | tier/defaults-resolved | no built-in |
+| `thinking` | string | tier/defaults-resolved | no built-in |
 | `timeoutMs` | number | 900000 | settle timeout for prompt (`agent wait`) |
 | `extraArgs` | string[] | `[]` | appended after `--` (e.g. `--session`) |
 
@@ -190,6 +191,7 @@ orchestrator model inherits the discipline without having read the skill.
 |---|---|---|
 | `E_BRIEF` | brief missing/empty/outside exchange dir | write brief first |
 | `E_NAME` | invalid/colliding name | use returned canonical name |
+| `E_TIER` | unknown requested tier, or no provider/model/thinking resolvable — there is NO built-in worker tier (v1.9.2) | add `tiers`/`defaults` to ~/.pi/agent/pi-delegate.config.json or pass provider/model/thinking |
 | `E_PLACE` | worktree/tab/pane creation failed | herdr stderr attached; reconcile via `herdr workspace list` (skill §6.3) |
 | `E_START` | agent start failed | check pane readiness; retry is a new `delegate` call |
 | `E_PROMPT_STALLED` | no state change within 5 s of submit | worker pane not at prompt; inspect via status |
