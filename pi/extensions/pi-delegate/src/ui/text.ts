@@ -52,6 +52,18 @@ export function trunc(s: string, w: number): string {
 	return `${out}…`;
 }
 
+/** Clamp every rendered line to the width pi-tui passes to
+ *  component.render(width). Over-wide transcript lines crash the whole TUI
+ *  with uncaughtException "Rendered line N exceeds terminal width" — every
+ *  custom render closure MUST route its lines through this (field crash
+ *  2026-09-05: delegate heartbeat headline 150 > 139 killed pi). No-op when
+ *  no width is known (headless/session replay). */
+export function clampLines(lines: string[], width?: number): string[] {
+	if (typeof width !== "number" || !Number.isFinite(width) || width <= 0) return lines;
+	const w = Math.floor(width);
+	return lines.map((l) => (visibleWidth(l) <= w ? l : trunc(l, w)));
+}
+
 /** Compact k-denominated token count: <1000 → "n" (836 → "836"); else one
  *  decimal below 100k, integer k from 100k up (9592 → "9.6k", 18517 → "18.5k",
  *  150000 → "150k"). Non-finite/negative → "0". */

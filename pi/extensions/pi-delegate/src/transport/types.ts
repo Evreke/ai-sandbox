@@ -93,6 +93,11 @@ export interface SettleResult {
 	 *  being observed working/blocked since submission — the prompt was likely
 	 *  never consumed. Never set when the agent settled normally. */
 	neverStarted?: boolean;
+	/** v1.8 (DESIGN.md §19.1b): true when the agent was ALREADY finished when the
+	 *  watcher attached (herdr ages done→idle within minutes, so a late watcher
+	 *  can never observe working/done). Proven by an assistant reply in the
+	 *  session JSONL — the opposite of neverStarted, not a failure. */
+	finishedBeforeWatch?: boolean;
 }
 
 export interface AgentStatus {
@@ -127,7 +132,15 @@ export interface Transport {
 	 *  for settle — settle observation is prompt()/waitSettle()'s job. */
 	submitPrompt(req: PromptReq): Promise<void>;
 	/** Poll/observe until the agent settles (idle|done|blocked) or timeout. */
-	waitSettle(req: { name: string; timeoutMs: number; signal?: AbortSignal }): Promise<SettleResult>;
+	waitSettle(req: {
+		name: string;
+		timeoutMs: number;
+		signal?: AbortSignal;
+		/** v1.8 heartbeat: called once per poll slice with the last observed state,
+		 *  so a long blocking wait can stream liveness via onUpdate instead of
+		 *  looking frozen. Throttling is the caller's job; never throws. */
+		onPoll?: (info: { status: AgentStatusName; started: boolean; elapsedMs: number }) => void;
+	}): Promise<SettleResult>;
 	getStatus(name: string): Promise<AgentStatus | null>;
 	listStatuses(): Promise<AgentStatus[]>;
 	teardown(req: TeardownReq): Promise<void>;

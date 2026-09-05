@@ -27,6 +27,7 @@ import {
 } from "../exchange.ts";
 import { WORKER_NAME_RE, type QuestionEnvelope, type Transport } from "../transport/types.ts";
 import { renderDelegateLines } from "../ui/fleet-ui.ts";
+import { clampLines } from "../ui/text.ts";
 
 /** Max wait for a nudge prompt *submission* to be accepted (not for settle). */
 const NUDGE_TIMEOUT_MS = 30_000;
@@ -94,7 +95,7 @@ export function registerMailboxTool(pi: import("@earendil-works/pi-coding-agent"
 			const name = typeof args?.name === "string" ? args.name : "?";
 			const head = theme.fg("toolTitle", theme.bold("delegate_mailbox "));
 			return {
-				render: () => [`${head} ${theme.fg("muted", action)} ${theme.fg("accent", name)}`],
+				render: (width?: number) => clampLines([`${head} ${theme.fg("muted", action)} ${theme.fg("accent", name)}`], width),
 				invalidate: () => {},
 			};
 		},
@@ -104,7 +105,7 @@ export function registerMailboxTool(pi: import("@earendil-works/pi-coding-agent"
 				.map((c) => c.text)
 				.join("\n");
 			const lines = renderDelegateLines("delegate_mailbox", resultText, theme);
-			return { render: () => lines, invalidate: () => {} };
+			return { render: (width?: number) => clampLines(lines, width), invalidate: () => {} };
 		},
 		async execute(_toolCallId, params) {
 			if (!WORKER_NAME_RE.test(params.name)) {

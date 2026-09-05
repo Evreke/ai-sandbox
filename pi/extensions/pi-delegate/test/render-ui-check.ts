@@ -10,6 +10,7 @@
 
 import { mountFleetUI, notifyFleetIdle, renderDelegateLines } from "../src/ui/fleet-ui.ts";
 import { archiveRoot } from "../src/archive.ts";
+import { clampLines, visibleWidth } from "../src/ui/text.ts";
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = "") {
@@ -174,6 +175,48 @@ function fakeTheme() {
 		threw = true;
 	}
 	check("A1 archiveRoot importable (contract stub ok to throw until A6 lands)", true);
+}
+
+// ---------------------------------------------------------------------------
+// v1.8b — width clamping (field crash 2026-09-05: heartbeat headline 150 > 139
+// crashed the whole TUI with uncaughtException "Rendered line N exceeds
+// terminal width"). Every custom render closure must clamp to the width
+// pi-tui passes to component.render(width).
+// ---------------------------------------------------------------------------
+
+{
+	// The EXACT crashing line from pi-tui-crash.log (ANSI stripped for the test;
+	// clampLines is ANSI-tolerant either way).
+	const crashHeadline =
+		"waiting for acceptance-verify: status=idle (prompt not yet observed consumed) (0s / 1500s) — Esc detaches safely, the worker survives";
+	const th = fakeTheme();
+	const lines = renderDelegateLines("delegate", crashHeadline, th);
+	const clamped = clampLines(lines, 139);
+	check(
+		"W1 the field-crash heartbeat headline clamps to terminal width (139)",
+		clamped.every((l) => visibleWidth(l) <= 139) && visibleWidth(clamped[0]) === 139,
+		`widths=${clamped.map(visibleWidth).join(",")}`,
+	);
+	check("W1b clamp keeps the badge prefix", clamped[0].includes("[OK]") && clamped[0].includes("[delegate]"), clamped[0]);
+
+	// Short lines pass through untouched (no ellipsis artifacts).
+	const short = clampLines(["[delegate] [OK] probe OK"], 139);
+	check("W2 short lines unchanged", short[0] === "[delegate] [OK] probe OK", short[0]);
+
+	// ANSI codes don't count toward width: a colored line clamps by VISIBLE width.
+	const colored = fakeTheme().fg("accent", "x".repeat(200));
+	const clampedColored = clampLines([colored], 50);
+	check("W3 ANSI-tolerant clamping (visible width, not byte length)", visibleWidth(clampedColored[0]) <= 50, String(visibleWidth(clampedColored[0])));
+
+	// No width known (headless/session replay) → identity: line content preserved
+	// byte-for-byte, no ellipsis, no throw.
+	const long = "a".repeat(500);
+	check("W4 no-width call is identity", clampLines([long])[0] === long && clampLines([long]).length === 1);
+	check("W5 degenerate widths never throw", clampLines(["abc"], 0).length === 1 && clampLines(["abc"], -5).length === 1);
+
+	// Wide (CJK) chars count as 2 columns.
+	const cjk = clampLines(["あ".repeat(100)], 30);
+	check("W6 wide-char safe clamping", visibleWidth(cjk[0]) <= 30, String(visibleWidth(cjk[0])));
 }
 
 if (failures > 0) {

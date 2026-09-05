@@ -44,6 +44,7 @@ import {
 } from "../usage.ts";
 import { archiveReport } from "../archive.ts";
 import { notifyFleetIdle, renderDelegateLines } from "../ui/fleet-ui.ts";
+import { clampLines } from "../ui/text.ts";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
 	CONTEXT_CRITICAL_PCT,
@@ -205,7 +206,8 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			const mode = typeof args?.mode === "string" ? args.mode : "worktree";
 			const head = theme.fg("toolTitle", theme.bold("delegate ")) + theme.fg("muted", mode);
 			return {
-				render: () => [`${head} ${theme.fg("accent", name)}`],
+				// v1.8b: clamp to the width pi-tui passes — over-wide lines crash the TUI.
+				render: (width?: number) => clampLines([`${head} ${theme.fg("accent", name)}`], width),
 				invalidate: () => {},
 			};
 		},
@@ -215,7 +217,10 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				.map((c) => c.text)
 				.join("\n");
 			const lines = renderDelegateLines("delegate", resultText, theme);
-			return { render: () => lines, invalidate: () => {} };
+			// v1.8b: clamp to the width pi-tui passes — the heartbeat headline can
+			// exceed narrow terminals and an over-wide line crashes the whole TUI
+			// (uncaughtException "Rendered line N exceeds terminal width").
+			return { render: (width?: number) => clampLines(lines, width), invalidate: () => {} };
 		},
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const step = (text: string, details: Record<string, unknown>) => {
@@ -629,6 +634,29 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				return { verdict, usedPath: reportPath, fallbackUsed: false };
 			};
 
+			// v1.8 probe salvage: a probe has no report file, so the generic salvage
+			// (collectReport) can never recover it. The smoke gate's verdict is the
+			// worker's settled state — recoverable from the session JSONL: an
+			// assistant message proves the smoke prompt was consumed and answered.
+			// Null when not a probe or the reply can't be proven → caller detaches.
+			const probeSalvage = (): ToolResult | null => {
+				if (!isProbe) return null;
+				if (!sessionPath || parseSessionUsage(sessionPath).turns === 0) return null;
+				void maybeNotifyFleetIdle();
+				return textResult(
+					`probe OK (detached after settle) — smoke gate passed before the abort (agent ${canonical}, smoke reply in session). ` +
+						"Run one probe before any ≥3 fan-out." +
+						`${uniquified ? ` ${uniquified}` : ""}`,
+					{
+						probe: "pass",
+						canonical,
+						requestedName: params.name,
+						placement,
+						detached: true,
+					},
+				);
+			};
+
 			if (signal?.aborted) return detach();
 
 			// 5. Brief (or probe smoke prompt): submit, no blind --wait.
@@ -651,17 +679,39 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 					{ canonical, placement, stderr: errText(err) },
 				);
 			}
-			if (signal?.aborted) return detach();
+			if (signal?.aborted) {
+				// Abort between prompt submission and settle — the smoke/task reply may
+				// already be in the session: salvage it before falling back to detach.
+				const salvaged = probeSalvage();
+				if (salvaged) return salvaged;
+				return detach();
+			}
 
 			// 6. Settle observation: abort cancels the wait, never the worker.
+			// v1.8 heartbeat: onPoll fires per slice; throttle to one step per ~10s
+			// so a long blocking wait visibly shows worker liveness instead of
+			// silence (the #1 trigger for operators killing a healthy wait).
 			step(`Waiting for ${canonical} to settle (timeout ${timeoutMs} ms)…`, {
 				phase: "wait",
 				canonical,
 				timeoutMs,
 			});
+			let lastBeat = 0;
+			const onPoll = (info: { status: AgentStatusName; started: boolean; elapsedMs: number }) => {
+				const now = Date.now();
+				if (now - lastBeat < 10_000) return;
+				lastBeat = now;
+				step(
+					`waiting for ${canonical}: status=${info.status}` +
+						`${info.started ? "" : " (prompt not yet observed consumed)"}` +
+						` (${Math.round(info.elapsedMs / 1000)}s / ${Math.round(timeoutMs / 1000)}s)` +
+						" — Esc detaches safely, the worker survives",
+					{ phase: "wait-heartbeat", canonical, ...info },
+				);
+			};
 			let settle;
 			try {
-				settle = await transport.waitSettle({ name: canonical, timeoutMs, signal });
+				settle = await transport.waitSettle({ name: canonical, timeoutMs, signal, onPoll });
 			} catch (err) {
 				if (signal?.aborted) return detach();
 				const b = gaugeSummary();
@@ -682,7 +732,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			const elapsedMs = Date.now() - startedAtDate.getTime();
 
 			if (signal?.aborted) {
-				// Detached after settle — do not discard a valid report if one exists.
+				// Detached after settle — do not discard a valid result if one exists.
 				const collected = collectReport();
 				if (collected.verdict.ok) {
 					return successResult(
@@ -692,6 +742,12 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 						"(detached after settle) ",
 					);
 				}
+				// v1.8 probe salvage: probes write no report file, so before v1.8 a
+				// passed smoke gate was lost to a generic Detached. If the smoke reply
+				// already happened (assistant message in the session JSONL), the probe
+				// verdict survives the abort.
+				const salvaged = probeSalvage();
+				if (salvaged) return salvaged;
 				return detach();
 			}
 
@@ -832,7 +888,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				await sleep(GRACE_DELAY_MS, signal);
 				if (signal?.aborted) {
 					// Abort between grace iterations → existing detach semantics,
-					// but do not discard a valid report if one landed.
+					// but do not discard a valid result if one landed.
 					const abortedCollect = collectReport();
 					if (abortedCollect.verdict.ok) {
 						return successResult(
@@ -842,6 +898,8 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 							"(detached after settle) ",
 						);
 					}
+					const salvaged = probeSalvage();
+					if (salvaged) return salvaged;
 					return detach();
 				}
 				collected = collectReport();

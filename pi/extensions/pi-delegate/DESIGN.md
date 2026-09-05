@@ -387,6 +387,40 @@ non-idle state (working/blocked) at least once SINCE SUBMISSION. Phases:
   2. settled phase (after first working/blocked observation): current behavior.
 The probe flow inherits this: a probe that never started is probe FAIL, not OK.
 
+### 19.1b v1.8 — aged-finish blind spot (live-reproduced 2026-09-05)
+herdr AGES `done → idle` within minutes (observed on probe / probe-retry /
+fresh-probe-x), so a watcher that attaches after the worker finished — fast
+flash probes, abort/detach recovery, slow start — can NEVER observe
+working/done. Pre-v1.8 it spun the FULL timeout against a visibly finished
+worker (120 s probe / 900 s normal) and then false-reported `neverStarted`
+while the pane showed a passed smoke gate. Field shape: "probe is done but
+orchestrator stuck" — operators kill the healthy wait.
+Fix: in the start-up phase, an unexplained idle is checked against the worker's
+session JSONL (path from `herdr agent get` → agent.agent_session.value): an
+assistant message proves the prompt was consumed → settle as
+`{status:"idle", timedOut:false, finishedBeforeWatch:true}` (success, not
+failure). No reply / missing / corrupt session → no proof → keep polling →
+neverStarted stays honest. The D3.1–D3.6 protections are unchanged.
+Companion fixes: (a) probe salvage on abort — probes write no report file, so
+the abort path now recovers the smoke-gate verdict from the session JSONL
+(`parseSessionUsage(...).turns > 0`) and returns `probe OK (detached after
+settle)` instead of a bare Detached; (b) `waitSettle` accepts `onPoll` and
+delegate emits a ~10 s heartbeat (status + elapsed + "Esc detaches safely") so
+a blocking wait never looks frozen.
+
+### 19.5 v1.8b — transcript/widget line-width clamping (field crash)
+pi-tui passes the available width to `component.render(width)` and CRASHES the
+whole process (uncaughtException "Rendered line N exceeds terminal width") when
+any returned line exceeds it. Field crash 2026-09-05: the new v1.8 heartbeat
+headline rendered 150 cols into a 139-col terminal and killed pi
+(pi-tui-crash.log line 13185). Rule: EVERY custom render closure in this
+extension — renderCall/renderResult of delegate/mailbox/status, both fleet
+widgets — accepts the width param and routes its lines through
+`clampLines(lines, width)` (ui/text.ts: visibleWidth-aware, wide-char safe,
+ANSI-tolerant, ellipsis via trunc). No-width calls (headless, session replay)
+are identity. Regression checks: render-ui-check.ts W1–W6 (W1 replays the
+exact crashing headline at width 139).
+
 ### 19.2 D4 — second name-taken CLI shape
 herdr `agent start` failure text variant "name taken by a live agent (candidates:
 …)" maps to E_NAME + candidate guidance, same as the `agent_name_taken` code path

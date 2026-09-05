@@ -22,7 +22,7 @@ import type { Transport } from "../transport/types.ts";
 import { contextPct, parseSessionUsage, resolveContextWindow } from "../usage.ts";
 import { archiveRoot, listArchivedTasks } from "../archive.ts";
 import { renderDelegateLines } from "../ui/fleet-ui.ts";
-import { fmtK } from "../ui/text.ts";
+import { clampLines, fmtK } from "../ui/text.ts";
 
 /** Budget governor display data (DESIGN.md §14), read-only: name → session
  *  JSONL path and recorded effective budget from every manifest, plus the
@@ -124,7 +124,7 @@ export function registerStatusTool(pi: import("@earendil-works/pi-coding-agent")
 			const name = typeof args?.name === "string" ? args.name : "(all)";
 			const head = theme.fg("toolTitle", theme.bold("delegate_status "));
 			return {
-				render: () => [`${head} ${theme.fg("accent", name)}`],
+				render: (width?: number) => clampLines([`${head} ${theme.fg("accent", name)}`], width),
 				invalidate: () => {},
 			};
 		},
@@ -134,7 +134,7 @@ export function registerStatusTool(pi: import("@earendil-works/pi-coding-agent")
 				.map((c) => c.text)
 				.join("\n");
 			const lines = renderDelegateLines("delegate_status", resultText, theme);
-			return { render: () => lines, invalidate: () => {} };
+			return { render: (width?: number) => clampLines(lines, width), invalidate: () => {} };
 		},
 		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
 			const views = await buildWorkerView(transport);

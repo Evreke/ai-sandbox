@@ -15,6 +15,7 @@
  */
 
 import { execFile } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { promisify } from "node:util";
 import type {
 	AgentStatus,
@@ -62,6 +63,31 @@ const SETTLED: readonly AgentStatusName[] = ["idle", "done", "blocked"];
  *  by transport-contract T2.2e); done additionally means finished, so the
  *  settled phase is entered immediately. */
 const STARTED: readonly AgentStatusName[] = ["working", "blocked", "done"];
+
+/** v1.8 (DESIGN.md §19.1b): true when the session JSONL contains at least one
+ *  assistant message — proof the prompt was consumed and the agent replied.
+ *  Used to distinguish "idle because never started" from "idle because already
+ *  finished" when a watcher attaches after herdr aged done→idle (observed
+ *  aging: minutes). Tolerant: missing/unreadable/corrupt file → false, never
+ *  throws. Exported for tests. */
+export function sessionHasReply(sessionPath: string): boolean {
+	let raw: string;
+	try {
+		raw = readFileSync(sessionPath, "utf8");
+	} catch {
+		return false;
+	}
+	for (const line of raw.split("\n")) {
+		if (!line.includes('"assistant"')) continue; // cheap prefilter
+		try {
+			const e = JSON.parse(line) as { message?: { role?: unknown } };
+			if (e.message?.role === "assistant") return true;
+		} catch {
+			// partial/corrupt line — skip
+		}
+	}
+	return false;
+}
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -221,7 +247,12 @@ export class HerdrTransport implements Transport {
 		}
 	}
 
-	async waitSettle(req: { name: string; timeoutMs: number; signal?: AbortSignal }): Promise<SettleResult> {
+	async waitSettle(req: {
+		name: string;
+		timeoutMs: number;
+		signal?: AbortSignal;
+		onPoll?: (info: { status: AgentStatusName; started: boolean; elapsedMs: number }) => void;
+	}): Promise<SettleResult> {
 		// D3 (DESIGN.md §19.1) — two-phase state machine against the
 		// settle-before-start race: the first `agent wait --until idle…` slice can
 		// match BEFORE the prompt is consumed (agent still idle) → instant false
@@ -234,42 +265,76 @@ export class HerdrTransport implements Transport {
 		// {status:"unknown", timedOut:true, neverStarted:true}.
 		// Phase SETTLED (after the first such observation): current behavior —
 		// idle/done/blocked settle; slices + reconcile; abort → detach.
-		const deadline = Date.now() + req.timeoutMs;
+		//
+		// v1.8 (DESIGN.md §19.1b) — the aged-finish blind spot (live-reproduced):
+		// herdr ages done→idle within minutes, so a watcher that attaches late —
+		// fast flash probes, abort/detach recovery, slow start — can NEVER observe
+		// working/done and spins the FULL timeout against a visibly finished
+		// worker, then false-reports neverStarted. Disambiguation: an unexplained
+		// idle is checked against the session JSONL — an assistant reply proves the
+		// prompt was consumed → settle as finishedBeforeWatch (success, not
+		// failure). No reply → genuinely never started → keep polling.
+		const startedAt = Date.now();
+		const deadline = startedAt + req.timeoutMs;
 		let last: AgentStatusName = "unknown";
 		let started = false;
+		let sessionPath: string | undefined;
 		while (Date.now() < deadline) {
 			if (req.signal?.aborted) {
 				// Abort detaches the wait, never the worker (DESIGN.md §5.1).
 				const s = await this.getStatus(req.name).catch(() => null);
 				return { status: s?.status ?? last, timedOut: false };
 			}
+			let status: AgentStatusName | undefined;
 			try {
 				const { stdout } = await runHerdr(
 					["agent", "wait", req.name, "--until", "idle", "--until", "done", "--until", "blocked", "--timeout", String(WAIT_SLICE_MS)],
 					WAIT_EXEC_BUDGET_MS,
 				);
 				const { result } = parseHerdrResult(stdout);
-				const status = statusFromResult(result);
-				if (status) last = status;
-				if (status && STARTED.includes(status)) started = true;
-				if (started && status && SETTLED.includes(status)) return { status, timedOut: false };
+				status = statusFromResult(result);
 			} catch {
 				// Slice timed out or CLI hiccup — reconcile via a direct status read.
+			}
+			if (!status) {
 				const s = await this.getStatus(req.name).catch(() => null);
-				if (s) {
-					last = s.status;
-					if (STARTED.includes(s.status)) started = true;
-					if (started && SETTLED.includes(s.status)) return { status: s.status, timedOut: false };
+				status = s?.status;
+			}
+			if (status) last = status;
+			if (status && STARTED.includes(status)) started = true;
+			// v1.8: unexplained idle — prove life from the session before declaring
+			// the wait unstartable. Only reached while started is still false, so the
+			// normal flow never pays for the extra `agent get` + file read.
+			if (!started && status === "idle") {
+				if (sessionPath === undefined) {
+					sessionPath = await this.resolveSessionPath(req.name).catch(() => undefined);
+				}
+				if (sessionPath && sessionHasReply(sessionPath)) {
+					req.onPoll?.({ status: "idle", started: true, elapsedMs: Date.now() - startedAt });
+					return { status: "idle", timedOut: false, finishedBeforeWatch: true };
 				}
 			}
+			req.onPoll?.({ status: status ?? "unknown", started, elapsedMs: Date.now() - startedAt });
+			if (started && status && SETTLED.includes(status)) return { status, timedOut: false };
 			await sleep(WAIT_SLEEP_MS);
 		}
 		if (!started) {
 			// Never observed working/blocked/done since submission — the prompt was
 			// likely never consumed; a settle here would be the false-settle bug.
+			// (v1.8: an already-finished worker was ruled out above by the session
+			// reply proof, so neverStarted here is honest.)
 			return { status: "unknown", timedOut: true, neverStarted: true };
 		}
 		return { status: last, timedOut: true };
+	}
+
+	/** v1.8: resolve the agent's session JSONL path from `herdr agent get`
+	 *  (result.agent.agent_session.value). Undefined when herdr doesn't expose
+	 *  it — callers then fall back to the pre-v1.8 behavior. */
+	private async resolveSessionPath(name: string): Promise<string | undefined> {
+		const { stdout } = await runHerdr(["agent", "get", name]);
+		const { result } = parseHerdrResult(stdout);
+		return isRecord(result) ? asString(pick(result, "agent.agent_session.value", "agent_session.value")) : undefined;
 	}
 
 	// -- Mutating op bodies (run serialized via enqueue) ----------------------------

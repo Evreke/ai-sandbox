@@ -25,7 +25,7 @@ import type {
 	Theme,
 	ThemeColor,
 } from "@earendil-works/pi-coding-agent";
-import { fmtK, trunc, visibleWidth } from "./text.ts";
+import { fmtK, trunc, visibleWidth, clampLines } from "./text.ts";
 
 /** Data the UI needs per worker — supplied by the caller (state.ts + usage.ts). */
 export interface FleetRow {
@@ -120,8 +120,13 @@ export function mountFleetUI(ctx: ExtensionContext, deps: FleetUIDeps): () => vo
 			(tui, theme) => {
 				tuiRef = tui;
 				return {
-					render: () =>
-						renderLiveRows(rows, theme, (tui as { terminal?: { columns?: number } } | undefined)?.terminal?.columns),
+					// v1.8b: clamp to the width pi-tui passes — over-wide widget lines
+					// crash the TUI (same failure shape as transcript lines).
+					render: (width?: number) =>
+						clampLines(
+							renderLiveRows(rows, theme, (tui as { terminal?: { columns?: number } } | undefined)?.terminal?.columns ?? width),
+							width,
+						),
 					invalidate: () => {},
 				};
 			},
@@ -136,7 +141,7 @@ export function mountFleetUI(ctx: ExtensionContext, deps: FleetUIDeps): () => vo
 			CHIP_KEY,
 			(tui, theme) => ({
 				invalidate: () => {},
-				render: () => {
+				render: (width?: number) => {
 					const n = deps.getPlacedCount();
 					if (n <= 0) return [];
 					const worst = rows.reduce<number>(
@@ -147,9 +152,9 @@ export function mountFleetUI(ctx: ExtensionContext, deps: FleetUIDeps): () => vo
 					// Right-align to the terminal width when it is discoverable.
 					const cols = (tui as { terminal?: { columns?: number } } | undefined)?.terminal?.columns;
 					if (typeof cols === "number" && cols > visibleWidth(line) + 2) {
-						return [theme.fg("accent", " ".repeat(cols - visibleWidth(line)) + line)];
+						return clampLines([theme.fg("accent", " ".repeat(cols - visibleWidth(line)) + line)], width);
 					}
-					return [theme.fg("accent", line)];
+					return clampLines([theme.fg("accent", line)], width);
 				},
 			}),
 			{ placement: "belowEditor" },

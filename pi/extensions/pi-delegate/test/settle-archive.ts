@@ -47,7 +47,14 @@ case "$1 $2" in
     exit 0 ;;
   "agent get")
     s=$(cat "\${STUB}/get-status" 2>/dev/null || echo unknown)
-    echo "{\\"result\\":{\\"agent\\":{\\"name\\":\\"stub\\",\\"agent_status\\":\\"$s\\"}}}"
+    # v1.8: optional session path — waitSettle resolves it to check for an
+    # assistant reply when it sees an unexplained idle.
+    if [ -f "\${STUB}/get-session" ]; then
+      sess=$(cat "\${STUB}/get-session")
+      echo "{\\"result\\":{\\"agent\\":{\\"name\\":\\"stub\\",\\"agent_status\\":\\"$s\\",\\"agent_session\\":{\\"value\\":\\"$sess\\"}}}}"
+    else
+      echo "{\\"result\\":{\\"agent\\":{\\"name\\":\\"stub\\",\\"agent_status\\":\\"$s\\"}}}"
+    fi
     exit 0 ;;
   "agent start")
     cat "\${STUB}/start-stderr" >&2
@@ -147,6 +154,109 @@ try {
 			JSON.stringify(r),
 		);
 	}
+
+	// -------------------------------------------------------------------------
+	// D3.7+ — v1.8 aged-finish fix (DESIGN.md §19.1b): herdr ages done→idle
+	// within minutes (live-reproduced 2026-09-05: probe, probe-retry,
+	// fresh-probe-x all flipped), so a late watcher sees only idle and can never
+	// observe working/done — it spun the FULL timeout, then false-reported
+	// neverStarted while the pane showed a passed smoke gate. Disambiguation:
+	// session JSONL assistant reply = already finished.
+	// -------------------------------------------------------------------------
+	const sessDir = mkdtempSync(join(tmpdir(), "qa-sess-"));
+	const repliedSession = join(sessDir, "replied.jsonl");
+	writeFileSync(
+		repliedSession,
+		'{"type":"message","message":{"role":"user","content":[]}}\n' +
+			'{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"OUTPUT: OK"}]}}\n',
+	);
+	const emptySession = join(sessDir, "empty.jsonl");
+	writeFileSync(emptySession, '{"type":"message","message":{"role":"user","content":[]}}\n');
+	const corruptSession = join(sessDir, "corrupt.jsonl");
+	writeFileSync(corruptSession, "{ half-written line\n");
+
+	// 3.7 aged finish: idle forever + session shows an assistant reply → settles
+	// immediately as finishedBeforeWatch (was: full timeout + false neverStarted).
+	scriptWait(["idle"]);
+	writeFileSync(join(STUB_DIR, "get-status"), "idle");
+	writeFileSync(join(STUB_DIR, "get-session"), repliedSession);
+	{
+		const t0 = Date.now();
+		const r = await t.waitSettle({ name: "w-aged", timeoutMs: 10_000 });
+		check(
+			"D3.7 aged done→idle settles via session reply proof (finishedBeforeWatch)",
+			r.status === "idle" && r.timedOut === false && r.finishedBeforeWatch === true && r.neverStarted === undefined,
+			JSON.stringify(r),
+		);
+		check("D3.7b settles immediately, no timeout spin", Date.now() - t0 < 5_000, `${Date.now() - t0}ms`);
+	}
+
+	// 3.8 idle + session WITHOUT an assistant reply → genuinely never started →
+	// keeps polling to the full timeout and reports neverStarted (the D3 fix's
+	// original protection must not regress).
+	writeFileSync(join(STUB_DIR, "get-session"), emptySession);
+	{
+		const r = await t.waitSettle({ name: "w-empty", timeoutMs: 2500 });
+		check(
+			"D3.8 idle + reply-less session stays neverStarted (no false salvage)",
+			r.status === "unknown" && r.timedOut === true && r.neverStarted === true,
+			JSON.stringify(r),
+		);
+	}
+
+	// 3.9 corrupt session → no proof → neverStarted (tolerant, never throws).
+	writeFileSync(join(STUB_DIR, "get-session"), corruptSession);
+	{
+		const r = await t.waitSettle({ name: "w-corrupt", timeoutMs: 2500 });
+		check(
+			"D3.9 corrupt session file → no proof, neverStarted (never throws)",
+			r.neverStarted === true,
+			JSON.stringify(r),
+		);
+	}
+
+	// 3.10 missing session file → no proof → neverStarted.
+	writeFileSync(join(STUB_DIR, "get-session"), join(sessDir, "absent.jsonl"));
+	{
+		const r = await t.waitSettle({ name: "w-absent", timeoutMs: 2500 });
+		check("D3.10 missing session file → no proof, neverStarted", r.neverStarted === true, JSON.stringify(r));
+	}
+
+	// 3.11 heartbeat: onPoll fires per slice with the observed state.
+	scriptWait(["working", "working", "idle"]);
+	{
+		const polls: Array<{ status: string; started: boolean }> = [];
+		const r = await t.waitSettle({
+			name: "w-beat",
+			timeoutMs: 20_000,
+			onPoll: (info) => polls.push({ status: info.status, started: info.started }),
+		});
+		check(
+			"D3.11 onPoll heartbeat fires per slice with observed state",
+			polls.length >= 2 && polls[0].status === "working" && polls.some((p) => p.started),
+			JSON.stringify(polls),
+		);
+		check(
+			"D3.11b heartbeat did not change the settle outcome",
+			r.status === "idle" && r.timedOut === false,
+			JSON.stringify(r),
+		);
+	}
+
+	// 3.12 aged finish on the reconcile path too (slice unknown → getStatus
+	// reconcile returns idle + session reply → settles).
+	scriptWait(["unknown", "idle"]);
+	writeFileSync(join(STUB_DIR, "get-session"), repliedSession);
+	{
+		const r = await t.waitSettle({ name: "w-reconcile", timeoutMs: 10_000 });
+		check(
+			"D3.12 reconcile-path aged finish settles (finishedBeforeWatch)",
+			r.status === "idle" && r.finishedBeforeWatch === true,
+			JSON.stringify(r),
+		);
+	}
+
+	rmSync(sessDir, { recursive: true, force: true });
 
 	// -------------------------------------------------------------------------
 	// D4 — second name-taken shape (DESIGN.md §19.2)

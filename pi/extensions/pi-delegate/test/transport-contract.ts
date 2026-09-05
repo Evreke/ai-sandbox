@@ -211,9 +211,11 @@ try {
 
 	// -----------------------------------------------------------------------
 	// T2.3 — sub-mode rejection (LAST: leaves cwd changed). A real sub-orchestrator
-	// cwd is INSIDE the worktrees prefix, e.g. /root/.herdr/worktrees/<repo>/<branch>.
+	// cwd is INSIDE the worktrees prefix. Create a throwaway dir there instead of
+	// chdir'ing into a hardcoded path from a previous run (stale dirs vanish).
 	// -----------------------------------------------------------------------
-	process.chdir("/root/.herdr/worktrees/pi-delegate/impl-qa");
+	const subDir = mkdtempSync("/root/.herdr/worktrees/pi-delegate/impl-qa-");
+	process.chdir(subDir);
 	const tSub = createHerdrTransport();
 	const capsSub = tSub.capabilities();
 	check("T2.3 capabilities(): sub authority under /root/.herdr/worktrees", capsSub.authority === "sub" && capsSub.worktrees === false, JSON.stringify(capsSub));
@@ -232,6 +234,7 @@ try {
 	);
 } finally {
 	process.chdir(originalCwd);
+	try { rmSync(subDir, { recursive: true, force: true }); } catch { /* already gone */ }
 	for (const p of created) await forceCleanup(p);
 	rmSync(repoDir, { recursive: true, force: true });
 }
