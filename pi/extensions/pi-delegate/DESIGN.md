@@ -546,3 +546,16 @@ tokens `↑in ↓out` stay display-only. Refusal guidance names which gauge trip
 
 **Manifest additions:** `lastTotalTokens`, `contextWindow`, `turns` recorded at
 collect (provenance for the refusal decision).
+
+## 20.1 Blocking window capped (v1.8b, field: "still present")
+
+The delegate call's default blocking window is capped at 120 s (waitMs
+overrides explicitly; probe keeps its 120 s). A large legacy timeoutMs no
+longer holds the orchestrator session hostage: at the cap the call
+auto-detaches through the existing E_TIMEOUT path ("worker still running —
+poll delegate_status"), and monitoring continues via the fleet widget.
+Rationale (field, supervip + delegate tab): a 1800 s block parked the
+orchestrator for half an hour while the widget already showed the truth —
+the same "waiting while the truth is visible" failure as the probe report
+wait. Long blocking is explicit opt-in (waitMs), never a side effect of a
+stale large timeoutMs.

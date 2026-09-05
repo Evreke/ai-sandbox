@@ -108,7 +108,9 @@ const delegateParams = Type.Object({
 	provider: Type.Optional(Type.String({ description: "Agent provider override; otherwise the configured tier/defaults decide (see ~/.pi/agent/pi-delegate.config.json) — no built-in default" })),
 	model: Type.Optional(Type.String({ description: "Agent model override; otherwise the configured tier/defaults decide (see ~/.pi/agent/pi-delegate.config.json) — no built-in default" })),
 	thinking: Type.Optional(Type.String({ description: "Thinking level override; otherwise the configured tier/defaults decide (see ~/.pi/agent/pi-delegate.config.json) — no built-in default" })),
-	timeoutMs: Type.Optional(Type.Number({ description: "Settle timeout in ms (default 900000; probe 120000)" })),
+	waitMs: Type.Optional(Type.Number({ description: "How long this call BLOCKS waiting for the worker (default 120000 ms). If the worker is still running at the cap, the call auto-detaches with a 'still running' result — poll delegate_status; the worker keeps working. Long waits are opt-in via this param." })),
+	timeoutMs: Type.Optional(Type.Number({ description: "Deprecated alias for waitMs — CAPPED at 120000 ms unless waitMs is set explicitly." })),
+
 	budgetTokens: Type.Optional(Type.Number({ minimum: 1, description: "Optional OUTPUT-token cap (sum of assistant output); over-budget workers are refused on retry with E_BUDGET." })),
 	maxContextPct: Type.Optional(Type.Number({ minimum: 10, maximum: 99, description: "Context-window %% refusal line (default 80 — the operator restart habit). Re-spawning a worker at/over this context %% is refused with E_CONTEXT." })),
 	extraArgs: Type.Optional(Type.Array(Type.String(), { description: "Extra args appended after --" })),
@@ -236,7 +238,20 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			};
 			const startedAtDate = new Date();
 			const isProbe = params.mode === "probe";
-			const timeoutMs = params.timeoutMs ?? (isProbe ? PROBE_TIMEOUT_MS : 900_000);
+			// v1.8b (§20.1, hardened): the blocking window is capped UNCONDITIONALLY
+			// at 120 s unless the caller EXPLICITLY opts in via waitMs. A legacy
+			// timeoutMs (e.g. 1800000 from an older habit) is capped too — it must
+			// never hold the orchestrator session hostage for minutes: the fleet
+			// widget + delegate_status are the monitoring surface, and the
+			// auto-detach result carries the full gauge (token stats + budget).
+			const WAIT_CAP_MS = 120_000;
+			const timeoutMs =
+				params.waitMs ??
+				(params.timeoutMs !== undefined
+					? Math.min(params.timeoutMs, WAIT_CAP_MS)
+					: isProbe
+						? PROBE_TIMEOUT_MS
+						: WAIT_CAP_MS);
 			// v1.9.2 tier resolution — explicit params > tiers[<tier>] > defaults,
 			// per key. There is NO built-in worker tier: an unconfigured environment
 			// fails fast with E_TIER here (before touching herdr) instead of
