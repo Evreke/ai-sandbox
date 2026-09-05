@@ -7,7 +7,9 @@
  * Primitives (verified in pi docs/examples, Patterns 4/5/6):
  *   ctx.ui.setWidget(id, renderer, {placement})   — live rows above editor
  *   (setFooter REJECTED — it REPLACES pi's native footer (context %, model,
- *    cost, cwd): unacceptable. The chip lives in a below-editor widget instead.)
+ *    cost, cwd): unacceptable. The placed-count chip was REMOVED entirely
+ *    (confusing: global cross-session count, pessimistic burn) — v1.8.
+ *    The live-rows widget is the only ambient surface.)
  *   ctx.ui.notify(msg, level)                     — nudges
  *   registerTool renderCall/renderResult          — themed transcript rendering
  *
@@ -43,8 +45,6 @@ export interface FleetRow {
 
 export interface FleetUIDeps {
 	getRows(): Promise<FleetRow[]>;
-	/** How many workers are placed but not yet torn down (tab clutter count). */
-	getPlacedCount(): number;
 }
 
 // ---------------------------------------------------------------------------
@@ -87,13 +87,11 @@ function isLive(row: FleetRow): boolean {
 // ---------------------------------------------------------------------------
 
 /**
- * Mount the live fleet widget + placed-chip widget. Idempotent: calling twice
- * replaces the previous mount. Starts a 2 s refresh interval that renders
- * live workers (working/blocked) as rows above the editor; the placed-count
- * chip renders BELOW the editor (a widget — never ctx.ui.setFooter, which
- * would replace pi's native footer: context %, model, cost, cwd). The chip
- * widget clears when nothing is placed. Returns a dispose function (clears
- * timers, clears both widgets) — used by /delegate-teardown.
+ * Mount the live fleet widget (only ambient surface). Idempotent: calling
+ * twice replaces the previous mount. Starts a 2 s refresh interval that
+ * renders live workers (working/blocked) as rows above the editor; the
+ * widget clears when no live workers remain. Returns a dispose function
+ * (clears timers + widget) — used by /delegate-teardown.
  */
 export function mountFleetUI(ctx: ExtensionContext, deps: FleetUIDeps): () => void {
 	// Headless guard: MUST work (no-op) when there is no UI.
@@ -108,7 +106,6 @@ export function mountFleetUI(ctx: ExtensionContext, deps: FleetUIDeps): () => vo
 
 	let rows: FleetRow[] = [];
 	let widgetShown = false;
-	let chipShown = false;
 	let disposed = false;
 	let tuiRef:
 		| { requestRender(force?: boolean): void; terminal?: { columns?: number } }
@@ -135,33 +132,6 @@ export function mountFleetUI(ctx: ExtensionContext, deps: FleetUIDeps): () => vo
 		widgetShown = true;
 	};
 
-	const CHIP_KEY = "delegate-fleet-chip";
-	const showChip = (): void => {
-		ctx.ui.setWidget(
-			CHIP_KEY,
-			(tui, theme) => ({
-				invalidate: () => {},
-				render: (width?: number) => {
-					const n = deps.getPlacedCount();
-					if (n <= 0) return [];
-					const worst = rows.reduce<number>(
-						(acc, r) => (typeof r.budgetPct === "number" && r.budgetPct > acc ? r.budgetPct : acc),
-						0,
-					);
-					const line = `⏵ ${n} placed workers · worst ctx burn ${worst}% · /delegate-fleet`;
-					// Right-align to the terminal width when it is discoverable.
-					const cols = (tui as { terminal?: { columns?: number } } | undefined)?.terminal?.columns;
-					if (typeof cols === "number" && cols > visibleWidth(line) + 2) {
-						return clampLines([theme.fg("accent", " ".repeat(cols - visibleWidth(line)) + line)], width);
-					}
-					return clampLines([theme.fg("accent", line)], width);
-				},
-			}),
-			{ placement: "belowEditor" },
-		);
-		chipShown = true;
-	};
-
 	const refresh = async (): Promise<void> => {
 		if (disposed) return;
 		try {
@@ -179,13 +149,6 @@ export function mountFleetUI(ctx: ExtensionContext, deps: FleetUIDeps): () => vo
 		} else if (live.length > 0 && !widgetShown) {
 			showWidget();
 		}
-		const placed = deps.getPlacedCount();
-		if (placed <= 0 && chipShown) {
-			ctx.ui.setWidget(CHIP_KEY, undefined);
-			chipShown = false;
-		} else if (placed > 0 && !chipShown) {
-			showChip();
-		}
 		tuiRef?.requestRender();
 	};
 
@@ -200,7 +163,6 @@ export function mountFleetUI(ctx: ExtensionContext, deps: FleetUIDeps): () => vo
 		clearInterval(timer);
 		if (ctx.hasUI && ctx.ui) {
 			ctx.ui.setWidget(WIDGET_KEY, undefined);
-			ctx.ui.setWidget(CHIP_KEY, undefined);
 			// Defensive: restore the native footer if any older build replaced it.
 			ctx.ui.setFooter(undefined);
 		}

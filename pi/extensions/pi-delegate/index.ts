@@ -105,9 +105,6 @@ export default function (pi: ExtensionAPI) {
 					}),
 				);
 			},
-			getPlacedCount(): number {
-				return placedCount;
-			},
 		};
 		mountFleetUI(ctx, deps);
 	});
