@@ -198,7 +198,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			"Use delegate only after the brief file exists under /tmp/exchange/<task>/ — pass its path as briefPath; the brief is the worker's instructions and its OUTPUT section must point at report-<name>.json.",
 			"delegate blocks until the worker settles; the worker's report file is the completion criterion, not the agent status — status fail in the report is still an honest completion.",
 			"If delegate returns E_REPORT_MISSING or E_REPORT_INVALID, do a diagnosed retry with root cause + fix shape (at most 2 repeats, then escalate); never repeat verbatim.",
-			"Run delegate once with mode 'probe' before any ≥3 fan-out — the probe is the smoke gate that catches dead panes and wrong model flags cheaply.",
+			"mode 'probe' is OPTIONAL (enterprise cost): only for untrusted environments — the first real worker's structured failures (E_PLACE/E_START/E_NAME) are just as cheap a smoke signal. Probes verify the pane reply \"OUTPUT: OK\" by streaming readback.",
 			"Probe workers NEVER write a report file — a 'probe OK/FAIL' result is final by itself; never wait for or read a probe's report-<name>.json (only real workers produce reports).",
 		],
 		parameters: delegateParams,
@@ -775,13 +775,27 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				} catch {
 					live = "unknown";
 				}
-				const reminder = "Run one probe before any ≥3 fan-out.";
-				if (live === "idle" || live === "done") {
+				// v1.8.x: verdict from STREAMING (pane readback) — did the worker actually
+				// reply "OUTPUT: OK"? Status alone (idle/done) is necessary, not sufficient.
+				const reminder =
+					"Probe is optional — a real worker's first structured failure (E_PLACE/E_START/E_NAME) is just as cheap a smoke signal.";
+				let paneText: string | undefined;
+				const readPane = (transport as { readPane?: (name: string, opts?: { maxChars?: number }) => Promise<string> })
+					.readPane;
+				if (typeof readPane === "function") {
+					try {
+						paneText = await readPane(canonical, { maxChars: 4000 });
+					} catch {
+						paneText = undefined; // pane readback unavailable → status-based fallback
+					}
+				}
+				const markerSeen = typeof paneText === "string" && /OUTPUT:\s*OK/i.test(paneText);
+				if (markerSeen) {
 					void maybeNotifyFleetIdle();
 					return textResult(
-						`probe OK — safe to fan out (agent ${canonical}, status ${live}). ` +
+						`probe OK — smoke reply verified in worker output ("OUTPUT: OK", agent ${canonical}, status ${live}). ` +
 							"Probes write NO report file — this verdict is final; do not wait for or read report-<name>.json. " +
-							`${reminder}` +
+							"Probe is optional: skip it when the environment is already trusted. " +
 							`${uniquified ? ` ${uniquified}` : ""}` +
 							`${manifestWarning ? ` Warning: ${manifestWarning}` : ""}`,
 						{
@@ -790,16 +804,31 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 							requestedName: params.name,
 							placement,
 							status: live,
+							verified: "pane-marker",
 							elapsedMs,
 							...(manifestWarning ? { warning: manifestWarning } : {}),
 						},
 					);
 				}
+				const paneEvidence =
+					typeof paneText === "string" && paneText.trim().length > 0
+						? ` Pane tail: …${paneText.trim().slice(-300)}`
+						: " Pane readback unavailable — verdict from status only.";
 				void maybeNotifyFleetIdle();
+				if (live === "idle" || live === "done") {
+					return fail(
+						"E_START",
+						`probe FAIL — agent ${canonical} ${live} but the smoke reply "OUTPUT: OK" was not found in its output.${paneEvidence} ` +
+							"Fix before fanning out. Probes write no report file. " +
+							`${reminder}${uniquified ? ` ${uniquified}` : ""}` +
+							`${manifestWarning ? ` Warning: ${manifestWarning}` : ""}`,
+						{ probe: "fail", canonical, placement, status: live, verified: "pane-marker-missing", timedOut: settle.timedOut, elapsedMs },
+					);
+				}
 				return fail(
 					"E_START",
 					`probe FAIL — agent ${canonical} status ${live}` +
-						`${settle.timedOut ? " (settle timed out)" : ""}: pane/agent did not reach a healthy state. ` +
+						`${settle.timedOut ? " (settle timed out)" : ""}: pane/agent did not reach a healthy state.${paneEvidence} ` +
 						"Check pane readiness and model flags (provider/model/thinking); fix before fanning out. Probes write no report file. " +
 						`${reminder}${uniquified ? ` ${uniquified}` : ""}` +
 						`${manifestWarning ? ` Warning: ${manifestWarning}` : ""}`,

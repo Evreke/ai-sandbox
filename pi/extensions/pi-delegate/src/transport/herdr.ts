@@ -337,6 +337,14 @@ export class HerdrTransport implements Transport {
 		return isRecord(result) ? asString(pick(result, "agent.agent_session.value", "agent_session.value")) : undefined;
 	}
 
+	async readPane(name: string, opts?: { maxChars?: number }): Promise<string> {
+		// Read-only: terminal snapshot (recent), NOT queued with mutations.
+		const { stdout } = await runHerdr(["agent", "read", name, "--source", "recent"]);
+		const out = String(stdout ?? "");
+		const max = opts?.maxChars ?? 4000;
+		return out.length > max ? out.slice(out.length - max) : out;
+	}
+
 	// -- Mutating op bodies (run serialized via enqueue) ----------------------------
 
 	private async placeInner(req: PlacementReq): Promise<Placement> {

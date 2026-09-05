@@ -142,6 +142,10 @@ export interface Transport {
 		onPoll?: (info: { status: AgentStatusName; started: boolean; elapsedMs: number }) => void;
 	}): Promise<SettleResult>;
 	getStatus(name: string): Promise<AgentStatus | null>;
+	/** Recent pane output for a worker (terminal snapshot, few hundred lines tail).
+	 *  Optional: probe-verdict from streaming; implementations without pane
+	 *  readback may reject — callers must fall back to status-based verdicts. */
+	readPane?(name: string, opts?: { maxChars?: number }): Promise<string>;
 	listStatuses(): Promise<AgentStatus[]>;
 	teardown(req: TeardownReq): Promise<void>;
 	capabilities(): TransportCapabilities;
