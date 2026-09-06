@@ -18,7 +18,9 @@ ritual in [REFERENCE.md](REFERENCE.md) and report that the extension is missing.
 2. **Brief** — one file per worker at `/tmp/exchange/{TASK}/brief-<name>.md`:
    ROLE (tier + read/write scope) / TASK (one outcome) / CONTEXT (file pointers only,
    paste nothing the worker can read) / CONSTRAINTS (owned surface first, then explicit
-   negatives) / OUTPUT (exact report path + JSON schema) / BUDGET.
+   negatives) / OUTPUT: acceptance criteria only — report path and shape come
+   from the tool's fixed prompt; never paste the report JSON schema into a
+   brief / BUDGET.
    Names: `[a-z][a-z0-9_-]{0,31}`. Briefs are name-agnostic: the tool tells the worker
    its canonical name — never hard-code worker names or report filenames in briefs;
    write "report-<your assigned worker name>.json".

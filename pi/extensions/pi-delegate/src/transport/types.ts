@@ -262,14 +262,28 @@ export interface WorkerReport {
 /** Name rules from the delegate skill: [a-z][a-z0-9_-]{0,31}, unique among live agents. */
 export const WORKER_NAME_RE = /^[a-z][a-z0-9_-]{0,31}$/;
 
+/** Canonical example report (DESIGN.md §6) — the single source of truth for the
+ *  report shape. Embedded into every worker prompt via briefPrompt (briefs no
+ *  longer carry the schema). "worker" is a placeholder; callers substitute the
+ *  canonical name. Canon = minimum, not a whitelist: extra fields stay allowed. */
+export const REPORT_EXAMPLE: WorkerReport = {
+	worker: "<your assigned worker name>",
+	status: "pass",
+	summary: "one-paragraph outcome",
+	artifacts: ["path/to/artifact"],
+	evidence: [{ claim: "what was verified", file: "path/to/file.ts:42" }],
+};
+
 /** Fixed prompt template — the one line sent to the worker pane.
  *  Explicit tool-use instruction: flash-class models may otherwise treat
 	 *  "reply with the file path" as the whole task and never read the brief.
 	 *  Carries the canonical worker name so briefs can stay name-agnostic
 	 *  (demo run 2: brief/manifest name mismatch caused a false collect miss).
-	 *  v1.2: standing mailbox line — questions/answers are files, never panes. */
+	 *  v1.2: standing mailbox line — questions/answers are files, never panes.
+	 *  Report contract: required fields + canonical example (REPORT_EXAMPLE,
+	 *  worker name substituted) — briefs never carry the report JSON schema. */
 export function briefPrompt(briefPath: string, workerName: string): string {
-	return `Use your read tool to read ${briefPath}, then carry out the task it describes exactly, including its OUTPUT section. Your assigned worker name is "${workerName}": wherever the brief names the worker or its report file, use "${workerName}" (and report-${workerName}.json) instead of any name written in the brief. If blocked on a decision the brief does not resolve, write your question to q-${workerName}.json next to the brief and go idle — an answer will appear at a-${workerName}.json; when the brief says steering is expected, poll that file between steps. When the task is complete, reply with only the file path.`;
+	return `Use your read tool to read ${briefPath}, then carry out the task it describes exactly, including its OUTPUT section. Your assigned worker name is "${workerName}": wherever the brief names the worker or its report file, use "${workerName}" (and report-${workerName}.json) instead of any name written in the brief. If blocked on a decision the brief does not resolve, write your question to q-${workerName}.json next to the brief and go idle — an answer will appear at a-${workerName}.json; when the brief says steering is expected, poll that file between steps. When the task is complete, reply with only the file path. Report contract — required fields: "worker" must be exactly "${workerName}"; "status" strictly "pass" or "fail"; "summary" a non-empty string; "artifacts" an array of strings; "evidence" an array of objects, each with non-empty string "claim" and "file". Extra fields allowed. Canonical example (write the report as JSON in exactly this shape): ${JSON.stringify({ ...REPORT_EXAMPLE, worker: workerName })}.`;
 }
 
 // ---------------------------------------------------------------------------
