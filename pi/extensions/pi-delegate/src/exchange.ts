@@ -51,6 +51,13 @@ export interface ManifestWorker {
 	 *  `seen` dedup lives only inside a session, so a fresh session would
 	 *  otherwise re-wake on old reports). The watcher never writes it. */
 	collectedAt?: string;
+	/** Session JSONL path of the ORCHESTRATOR that spawned this worker, captured
+	 *  through the live sessionManager getter at spawn time. The watcher wakes
+	 *  only this session (ownership by session path — the `isSelf` idiom);
+	 *  absent on legacy manifests → legacy behavior (every session sees the
+	 *  events). Deliberately NOT refreshed on /new or /resume: a new session
+	 *  inherits no wake-ups. Written only by spawn; the watcher is a reader. */
+	orchestratorSessionPath?: string;
 }
 
 export interface ExchangeManifest {

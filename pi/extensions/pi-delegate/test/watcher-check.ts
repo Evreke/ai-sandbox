@@ -32,7 +32,11 @@
  *       produces NO report-ready/report-invalid (fresh-session dedup); the
  *       field threads through workersFromManifests; other kinds still fire;
  *       without the field report events fire as before (regression).
- *
+ *   W14 Ownership + worker gate (v1.11.x): isWorkerSession (sessionPath /
+ *       checkoutPath / foreign / garbage); a worker owned by ANOTHER session
+ *       is silent across every kind, own owner and legacy manifests fire as
+ *       before; orchestratorSessionPath threads onto WatchWorker and the loop
+ *       wakes only the owning session (WatcherDeps.self threading).
  * Exit 0 only if all checks pass.
  */
 
@@ -51,6 +55,7 @@ import {
 	createWatcher,
 	detectEvents,
 	formatEventBatch,
+	isWorkerSession,
 	makeSender,
 	resolveWatchConfig,
 	sessionToolCallNames,
@@ -101,8 +106,10 @@ check(
 		/pi\.on\("session_shutdown"[\s\S]*stopWatcher\(/.test(indexSrc),
 );
 check(
-	"W1.2b watcher mount is NOT behind ctx.hasUI (headless-safe, §21)",
-	/async \(_event, ctx\) => \{\s*\n\s*startWatcher\(/.test(indexSrc),
+	"W1.2b watcher mount is headless-safe (NOT behind ctx.hasUI) and worker-gated (isWorkerSession)",
+	/pi\.on\("session_start"[\s\S]*?isWorkerSession\(/.test(indexSrc) &&
+		/isWorkerSession\([\s\S]{0,300}?startWatcher\(/.test(indexSrc) &&
+		!/hasUI[\s\S]{0,120}startWatcher\(/.test(indexSrc),
 );
 
 const delegateSrc = readFileSync(resolve(ROOT, "src/tools/delegate.ts"), "utf8");
@@ -764,6 +771,150 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 	(wGarbage as unknown as Record<string, unknown>).collectedAt = 42;
 	writeValidReport(dir, "w-garbage");
 	check("W13.7 non-string collectedAt is ignored (still fires)", eventsFor(wGarbage).some((e) => e.kind === "report-ready"), kindsOf(eventsFor(wGarbage)));
+}
+
+// ---------------------------------------------------------------------------
+// W14. Ownership + worker gate (v1.11.x) — one orchestrator per wake-up
+// ---------------------------------------------------------------------------
+
+{
+	const ORCH_A = "/tmp/sessions/orch-a.jsonl";
+	const ORCH_B = "/tmp/sessions/orch-b.jsonl";
+
+	// (а) isWorkerSession — the isSelf strictness over ALL manifests, no lookback:
+	// it asks about a SESSION (which may outlive the 24 h fleet), not a live fleet.
+	const gateDir = taskDir("gate");
+	const gateWorker = mkWorker(gateDir, "w-gated");
+	gateWorker.sessionPath = "/tmp/sessions/w-gated.jsonl";
+	const gateManifest = manifestOf(gateDir, [gateWorker]);
+	check("W14.1 gate matches by worker sessionPath", isWorkerSession({ sessionFile: gateWorker.sessionPath }, [gateManifest]));
+	check(
+		"W14.2 gate matches by worktree checkoutPath (spawn race: record predates the worker sessionPath)",
+		isWorkerSession({ cwd: "/tmp/wt/w-gated" }, [gateManifest]),
+	);
+	const tabGate = manifestOf(gateDir, [mkWorker(gateDir, "w-gated-tab", { kind: "tab" })]);
+	check(
+		"W14.3 tab worker is NOT gated on cwd (shared checkout is ambiguous — same strictness as isSelf)",
+		!isWorkerSession({ cwd: "/tmp/wt/w-gated-tab" }, [tabGate]),
+	);
+	check(
+		"W14.4 an unrelated session (an orchestrator) is not gated",
+		!isWorkerSession({ sessionFile: ORCH_A, cwd: "/repo" }, [gateManifest, tabGate]),
+	);
+	check("W14.5 no identity at all → not gated", !isWorkerSession({}, [gateManifest]));
+	check(
+		"W14.6 garbage manifests → false, never throws",
+		(() => {
+			try {
+				const garbage = [
+					{ task: "t", dir: "/tmp/exchange/t", workers: [{ name: "x", sessionPath: 42, placement: { kind: "weird" } }] },
+					{ task: "u", dir: "/tmp/exchange/u", workers: "not-an-array" },
+					null,
+					{},
+				] as unknown as ExchangeManifest[];
+				const junkWorkers = { task: "v", dir: "d", workers: [null, undefined, 5, { placement: null }] } as unknown as ExchangeManifest;
+				return (
+					isWorkerSession({}, garbage) === false &&
+					isWorkerSession({ sessionFile: "/tmp/x.jsonl", cwd: "/" }, [...garbage, junkWorkers]) === false
+				);
+			} catch {
+				return false;
+			}
+		})(),
+	);
+
+	// (б) Ownership in detectWorkerEvents: a worker whose orchestratorSessionPath
+	// is set and differs from the watcher's own session is silent — across EVERY
+	// kind; own owner and legacy (no field) manifests behave exactly as before.
+	const odir = taskDir("owned");
+	const wReport = mkWorker(odir, "w-own-report", { orchestratorSessionPath: ORCH_A });
+	writeValidReport(odir, "w-own-report");
+	const wQuestion = mkWorker(odir, "w-own-question", { orchestratorSessionPath: ORCH_A });
+	writeFileSync(questionPathFor(odir, "w-own-question"), JSON.stringify({ worker: "w-own-question", ts: "T14", question: "own?" }));
+	const wDeck = mkWorker(odir, "w-own-deck", { orchestratorSessionPath: ORCH_A });
+	wDeck.sessionPath = writeSession(odir, "w-own-deck", [assistantUsage(240_000), assistantToolCall(GRILL_DECK_TOOL)]); // context-critical + grill-deck
+	const wDead = mkWorker(odir, "w-own-dead", { orchestratorSessionPath: ORCH_A });
+	const silenced = (w: ManifestWorker, statuses: AgentStatus[] | null): boolean =>
+		eventsFor(w, { statuses, selfSessionFile: ORCH_B }).length === 0;
+	check("W14.7 foreign owner silences report-ready", silenced(wReport, [LIVE("w-own-report")]));
+	check("W14.8 foreign owner silences mailbox-question", silenced(wQuestion, [LIVE("w-own-question")]));
+	check(
+		"W14.9 foreign owner silences grill-deck AND context-critical",
+		silenced(wDeck, [LIVE("w-own-deck")]),
+		kindsOf(eventsFor(wDeck, { statuses: [LIVE("w-own-deck")], selfSessionFile: ORCH_A })),
+	);
+	check("W14.10 foreign owner silences worker-dead", silenced(wDead, NO_STATUS));
+
+	// Own owner → fires (the spawning session still hears its own fleet).
+	check(
+		"W14.11 OWN owner: every kind still fires",
+		eventsFor(wReport, { statuses: [LIVE("w-own-report")], selfSessionFile: ORCH_A }).some((e) => e.kind === "report-ready") &&
+			eventsFor(wDeck, { statuses: [LIVE("w-own-deck")], selfSessionFile: ORCH_A }).some((e) => e.kind === "grill-deck"),
+	);
+
+	// Legacy manifest (no field) → fires, and a degraded self-id fails OPEN
+	// (locked decision: a lost report-ready is worse than a duplicate).
+	const wLegacy = mkWorker(odir, "w-legacy");
+	writeValidReport(odir, "w-legacy");
+	check(
+		"W14.12 legacy manifest (no orchestratorSessionPath) fires for anyone (regression)",
+		eventsFor(wLegacy, { statuses: [LIVE("w-legacy")], selfSessionFile: ORCH_B }).some((e) => e.kind === "report-ready"),
+	);
+	check(
+		"W14.13 degraded self (no sessionFile) fails OPEN — foreign-owned worker still fires",
+		eventsFor(wReport, { statuses: [LIVE("w-own-report")] }).some((e) => e.kind === "report-ready"),
+	);
+
+	// (в) The field threads through workersFromManifests onto WatchWorker…
+	const ownedSnap = snapshotFor([wReport], [LIVE("w-own-report")]);
+	check(
+		"W14.14 orchestratorSessionPath threads onto the WatchWorker",
+		ownedSnap.workers[0]?.orchestratorSessionPath === ORCH_A,
+		JSON.stringify(ownedSnap.workers[0]),
+	);
+	// …runtime garbage (a manifest is untyped JSON) reads as absent → legacy.
+	const wOwnGarbage = mkWorker(odir, "w-own-garbage");
+	(wOwnGarbage as unknown as Record<string, unknown>).orchestratorSessionPath = 7;
+	check(
+		"W14.15 non-string orchestratorSessionPath is ignored (legacy behavior)",
+		snapshotFor([wOwnGarbage], [LIVE("w-own-garbage")]).workers[0]?.orchestratorSessionPath === undefined,
+	);
+
+	// Loop level: WatcherDeps.self.sessionFile is threaded into detection — the
+	// wake-up reaches ONLY the owning session's sink.
+	{
+		const ldir = taskDir("owned-loop");
+		const wForeign = mkWorker(ldir, "w-foreign", { orchestratorSessionPath: ORCH_B });
+		writeValidReport(ldir, "w-foreign");
+		const wMine = mkWorker(ldir, "w-mine", { orchestratorSessionPath: ORCH_A });
+		writeValidReport(ldir, "w-mine");
+		const sent: string[] = [];
+		const handle = createWatcher({
+			transport: { listStatuses: async () => [LIVE("w-foreign"), LIVE("w-mine")] } as unknown as Transport,
+			intervalMs: 3_600_000,
+			send: (t: string) => {
+				sent.push(t);
+			},
+			snapshot: async () => snapshotFor([wForeign, wMine], [LIVE("w-foreign"), LIVE("w-mine")]),
+			self: { sessionFile: ORCH_A },
+			log: () => {},
+		});
+		const batch = await handle.tick();
+		check(
+			"W14.16 the loop wakes ONLY the owning session (WatcherDeps.self threading)",
+			batch.length === 1 && batch[0].worker === "w-mine" && sent.length === 1 && sent[0].includes("w-mine"),
+			`${kindsOf(batch)} ${JSON.stringify(sent)}`,
+		);
+		handle.stop();
+	}
+
+	// Spawn seam: no test drives registerDelegateTool.execute (no runtime seam to
+	// assert the manifest write), so the spawn-side write is pinned statically —
+	// same convention as W1.3–W1.5.
+	check(
+		"W14.17 delegate spawn records orchestratorSessionPath via the LIVE sessionManager getter",
+		/getSessionFile/.test(delegateSrc) && /\.\.\.\(orchestratorSessionPath \? \{ orchestratorSessionPath \}/.test(delegateSrc),
+	);
 }
 
 rmSync(FIX, { recursive: true, force: true });

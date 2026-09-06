@@ -180,6 +180,25 @@ function journal(
 	}
 }
 
+/**
+ * v1.11.x ownership: the spawning session's JSONL path, read through the LIVE
+ * sessionManager getter at the moment of the manifest write — /new and /resume
+ * change the path, so a captured constant would pin a dead session (and a new
+ * session inheriting no wake-ups is the DESIRED behavior). Undefined when
+ * unavailable (headless/degraded) → the field is simply not recorded, and the
+ * watcher falls back to legacy behavior for that worker.
+ */
+function liveSessionFile(ctx: {
+	sessionManager?: { getSessionFile?: () => string | undefined };
+}): string | undefined {
+	try {
+		const f = ctx.sessionManager?.getSessionFile?.();
+		return typeof f === "string" && f.length > 0 ? f : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 /** Abort-aware sleep: resolves early when the signal fires. */
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 	return new Promise((res) => {
@@ -441,6 +460,9 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				// The E_TIER guard above guarantees provider/model/thinking are defined
 				// here (missing keys fail fast before spawn) — TS can't narrow through
 				// the filter, so assert with a comment instead of falsifying data.
+				// v1.11.x ownership: record the spawning session's path (live getter,
+				// see liveSessionFile) so the watcher wakes ONLY this session.
+				const orchestratorSessionPath = liveSessionFile(ctx);
 				const manifestEntry: ManifestWorker = {
 					name: params.name,
 					placement,
@@ -451,6 +473,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 					thinking: thinking as string,
 					startedAt: startedAtDate.toISOString(),
 					schemaProvenance,
+					...(orchestratorSessionPath ? { orchestratorSessionPath } : {}),
 				};
 				await updateManifest(manifestDir, (m) => ({
 					...m,

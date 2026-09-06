@@ -14,10 +14,10 @@
 
 import { readFile } from "node:fs/promises";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { progressPathFor, readLastProgress } from "./src/exchange.ts";
+import { progressPathFor, readLastProgress, scanAllManifests } from "./src/exchange.ts";
 import { buildWorkerView } from "./src/state.ts";
 import { contextPct, parseSessionUsage, resolveContextWindow } from "./src/usage.ts";
-import { startWatcher, stopWatcher } from "./src/watch.ts";
+import { isWorkerSession, startWatcher, stopWatcher } from "./src/watch.ts";
 import { pruneArchive } from "./src/archive.ts";
 import { mountFleetUI, disposeFleetUI, type FleetRow, type FleetUIDeps } from "./src/ui/fleet-ui.ts";
 import { registerCommands } from "./src/commands.ts";
@@ -116,8 +116,22 @@ export default function (pi: ExtensionAPI) {
 	// behind ctx.hasUI: the wake-up matters headless too (rpc/print). Start is
 	// idempotent (module registry, double-start replaces) and every failure is
 	// advisory, so a broken watcher can never affect spawn/collect outcomes.
+	// v1.11.x ownership fix (two layers): (1) a session that is itself a manifest
+	// worker mounts NO watcher — it is someone's fleet row, not an audience, and
+	// the orchestrator's "DELEGATE WATCHER — …" wake-up would just confuse it;
+	// (2) spawn records the orchestrator's session path (orchestratorSessionPath)
+	// and detectWorkerEvents silences workers owned by ANOTHER session, so N
+	// mounted watchers no longer mean N copies of every event.
 	pi.on("session_start", async (_event, ctx) => {
-		startWatcher(pi, transport, { cwd: ctx.cwd, sessionManager: ctx.sessionManager });
+		let sessionFile: string | undefined;
+		try {
+			sessionFile = ctx.sessionManager?.getSessionFile?.();
+		} catch {
+			sessionFile = undefined; // degraded self-id — the gate decides with what is known
+		}
+		if (!isWorkerSession({ sessionFile, cwd: ctx.cwd }, scanAllManifests())) {
+			startWatcher(pi, transport, { cwd: ctx.cwd, sessionManager: ctx.sessionManager });
+		}
 		pruneArchive(); // §19.3 retention: once per session start, best-effort, never throws
 	});
 

@@ -134,6 +134,13 @@ export interface WatchWorker {
 	 *  session's `seen` dedup cannot remember the earlier wake-up. Reader-only:
 	 *  collect writes the field, the watcher never does. */
 	collectedAt?: string;
+	/** Session JSONL path of the orchestrator that spawned this worker (written
+	 *  by spawn at manifest-record time). Set + different from the watcher's own
+	 *  session → this worker belongs to ANOTHER session's fleet and
+	 *  detectWorkerEvents emits NOTHING for it (ownership, v1.11.x). Absent
+	 *  (legacy manifest) → legacy behavior. Reader-only: spawn writes the
+	 *  field, the watcher never does. */
+	orchestratorSessionPath?: string;
 }
 
 export interface WatchSnapshot {
@@ -163,6 +170,43 @@ export interface SelfIdentity {
 	sessionFile?: string;
 	/** This session's cwd (ctx.cwd). */
 	cwd?: string;
+}
+
+/**
+ * Worker gate (v1.11.x): is THIS session one of the manifest's workers? A
+ * worker session mounts no watcher — it is someone's fleet row, not an
+ * audience. Same strictness as the `isSelf` match below — exact session JSONL
+ * path, or a worktree worker's unique checkout path (tab workers share the
+ * repo cwd, so cwd never identifies them; the checkoutPath branch also covers
+ * the spawn race, where the manifest record predates the worker's
+ * sessionPath) — but with NO lookback window: the gate asks about a SESSION,
+ * which may outlive the 24 h fleet. Scans every manifest; garbage anywhere
+ * degrades to false, never throws.
+ */
+export function isWorkerSession(self: SelfIdentity, manifests: ExchangeManifest[]): boolean {
+	for (const m of manifests) {
+		const workers = m?.workers;
+		if (!Array.isArray(workers)) continue;
+		for (const w of workers) {
+			if (w === null || typeof w !== "object") continue;
+			if (
+				self.sessionFile !== undefined &&
+				typeof w.sessionPath === "string" &&
+				w.sessionPath === self.sessionFile
+			) {
+				return true;
+			}
+			if (
+				w.placement?.kind === "worktree" &&
+				self.cwd !== undefined &&
+				typeof w.placement.checkoutPath === "string" &&
+				w.placement.checkoutPath === self.cwd
+			) {
+				return true;
+			}
+		}
+	}
+	return false;
 }
 
 /**
@@ -211,6 +255,9 @@ export function workersFromManifests(
 				probe: manifest.dir.endsWith("/_probe"),
 				...(typeof w.collectedAt === "string" && w.collectedAt.length > 0
 					? { collectedAt: w.collectedAt }
+					: {}),
+				...(typeof w.orchestratorSessionPath === "string" && w.orchestratorSessionPath.length > 0
+					? { orchestratorSessionPath: w.orchestratorSessionPath }
 					: {}),
 			});
 		}
@@ -317,6 +364,12 @@ export interface DetectOptions {
 	 *  (statuses unknown ≠ dead). detectEvents sets it from the snapshot; a
 	 *  standalone detectWorkerEvents call defaults to "statuses are known". */
 	statusesKnown?: boolean;
+	/** v1.11.x ownership: THIS watcher's session JSONL path (threaded from
+	 *  WatcherDeps.self). A worker whose orchestratorSessionPath is set and
+	 *  differs belongs to another session → zero events for it. Undefined
+	 *  (degraded self-id) → fail-open: ownership cannot be disproven, events
+	 *  fire as before. */
+	selfSessionFile?: string;
 }
 
 function truncate(s: string, max = 220): string {
@@ -338,6 +391,20 @@ function fileMtimeMs(path: string): number | null {
  * which outranks a deck, which outranks the gauges, which outrank death.
  */
 export function detectWorkerEvents(w: WatchWorker, opts: DetectOptions = {}): WatchEvent[] {
+	// 0. Ownership (v1.11.x): a worker spawned by a DIFFERENT session is that
+	//    session's fleet — emit nothing for it, or N mounted watchers would wake
+	//    N orchestrators for the same event. Exact session-path match only, and
+	//    fail-open on both edges: a legacy manifest carries no
+	//    orchestratorSessionPath, and a degraded self-id (no session file) must
+	//    never swallow a real wake-up — a lost report-ready is worse than a
+	//    duplicate.
+	if (
+		w.orchestratorSessionPath !== undefined &&
+		opts.selfSessionFile !== undefined &&
+		w.orchestratorSessionPath !== opts.selfSessionFile
+	) {
+		return [];
+	}
 	const nowMs = opts.nowMs ?? Date.now();
 	const events: WatchEvent[] = [];
 	const mk = (kind: WatchEventKind, message: string, fingerprint?: string): WatchEvent => ({
@@ -529,6 +596,12 @@ export function createWatcher(deps: WatcherDeps): WatcherHandle {
 	const seen = new Set<string>();
 	const log = deps.log ?? ((m: string) => console.error(`[pi-delegate watch] ${m}`));
 	let stopped = false;
+	// v1.11.x ownership: the live self identity (the session this watcher is
+	// mounted in) wins over an injected option; both absent → fail-open.
+	const detectOpts: DetectOptions = {
+		...(deps.detect ?? {}),
+		selfSessionFile: deps.self?.sessionFile ?? deps.detect?.selfSessionFile,
+	};
 
 	const tick = async (): Promise<WatchEvent[]> => {
 		if (stopped) return [];
@@ -536,7 +609,7 @@ export function createWatcher(deps: WatcherDeps): WatcherHandle {
 		let leafWorker = false;
 		try {
 			const snap = deps.snapshot ? await deps.snapshot() : await collectSnapshot(deps.transport, deps.self ?? {});
-			events = detectEvents(snap, seen, deps.detect ?? {});
+			events = detectEvents(snap, seen, detectOpts);
 			// A worker never needs to be woken for its own events…
 			events = events.filter((e) => !snap.workers.some((w) => w.self && w.dir === e.dir && w.name === e.worker));
 			// …and a leaf (worktree) worker session is not an orchestrator: its
