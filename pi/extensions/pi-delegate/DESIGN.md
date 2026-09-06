@@ -692,6 +692,16 @@ none of them can corrupt a spawn or a collect result). One fix shape each:
   manifest at spawn and filter wake-ups to it — failing that, split the batch into
   "your fleet" vs "other exchange tasks (informational)" and shrink the lookback
   to "since this session started".
+  **DONE in v1.11.1** (field: a worker pane received its orchestrator's wake-up
+  and got confused; every session mounted its own watcher over the global
+  manifests). Two layers: `isWorkerSession` gate — a manifest worker session
+  mounts NO watcher (`index.ts` session_start); spawn records
+  `orchestratorSessionPath` (live `getSessionFile()` getter) and
+  `detectWorkerEvents` silences workers owned by another session — fail-open on
+  legacy manifests and degraded self-ids. Companion fix in the same release:
+  collect stamps `collectedAt` and the watcher stays silent about delivered
+  reports (fresh sessions no longer re-wake on earlier sessions' 14 stale
+  reports); `pruneArchive` gives the archive a 30-day TTL.
 - **F2 — `report-invalid` fires on half-written reports and on brief-declared
   schemas.** The watcher validates with the BASE `validateReport` and has no mtime
   grace, so a worker mid-write is called invalid (and a §17 `reportSchema` report
