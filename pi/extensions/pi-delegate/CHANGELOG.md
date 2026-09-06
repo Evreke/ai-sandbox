@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Version numbers align with the iteration numbering in DESIGN.md (v1.x sections).
 
+## [Unreleased]
+
+### Fixed
+
+- **No re-wake on already-collected reports** (field fix): successful collect now
+  stamps `collectedAt` (ISO) on the worker's manifest record (best-effort — a
+  failure warns, never fails the collect). The watcher treats a `collectedAt`
+  worker as delivered and emits no `report-ready`/`report-invalid` for it — the
+  watcher's `seen` dedup lives only inside a session, so fresh sessions used to
+  re-wake on reports collected in earlier ones (14 stale wake-ups observed in
+  the field, v1.11.0 preprod run). Only collect writes the field; other event
+  kinds are unaffected.
+- **Archive retention**: `pruneArchive(maxAgeMs?)` in `src/archive.ts` deletes
+  archived task dirs older than 30 days (folder mtime), best-effort, never
+  throws; called once at watcher start (`session_start` in `index.ts`) so the
+  archive stops growing without bound.
+
 ## [1.11.0] — 2026-09-06
 
 ### Added

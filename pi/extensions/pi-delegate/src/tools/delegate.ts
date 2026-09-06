@@ -630,12 +630,12 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 
 			// Success result builder — shared by the normal path, the fallback-path
 			// collect (fix: requested-name report) and the detached-after-settle path.
-			const successResult = (
+			const successResult = async (
 				report: WorkerReport,
 				usedReportPath: string,
 				settleStatus: AgentStatusName,
 				extraNote: string,
-			): ToolResult => {
+			): Promise<ToolResult> => {
 				const elapsedMs = Date.now() - startedAtDate.getTime();
 				const placementDesc =
 					placement.kind === "worktree"
@@ -658,6 +658,28 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 					archivePath = null;
 				}
 				const archiveNote = archivePath ? `\nArchived: ${archivePath}` : "\n(archive unavailable)";
+				// Field fix: leave the "report delivered" trace in the manifest — the
+				// watcher reads collectedAt to stay silent about an already-collected
+				// report (its `seen` dedup lives only inside a session, so a fresh
+				// session would otherwise re-wake on old reports). Matched by canonical
+				// name, with the pre-rename name as fallback (rename is best-effort
+				// too). Best-effort by contract: a failure warns like the archive note,
+				// never fails the collect.
+				let collectedNote = "";
+				try {
+					await updateManifest(manifestDir, (m) => ({
+						...m,
+						workers: m.workers.map((w) =>
+							w.name === canonical || w.name === params.name
+								? { ...w, collectedAt: new Date().toISOString() }
+								: w,
+						),
+					}));
+				} catch (err) {
+					collectedNote =
+						`manifest collectedAt stamp failed (${errText(err)}) — a fresh session's watcher may re-wake on this report`;
+				}
+				const collectedStampNote = collectedNote ? `\nWarning: ${collectedNote}` : "";
 				journal(pi, "collect", canonical, report.status, archivePath ?? undefined);
 				// Last live worker settled → teardown nudge (DESIGN.md §19.4).
 				void maybeNotifyFleetIdle();
@@ -666,6 +688,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 						`${verdictLine}\n` +
 						`Artifacts: ${report.artifacts.length > 0 ? report.artifacts.join(", ") : "(none)"}` +
 						archiveNote +
+						collectedStampNote +
 						`${uniquified ? `\n${uniquified}` : ""}` +
 						`${manifestWarning ? `\nWarning: ${manifestWarning}` : ""}` +
 						`${tierWarning ? `\nWarning: ${tierWarning}` : ""}` +
@@ -682,6 +705,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 						elapsedMs,
 						startedAt: startedAtDate.toISOString(),
 						...(archivePath ? { archivePath } : { archiveWarning: "archive unavailable" }),
+						...(collectedNote ? { collectedAtWarning: collectedNote } : {}),
 						...(tierWarning ? { tierWarning } : {}),
 						...(manifestWarning ? { warning: manifestWarning } : {}),
 						...b.details,

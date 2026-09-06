@@ -46,6 +46,11 @@ export interface ManifestWorker {
 	/** v1.5 (DESIGN.md §17): MERGED report-schema fragment the report was held
 	 *  to — quoted when collect rejects a report, so failures are auditable. */
 	reportSchemaFragment?: Record<string, unknown>;
+	/** ISO 8601 — set by COLLECT only, on successful report delivery. The
+	 *  watcher reads it to stay silent about an already-collected report (its
+	 *  `seen` dedup lives only inside a session, so a fresh session would
+	 *  otherwise re-wake on old reports). The watcher never writes it. */
+	collectedAt?: string;
 }
 
 export interface ExchangeManifest {

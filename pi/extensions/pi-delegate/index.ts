@@ -18,6 +18,7 @@ import { progressPathFor, readLastProgress } from "./src/exchange.ts";
 import { buildWorkerView } from "./src/state.ts";
 import { contextPct, parseSessionUsage, resolveContextWindow } from "./src/usage.ts";
 import { startWatcher, stopWatcher } from "./src/watch.ts";
+import { pruneArchive } from "./src/archive.ts";
 import { mountFleetUI, disposeFleetUI, type FleetRow, type FleetUIDeps } from "./src/ui/fleet-ui.ts";
 import { registerCommands } from "./src/commands.ts";
 import { createHerdrTransport } from "./src/transport/herdr.ts";
@@ -117,6 +118,7 @@ export default function (pi: ExtensionAPI) {
 	// advisory, so a broken watcher can never affect spawn/collect outcomes.
 	pi.on("session_start", async (_event, ctx) => {
 		startWatcher(pi, transport, { cwd: ctx.cwd, sessionManager: ctx.sessionManager });
+		pruneArchive(); // §19.3 retention: once per session start, best-effort, never throws
 	});
 
 	// Session-end cleanup (quality fix A7): mountFleetUI's 2 s poll (herdr

@@ -129,6 +129,11 @@ export interface WatchWorker {
 	self: boolean;
 	/** Probe run (dir /tmp/exchange/_probe) — no report is ever expected. */
 	probe: boolean;
+	/** Manifest collectedAt (ISO, written by COLLECT on successful delivery):
+	 *  report-ready/report-invalid must not fire for this worker — a fresh
+	 *  session's `seen` dedup cannot remember the earlier wake-up. Reader-only:
+	 *  collect writes the field, the watcher never does. */
+	collectedAt?: string;
 }
 
 export interface WatchSnapshot {
@@ -204,6 +209,9 @@ export function workersFromManifests(
 				kind: w.placement?.kind === "tab" ? "tab" : "worktree",
 				self: isSelf,
 				probe: manifest.dir.endsWith("/_probe"),
+				...(typeof w.collectedAt === "string" && w.collectedAt.length > 0
+					? { collectedAt: w.collectedAt }
+					: {}),
 			});
 		}
 	}
@@ -340,9 +348,13 @@ export function detectWorkerEvents(w: WatchWorker, opts: DetectOptions = {}): Wa
 		...(fingerprint !== undefined ? { fingerprint } : {}),
 	});
 
-	// 1. report-ready / report-invalid (§21)
+	// 1. report-ready / report-invalid (§21) — SILENT when the manifest records
+	//    collectedAt: collect already DELIVERED this report, and the `seen`
+	//    dedup is session-scoped, so a fresh session would re-wake on it. Only
+	//    collect writes collectedAt; the watcher is a reader. Other event kinds
+	//    are unaffected (a collected worker can still ask questions etc.).
 	const reportMtime = fileMtimeMs(w.reportPath);
-	if (reportMtime !== null) {
+	if (reportMtime !== null && w.collectedAt === undefined) {
 		const verdict = validateReport(w.reportPath, w.name);
 		if (verdict.ok) {
 			events.push(

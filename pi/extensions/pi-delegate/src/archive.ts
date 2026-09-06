@@ -67,6 +67,40 @@ export function archiveReport(
 	}
 }
 
+/** Retention TTL: archived task dirs older than this are pruned (30 days). */
+export const ARCHIVE_TTL_MS = 30 * 24 * 60 * 60_000;
+
+/**
+ * Retention: delete archived task dirs whose mtime is older than the TTL
+ * (ARCHIVE_TTL_MS = 30 days by default; the folder mtime is the age source).
+ * Best-effort by contract: ANY failure — missing/unreadable archive root,
+ * undeletable task dir — is skipped, never thrown. A broken ttl input
+ * (NaN/negative/Infinity) falls back to the default instead of wiping the
+ * archive. Returns the number of task dirs removed.
+ */
+export function pruneArchive(maxAgeMs: number = ARCHIVE_TTL_MS): number {
+	const ttl = Number.isFinite(maxAgeMs) && maxAgeMs >= 0 ? maxAgeMs : ARCHIVE_TTL_MS;
+	try {
+		const root = archiveRoot();
+		const cutoffMs = Date.now() - ttl;
+		let pruned = 0;
+		for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+			if (!entry.isDirectory()) continue; // stray files are not task dirs
+			const dir = path.join(root, entry.name);
+			try {
+				if (fs.statSync(dir).mtimeMs >= cutoffMs) continue; // fresh — keep
+				fs.rmSync(dir, { recursive: true, force: true });
+				pruned++;
+			} catch {
+				// unreadable/undeletable task dir → skip it, keep pruning the rest
+			}
+		}
+		return pruned;
+	} catch {
+		return 0; // archiveRoot missing/unreadable → nothing to prune, never throw
+	}
+}
+
 /** List archived tasks (dir names under archiveRoot with a manifest.json). */
 export function listArchivedTasks(): string[] {
 	try {

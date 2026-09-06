@@ -10,11 +10,11 @@
  * No real herdr ops, no network, no mutation outside /tmp.
  */
 
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, existsSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DelegateErrorImpl, createHerdrTransport } from "../src/transport/herdr.ts";
-import { archiveReport, archiveRoot, listArchivedTasks } from "../src/archive.ts";
+import { archiveReport, archiveRoot, listArchivedTasks, pruneArchive } from "../src/archive.ts";
 import { resolvePiSessionCandidates } from "../src/usage.ts";
 import type { StartReq } from "../src/transport/types.ts";
 
@@ -517,6 +517,40 @@ try {
 		JSON.stringify(listArchivedTasks()) === JSON.stringify(["v16-demo"]),
 		JSON.stringify(listArchivedTasks()),
 	);
+
+	// 5.7 retention (field fix): pruneArchive removes task dirs older than the
+	// TTL (folder mtime), keeps fresh ones, and never throws on broken inputs.
+	const oldDir = join(archiveRoot(), "v1-old");
+	mkdirSync(oldDir, { recursive: true });
+	writeFileSync(join(oldDir, "manifest.json"), "{}\n");
+	const stale = new Date(Date.now() - 31 * 24 * 60 * 60_000); // older than the 30-day TTL
+	utimesSync(oldDir, stale, stale); // backdate AFTER writing (writes bump mtime)
+	check(
+		"A.7 pruneArchive removes the stale task dir, keeps the fresh one",
+		pruneArchive() === 1 && !existsSync(oldDir) && existsSync(join(archiveRoot(), "v16-demo")),
+	);
+	// The TTL is injectable: 0 prunes everything (including "half-written",
+	// which needs no manifest.json — retention is mtime-based).
+	check(
+		"A.7b injectable TTL prunes everything at 0",
+		pruneArchive(0) === 2 && !existsSync(join(archiveRoot(), "v16-demo")),
+	);
+
+	// Broken inputs are tolerated, never thrown:
+	writeFileSync(join(archiveRoot(), "stray-file.txt"), "not a task dir\n");
+	check(
+		"A.8 stray FILES are skipped (not pruned, not counted), no throw",
+		pruneArchive() === 0 && existsSync(join(archiveRoot(), "stray-file.txt")),
+	);
+	check(
+		"A.9 non-finite TTL falls back to the default (nothing wiped)",
+		pruneArchive(Number.NaN) === 0 && pruneArchive(-1) === 0,
+	);
+	const missingHome = mkdtempSync(join(tmpdir(), "qa-archive-missing-"));
+	process.env.HOME = missingHome;
+	check("A.10 missing archiveRoot → 0 pruned, never throws", pruneArchive() === 0);
+	process.env.HOME = fakeHome;
+	rmSync(missingHome, { recursive: true, force: true });
 
 	rmSync(fakeHome, { recursive: true, force: true });
 } finally {

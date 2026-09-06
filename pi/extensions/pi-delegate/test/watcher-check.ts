@@ -28,6 +28,10 @@
  *       start/stop idempotent.
  *   W11 Self-filter: a worker session is not woken for its own events.
  *   W12 Stale manifests (older than the lookback) are ignored.
+ *   W13 collectedAt (field fix): a worker the manifest marks collected
+ *       produces NO report-ready/report-invalid (fresh-session dedup); the
+ *       field threads through workersFromManifests; other kinds still fire;
+ *       without the field report events fire as before (regression).
  *
  * Exit 0 only if all checks pass.
  */
@@ -718,6 +722,48 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 	// Real entry point smoke: whatever herdr state this host has, it must not throw.
 	const s = await collectSnapshot({ listStatuses: async () => [] } as unknown as Transport, { cwd: FIX });
 	check("W12.4 collectSnapshot returns a usable snapshot", Array.isArray(s.workers) && typeof s.statusesKnown === "boolean");
+}
+
+// ---------------------------------------------------------------------------
+// W13. collectedAt — collect's delivered-trace silences the report kinds
+// ---------------------------------------------------------------------------
+
+{
+	const dir = taskDir("collected");
+
+	// (б) Regression: without collectedAt the report events fire as before.
+	const wFresh = mkWorker(dir, "w-fresh-report");
+	writeValidReport(dir, "w-fresh-report");
+	check("W13.1 no collectedAt + valid report → report-ready (regression)", eventsFor(wFresh).some((e) => e.kind === "report-ready"), kindsOf(eventsFor(wFresh)));
+	writeFileSync(reportPathFor(dir, "w-fresh-report"), "{half");
+	check("W13.2 no collectedAt + invalid report → report-invalid (regression)", eventsFor(wFresh).some((e) => e.kind === "report-invalid"), kindsOf(eventsFor(wFresh)));
+
+	// (а) The field threads through workersFromManifests…
+	const wDone = mkWorker(dir, "w-done", { collectedAt: new Date(NOW - 60_000).toISOString() });
+	writeValidReport(dir, "w-done");
+	const doneSnap = snapshotFor([wDone], [LIVE("w-done")]);
+	check("W13.3 collectedAt is threaded onto the WatchWorker", doneSnap.workers[0]?.collectedAt === wDone.collectedAt, JSON.stringify(doneSnap.workers[0]));
+	// …and a COLLECTED report — valid or invalid — never wakes anyone again
+	// (the field fix: the watcher's `seen` dedup cannot outlive the session).
+	const doneEvents = eventsFor(wDone);
+	check("W13.4 collectedAt + valid report → no report-ready", !doneEvents.some((e) => e.kind === "report-ready"), kindsOf(doneEvents));
+	writeFileSync(reportPathFor(dir, "w-done"), "{half");
+	check("W13.5 collectedAt + invalid report → no report-invalid", !eventsFor(wDone).some((e) => e.kind === "report-invalid"), kindsOf(eventsFor(wDone)));
+
+	// Only the report kinds are suppressed: a collected worker asking a question
+	// still wakes the orchestrator.
+	writeFileSync(
+		questionPathFor(dir, "w-done"),
+		JSON.stringify({ worker: "w-done", ts: "T13", question: "still there?" }),
+	);
+	check("W13.6 collectedAt suppresses ONLY the report kinds", eventsFor(wDone).some((e) => e.kind === "mailbox-question"), kindsOf(eventsFor(wDone)));
+
+	// Runtime-garbage collectedAt (a manifest is untyped JSON) is ignored —
+	// the worker keeps firing.
+	const wGarbage = mkWorker(dir, "w-garbage");
+	(wGarbage as unknown as Record<string, unknown>).collectedAt = 42;
+	writeValidReport(dir, "w-garbage");
+	check("W13.7 non-string collectedAt is ignored (still fires)", eventsFor(wGarbage).some((e) => e.kind === "report-ready"), kindsOf(eventsFor(wGarbage)));
 }
 
 rmSync(FIX, { recursive: true, force: true });
