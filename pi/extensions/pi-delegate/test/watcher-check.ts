@@ -20,9 +20,10 @@
  *       disk, placement grace, probe run).
  *   W8  Dedup: fires once per worker+kind+fingerprint; a condition that stops
  *       being true resets its key; a rewritten report / re-asked question is a
- *       NEW fact and re-fires.
+ *       NEW fact and re-fires; a worker that leaves the manifests is forgotten.
  *   W9  Batch delivery through the loop: one send per batch, quiet ticks send
- *       nothing, a throwing sink/transport never breaks the loop.
+ *       nothing, a throwing sink/transport never breaks the loop, a FAILED
+ *       delivery rolls its keys back and re-fires next tick.
  *   W10 Headless/old build: sender inert without pi.sendUserMessage; registry
  *       start/stop idempotent.
  *   W11 Self-filter: a worker session is not woken for its own events.
@@ -454,6 +455,19 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 	// Worker removed from manifests entirely → its memory is pruned, not leaked.
 	const empty = workersFromManifests([], [LIVE("w-dedup")], {}, NOW);
 	check("W8.9 empty snapshot forgets nothing it never saw", detectEvents(empty, seen, { nowMs: NOW }).length === 0);
+
+	// A worker that VANISHES from the manifests is forgotten too (QA F4): its keys
+	// must not leak in a long-lived orchestrator, and if it comes back it must be
+	// able to wake the orchestrator again (the old prefix-scoped reset did neither).
+	const vdir = taskDir("dedup-vanish");
+	const vw = mkWorker(vdir, "w-vanish");
+	const vsnap = snapshotFor([vw], NO_STATUS); // not live, no report → worker-dead
+	const vseen = new Set<string>();
+	check("W8.10 dead worker fires once", detectEvents(vsnap, vseen, { nowMs: NOW }).some((e) => e.kind === "worker-dead"));
+	check("W8.10b the key is held while the worker is in the snapshot", vseen.size === 1, JSON.stringify([...vseen]));
+	detectEvents(workersFromManifests([], NO_STATUS, {}, NOW), vseen, { nowMs: NOW });
+	check("W8.11 worker gone from the manifests → its key is dropped (no leak, QA F4)", vseen.size === 0, JSON.stringify([...vseen]));
+	check("W8.11b the same worker reappearing dead re-fires (no lost wake-up)", detectEvents(vsnap, vseen, { nowMs: NOW }).some((e) => e.kind === "worker-dead"));
 }
 
 // ---------------------------------------------------------------------------
@@ -565,6 +579,36 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 		const after = got.length;
 		await new Promise<void>((res) => setTimeout(res, 120));
 		check("W9.12 stop() really clears the timer", got.length === after, String(got.length));
+	}
+
+	// A TRANSIENT send error must never permanently swallow a wake-up (the review's
+	// most valuable minor): the batch's keys roll back out of `seen`, so the next
+	// tick re-fires whatever is still true.
+	{
+		const rdir = taskDir("loop-retry");
+		const rw = mkWorker(rdir, "w-retry");
+		writeValidReport(rdir, "w-retry");
+		const rsnap = snapshotFor([rw], [LIVE("w-retry")]);
+		const rsent: string[] = [];
+		let broken = true;
+		const retry = createWatcher({
+			transport,
+			intervalMs: 3_600_000,
+			send: (t: string) => {
+				if (broken) {
+					broken = false;
+					throw new Error("transient send error");
+				}
+				rsent.push(t);
+			},
+			snapshot: async () => rsnap,
+			log: () => {},
+		});
+		const lost = await retry.tick();
+		check("W9.13 failed send delivers nothing but returns the batch (nothing buffered)", lost.length === 1 && rsent.length === 0, kindsOf(lost));
+		check("W9.13b the next tick re-fires what the failed send swallowed", (await retry.tick()).length === 1 && rsent.length === 1, JSON.stringify(rsent));
+		check("W9.13c once delivery succeeds, dedup is back in charge", (await retry.tick()).length === 0 && rsent.length === 1, JSON.stringify(rsent));
+		retry.stop();
 	}
 }
 

@@ -212,7 +212,10 @@ unknown-status rather than first-class taxonomy entries.
   (fake cwd under worktrees dir).
 - **Watcher checks** (`test/watcher-check.ts`, §21): dependency rule + lifecycle wiring,
   config resolution (child process with `$HOME`), every event detection from temp-dir
-  fixtures, dedup/reset, one-send-per-batch delivery, inert headless sender, self-mute.
+  fixtures, dedup/reset (including the keys of vanished workers), one-send-per-batch
+  delivery, failed-delivery rollback + re-fire, inert headless sender, self-mute.
+  The dependency rule for `src/watch.ts` is pinned twice on purpose: here (W1.1) and
+  in the canonical `static-check.ts` T1.1 list.
 - **Transport contract tests** against real herdr, cheap: `capabilities()`, placement+
   teardown round-trip in a throwaway repo, name uniquification.
 - **Live E2E (the DoD demo)**: from a pi session with the extension loaded, call `delegate`
@@ -564,6 +567,12 @@ the same "waiting while the truth is visible" failure as the probe report
 wait. Long blocking is explicit opt-in (waitMs), never a side effect of a
 stale large timeoutMs.
 
+> **v1.11 annotation.** The DEFAULT blocking window is no longer 120 s — it is
+> `watch.settleGateMs` (default 15 s, §21). The 120 s figure survives only as the
+> cap on a legacy `timeoutMs` and as the probe's smoke window; everything else in
+> this section (auto-detach through `E_TIMEOUT`, explicit `waitMs` opt-in) still
+> holds.
+
 ### 19.6 v1.10 — report contract canon moves into the code (field 2026-09-06)
 Field: workers kept writing schema-invalid reports (string `evidence`, missing
 `artifacts`) — not worker error: briefs TAUGHT the wrong shape. Hand-pasted
@@ -616,7 +625,10 @@ workers' session JSONL (usage gauges + a tail-window tool-call scan).
 
 **Dedup.** Key = `dir#worker#kind`; an event fires **at most once** per key
 until the condition stops being true, at which point the key is forgotten and
-the condition can fire again. Three kinds carry a payload fingerprint in the
+the condition can fire again. Keys of workers that LEAVE the manifests are
+forgotten on the next tick as well — `seen` cannot grow without bound in a
+long-lived orchestrator, and a worker that comes back can wake the fleet owner
+again (W8.10–W8.11b). Three kinds carry a payload fingerprint in the
 key — `report-ready`/`report-invalid` the report mtime, `mailbox-question` the
 envelope `ts`, `grill-deck` the invocation count — because a *rewritten*
 report, a *re-asked* question and a *second* deck are new facts, and
@@ -641,9 +653,13 @@ shares the orchestrator's checkout and cwd cannot tell them apart.
 **Delivery.** `pi.sendUserMessage(text, { deliverAs: "followUp" })` — it wakes
 an idle orchestrator and never interrupts a turn in flight. Guarded twice:
 `typeof pi.sendUserMessage === "function"` (old/headless builds stay inert) and
-a try/catch that logs and drops the batch. **Advisory by contract**: no watcher
-failure — bad manifest, dead herdr, throwing sink — can affect a spawn or a
-collect; the report file remains the only completion criterion.
+a try/catch that logs the failure and **rolls the batch's dedup keys back out of
+`seen`** — a transient send error must never permanently swallow a wake-up, which
+is the failure this module exists to prevent (W9.13–W9.13c). Nothing is buffered:
+an event whose condition has already reset is simply gone. **Advisory by
+contract**: no watcher failure — bad manifest, dead herdr, throwing sink — can
+affect a spawn or a collect; the report file remains the only completion
+criterion.
 
 **Config** (`~/.pi/agent/pi-delegate.config.json`, tolerant, never throws):
 
@@ -662,3 +678,58 @@ in one line: *end your turn — the watcher wakes you*. `delegate_status` pollin
 remains valid (it is the tool for "look now"), bash sleep is stated as a
 fallback **only** when the watcher is absent (old extension build). Same wording
 in `promptGuidelines` of both tools and in `skills/delegate/SKILL.md`.
+
+### 21.1 Backlog — deferred after the §21 review + QA run (2026-09-06)
+
+Found by `report-code-review.json` / `qa-findings.md`, deliberately NOT fixed in
+the polish commit (each is bigger than a polish, and the watcher is advisory —
+none of them can corrupt a spawn or a collect result). One fix shape each:
+
+- **F1 — wake-ups are not scoped to the owning session.** Every pi session scans
+  every manifest under `/tmp/exchange`, so a bystander orchestrator is woken for
+  foreign fleets (measured: 7 events about 3 unrelated tasks on a new session's
+  first tick, worded imperatively). Fix shape: record the owner session id in the
+  manifest at spawn and filter wake-ups to it — failing that, split the batch into
+  "your fleet" vs "other exchange tasks (informational)" and shrink the lookback
+  to "since this session started".
+- **F2 — `report-invalid` fires on half-written reports and on brief-declared
+  schemas.** The watcher validates with the BASE `validateReport` and has no mtime
+  grace, so a worker mid-write is called invalid (and a §17 `reportSchema` report
+  is called invalid for 24 h). Fix shape: an mtime grace like delegate's
+  `GRACE_RECHECKS`, resolve the manifest's recorded schema fragment before calling
+  a report invalid, and soften the text when the error is "not valid JSON"/"is
+  empty" to "may still be writing — re-check next tick".
+- **F3 — torn-down workers keep firing `worker-dead` for 24 h.** Nothing removes a
+  worker from `manifest.json` on teardown, so an intentionally closed worker looks
+  like a failed spawn in every new session. Fix shape: stamp `tornDownAt` on the
+  manifest worker after a successful teardown and skip those in
+  `workersFromManifests` (same for collected-and-archived workers).
+- **F5 — dedup does not skip I/O.** Every tick re-reads every worker's session
+  JSONL, and `parseSessionUsage` is a full `readFileSync` (measured ~47 ms/tick
+  for a 10-worker fleet, ~4.7 MB of JSONL; the tool-call scan alone is tail-capped
+  at 1 MB). Fix shape: skip a worker whose `(size, mtimeMs)` signature is unchanged
+  since the previous tick, and tail-cap the usage read like the deck scan.
+- **P1 — type hygiene in `test/` (22 tsc errors at 91f6e0f, ZERO introduced by
+  §21).** `usage-check.ts:275` `zero` lacks `lastTotalTokens` (→ 20 errors at
+  314–387), `usage-check.ts:307` passes `number | null` where a `string` detail is
+  expected. Schedule a pass: annotate `zero: SessionUsage`, wrap the detail in
+  `String(...)`. (The third error of that set — `transport-contract.ts` `subDir`
+  out of scope in `finally`, which also leaked one `impl-qa-*` dir per run — IS
+  fixed here, so the count is 21 from this commit on.)
+
+Also deferred, the review minors outside the QA F-list (same reasoning):
+
+- **R4** — `worker-dead` infers death from "no live herdr status" alone, so a herdr
+  daemon restart (registry emptied, `listStatuses` reachable) looks like a fleet
+  wipe. Fix shape: require the dead condition on two consecutive ticks.
+- **R5** — the grill-deck scan is tail-window-only (1 MB), so a deck call deep in a
+  long session is invisible. Documented in §21 and pinned by W5.5, but never
+  declared as a deviation. Fix shape: declare it, or regex-scan the whole file for
+  the tool name (no JSON parse needed).
+- **R6** — `readManifest` validates the top level only, so a worker entry with a
+  name but no `reportPath` can produce a `worker-dead` wake pointing at a garbage
+  path. Fix shape: skip entries lacking a non-empty string `reportPath`, same
+  guard style as the existing name check.
+- **R7** — `session_shutdown` runs `disposeFleetUI()` before `stopWatcher()`
+  unguarded; if the UI dispose throws, the poll timer outlives the session (it is
+  `unref`'d, so the process still exits). Fix shape: stop the watcher first.

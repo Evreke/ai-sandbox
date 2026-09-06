@@ -448,9 +448,7 @@ export function detectEvents(
 	const tickOpts: DetectOptions = { ...opts, statusesKnown: snap.statusesKnown };
 	const fresh: WatchEvent[] = [];
 	const current = new Set<string>();
-	const prefixes = new Set<string>();
 	for (const w of snap.workers) {
-		prefixes.add(`${w.dir}#${w.name}#`);
 		for (const e of detectWorkerEvents(w, tickOpts)) {
 			const key = eventKey(e);
 			current.add(key);
@@ -460,12 +458,13 @@ export function detectEvents(
 			}
 		}
 	}
-	// State reset: forget keys of workers in THIS snapshot whose condition is gone
-	// (keys of workers no longer in manifests are dropped too — nothing observes
-	// them any more).
-	for (const key of [...seen]) {
-		if (!current.has(key) && [...prefixes].some((p) => key.startsWith(p))) seen.delete(key);
-	}
+	// State reset: forget every key not observed true THIS tick — a condition that
+	// stopped being true re-arms, and keys of workers that vanished from the
+	// manifests are dropped too (nothing observes them any more, so `seen` cannot
+	// grow without bound and a worker that comes back can fire again). Manifest
+	// writes are atomic (exchange.ts atomicWriteFileSync), so a vanished worker is
+	// a real removal, not a half-written read.
+	for (const key of [...seen]) if (!current.has(key)) seen.delete(key);
 	return fresh;
 }
 
@@ -540,10 +539,14 @@ export function createWatcher(deps: WatcherDeps): WatcherHandle {
 		try {
 			await deps.send(formatEventBatch(events));
 		} catch (err) {
-			// Delivery failure is logged and skipped — the next tick re-tries only
-			// events that have not been marked seen… which they have, so the batch
-			// is dropped by design: the watcher is advisory, never a queue.
-			log(`delivery failed (${errText(err)}) — batch dropped (advisory)`);
+			// Delivery failed: roll the batch's keys back out of `seen`, or a single
+			// transient send error would permanently swallow the wake-up — the exact
+			// failure this module exists to prevent (a gauge-shaped event has no
+			// fingerprint, so its key would never fire again). Still advisory, never a
+			// queue: nothing is buffered, and an event whose condition already reset is
+			// simply gone (detectEvents forgets keys it did not see this tick).
+			for (const e of events) seen.delete(eventKey(e));
+			log(`delivery failed (${errText(err)}) — batch rolled back, re-fires while still true (advisory)`);
 		}
 		return events;
 	};

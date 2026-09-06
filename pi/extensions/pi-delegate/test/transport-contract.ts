@@ -14,7 +14,8 @@
  *   2.4 Name uniquification: colliding requested name returns a different canonical name.
  *   2.5 Concurrency serialization: two concurrent place() both resolve cleanly.
  *
- * Cleanup: every workspace created here is torn down, even on failure.
+ * Cleanup: every workspace created here is torn down, every temp dir (throwaway
+ * repo + the sub-authority dir) is removed in `finally` — even on failure.
  */
 
 import { execFile } from "node:child_process";
@@ -97,6 +98,11 @@ console.log(`throwaway repo: ${repoDir}`);
 
 const originalCwd = process.cwd();
 const created: Placement[] = [];
+// Declared OUTSIDE the try: the finally block must be able to remove the
+// sub-authority dir. A `const` inside the try left `subDir` out of scope there,
+// so the cleanup threw ReferenceError into an empty catch and leaked every
+// impl-qa-* dir it ever made.
+let subDir: string | undefined;
 const MODEL = { provider: "llm-platform-alpha", model: "glm-5.3-flash", thinking: "high" };
 
 try {
@@ -214,7 +220,7 @@ try {
 	// cwd is INSIDE the worktrees prefix. Create a throwaway dir there instead of
 	// chdir'ing into a hardcoded path from a previous run (stale dirs vanish).
 	// -----------------------------------------------------------------------
-	const subDir = mkdtempSync("/root/.herdr/worktrees/pi-delegate/impl-qa-");
+	subDir = mkdtempSync("/root/.herdr/worktrees/pi-delegate/impl-qa-");
 	process.chdir(subDir);
 	const tSub = createHerdrTransport();
 	const capsSub = tSub.capabilities();
@@ -234,7 +240,11 @@ try {
 	);
 } finally {
 	process.chdir(originalCwd);
-	try { rmSync(subDir, { recursive: true, force: true }); } catch { /* already gone */ }
+	// The prefix must stay inside the worktrees dir (that is what makes the cwd
+	// sub-authority) — but it is removed here, so runs no longer accumulate.
+	if (subDir !== undefined) {
+		try { rmSync(subDir, { recursive: true, force: true }); } catch { /* already gone */ }
+	}
 	for (const p of created) await forceCleanup(p);
 	rmSync(repoDir, { recursive: true, force: true });
 }

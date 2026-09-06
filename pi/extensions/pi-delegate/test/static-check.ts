@@ -4,8 +4,8 @@
  * Run with: bun test/static-check.ts   (from repo root)
  *
  * Checks:
- *   1. Dependency rule: src/tools/*.ts, src/commands.ts, src/state.ts must NOT
- *      import ./transport/herdr.ts — only index.ts may.
+ *   1. Dependency rule: src/tools/*.ts, src/commands.ts, src/state.ts,
+ *      src/watch.ts must NOT import ./transport/herdr.ts — only index.ts may.
  *   2. src/tools/status.ts contains no mutating herdr calls.
  *   3. WORKER_NAME_RE rejects "Bad-Name", "-x", 33-char names; accepts valid ones.
  *   4. validateReport() error strings for 6 invalid shapes + 1 valid report.
@@ -47,12 +47,16 @@ const restricted = [
 	...listTsFiles(resolve(ROOT, "src/tools")),
 	resolve(ROOT, "src/commands.ts"),
 	resolve(ROOT, "src/state.ts"),
+	// §21 watcher: the canonical dependency-rule list covers watch.ts too (the
+	// review's point — §8 implies ONE enforcement point; watcher-check W1.1 keeps
+	// its own copy as the watcher-suite guard).
+	resolve(ROOT, "src/watch.ts"),
 ];
 // Match actual import statements (from "...transport/herdr(.ts)"), not doc-comment mentions.
 const IMPORT_HERDR_RE = /(import[\s\S]*?from\s*["']|\bimport\s*["'])([^"']*transport\/herdr)["']/;
 const offenders = restricted.filter((f) => IMPORT_HERDR_RE.test(readFileSync(f, "utf8")));
 check(
-	"T1.1 dependency rule: tools/commands/state never import transport/herdr.ts",
+	"T1.1 dependency rule: tools/commands/state/watch never import transport/herdr.ts",
 	offenders.length === 0,
 	offenders.join(", "),
 );
