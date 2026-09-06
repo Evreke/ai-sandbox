@@ -559,3 +559,21 @@ orchestrator for half an hour while the widget already showed the truth —
 the same "waiting while the truth is visible" failure as the probe report
 wait. Long blocking is explicit opt-in (waitMs), never a side effect of a
 stale large timeoutMs.
+
+### 19.6 v1.10 — report contract canon moves into the code (field 2026-09-06)
+Field: workers kept writing schema-invalid reports (string `evidence`, missing
+`artifacts`) — not worker error: briefs TAUGHT the wrong shape. Hand-pasted
+report JSON in brief OUTPUT sections had drifted from `baseValidate` and the
+drift propagated by template copy (stale briefs in /tmp/exchange used as
+models). Fix: the canon lives in code, briefs carry none. `REPORT_EXAMPLE`
+(types.ts) is the canonical example (WorkerReport, worker placeholder);
+`briefPrompt` appends a report-contract block — required fields with the
+canonical name substituted, verbatim "Extra fields allowed" (canon = minimum,
+not a whitelist), and the example JSON. Sentinel `test/report-contract-check.ts`
+validates REPORT_EXAMPLE through the real `validateReport` and pins the
+regression class (string evidence rejected): any future drift between prompt
+canon and validator fails the suite. `skills/delegate/SKILL.md` Brief step now
+reads "OUTPUT: acceptance criteria only" — report path/shape come from the
+tool's fixed prompt, never pasted into a brief. Delegate run: worker
+`contract` (worktree, flash tier) built it; orchestrator verified diff + full
+test suite before the ff-merge.
