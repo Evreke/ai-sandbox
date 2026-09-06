@@ -17,6 +17,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { progressPathFor, readLastProgress } from "./src/exchange.ts";
 import { buildWorkerView } from "./src/state.ts";
 import { contextPct, parseSessionUsage, resolveContextWindow } from "./src/usage.ts";
+import { startWatcher, stopWatcher } from "./src/watch.ts";
 import { mountFleetUI, disposeFleetUI, type FleetRow, type FleetUIDeps } from "./src/ui/fleet-ui.ts";
 import { registerCommands } from "./src/commands.ts";
 import { createHerdrTransport } from "./src/transport/herdr.ts";
@@ -109,6 +110,15 @@ export default function (pi: ExtensionAPI) {
 		mountFleetUI(ctx, deps);
 	});
 
+	// Event-driven watcher (DESIGN.md §21): the replacement for the improvised
+	// bash sleep after E_TIMEOUT. Mounted for EVERY session — deliberately NOT
+	// behind ctx.hasUI: the wake-up matters headless too (rpc/print). Start is
+	// idempotent (module registry, double-start replaces) and every failure is
+	// advisory, so a broken watcher can never affect spawn/collect outcomes.
+	pi.on("session_start", async (_event, ctx) => {
+		startWatcher(pi, transport, { cwd: ctx.cwd, sessionManager: ctx.sessionManager });
+	});
+
 	// Session-end cleanup (quality fix A7): mountFleetUI's 2 s poll (herdr
 	// `agent list` + manifest reads) must not outlive the session. disposeFleetUI
 	// is the module-level registry in ui/fleet-ui.ts — idempotent, safe when
@@ -116,5 +126,6 @@ export default function (pi: ExtensionAPI) {
 	// "session_shutdown" fires before teardown for quit/reload/new/resume/fork.
 	pi.on("session_shutdown", async (_event, _ctx) => {
 		disposeFleetUI();
+		stopWatcher(); // §21: the poll timer must not outlive the session
 	});
 }

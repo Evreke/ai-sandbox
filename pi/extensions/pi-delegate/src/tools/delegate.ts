@@ -47,6 +47,7 @@ import {
 	resolveTierTable,
 } from "../usage.ts";
 import { archiveReport } from "../archive.ts";
+import { resolveWatchConfig } from "../watch.ts";
 import { notifyFleetIdle, renderDelegateLines } from "../ui/fleet-ui.ts";
 import { clampLines } from "../ui/text.ts";
 import type { Theme } from "@earendil-works/pi-coding-agent";
@@ -108,7 +109,7 @@ const delegateParams = Type.Object({
 	provider: Type.Optional(Type.String({ description: "Agent provider override; otherwise the configured tier/defaults decide (see ~/.pi/agent/pi-delegate.config.json) — no built-in default" })),
 	model: Type.Optional(Type.String({ description: "Agent model override; otherwise the configured tier/defaults decide (see ~/.pi/agent/pi-delegate.config.json) — no built-in default" })),
 	thinking: Type.Optional(Type.String({ description: "Thinking level override; otherwise the configured tier/defaults decide (see ~/.pi/agent/pi-delegate.config.json) — no built-in default" })),
-	waitMs: Type.Optional(Type.Number({ description: "How long this call BLOCKS waiting for the worker (default 120000 ms). If the worker is still running at the cap, the call auto-detaches with a 'still running' result — poll delegate_status; the worker keeps working. Long waits are opt-in via this param." })),
+	waitMs: Type.Optional(Type.Number({ description: "How long this call BLOCKS waiting for the worker (default: watch.settleGateMs from ~/.pi/agent/pi-delegate.config.json, 15000 ms — just enough to prove the worker started). At the cap the call auto-detaches: END YOUR TURN, the background watcher wakes you when the report lands or the worker needs attention. Long waits are explicit opt-in via this param." })),
 	timeoutMs: Type.Optional(Type.Number({ description: "Deprecated alias for waitMs — CAPPED at 120000 ms unless waitMs is set explicitly." })),
 
 	budgetTokens: Type.Optional(Type.Number({ minimum: 1, description: "Optional OUTPUT-token cap (sum of assistant output); over-budget workers are refused on retry with E_BUDGET." })),
@@ -209,6 +210,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			"If delegate returns E_REPORT_MISSING or E_REPORT_INVALID, do a diagnosed retry with root cause + fix shape (at most 2 repeats, then escalate); never repeat verbatim.",
 			"mode 'probe' is OPTIONAL (enterprise cost): only for untrusted environments — the first real worker's structured failures (E_PLACE/E_START/E_NAME) are just as cheap a smoke signal. Probes verify the pane reply \"OUTPUT: OK\" by streaming readback.",
 			"Probe workers NEVER write a report file — a 'probe OK/FAIL' result is final by itself; never wait for or read a probe's report-<name>.json (only real workers produce reports).",
+			"After E_TIMEOUT or a detach, END YOUR TURN: the background watcher (DESIGN.md §21) wakes you when the report lands, a question arrives, grill_deck is invoked, context goes critical, or the worker dies. Never sleep in bash to wait for a worker and never re-call delegate to wait; delegate_status polling is the only in-turn alternative (bash sleep only when the watcher is absent — old extension build).",
 		],
 		parameters: delegateParams,
 		renderCall(args, theme: Theme) {
@@ -238,20 +240,21 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			};
 			const startedAtDate = new Date();
 			const isProbe = params.mode === "probe";
-			// v1.8b (§20.1, hardened): the blocking window is capped UNCONDITIONALLY
-			// at 120 s unless the caller EXPLICITLY opts in via waitMs. A legacy
-			// timeoutMs (e.g. 1800000 from an older habit) is capped too — it must
-			// never hold the orchestrator session hostage for minutes: the fleet
-			// widget + delegate_status are the monitoring surface, and the
-			// auto-detach result carries the full gauge (token stats + budget).
+			// v1.8b (§20.1, hardened) + v1.11 (§21): the DEFAULT blocking window is the
+			// watcher's settle gate (watch.settleGateMs, 15 s) — a spawn proves "the
+			// worker started" and hands over to the background watcher, which wakes the
+			// orchestrator on settle/question/grill-deck/context/death. WAIT_CAP_MS stays
+			// as the ceiling for a legacy timeoutMs (a stale 1800000 must never hold the
+			// session hostage); an explicit waitMs is uncapped opt-in long blocking.
 			const WAIT_CAP_MS = 120_000;
+			const settleGateMs = resolveWatchConfig().settleGateMs;
 			const timeoutMs =
 				params.waitMs ??
 				(params.timeoutMs !== undefined
 					? Math.min(params.timeoutMs, WAIT_CAP_MS)
 					: isProbe
 						? PROBE_TIMEOUT_MS
-						: WAIT_CAP_MS);
+						: settleGateMs);
 			// v1.9.2 tier resolution — explicit params > tiers[<tier>] > defaults,
 			// per key. There is NO built-in worker tier: an unconfigured environment
 			// fails fast with E_TIER here (before touching herdr) instead of
@@ -594,7 +597,8 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			const detach = (): ToolResult => {
 				const b = gaugeSummary();
 				return textResult(
-					`Detached — worker ${canonical} keeps running; recover via delegate_status.` +
+					`Detached — worker ${canonical} keeps running; the watcher wakes you on its events (§21), ` +
+					`delegate_status recovers it on demand. End your turn instead of sleeping.` +
 						`${uniquified ? ` ${uniquified}` : ""}` +
 						`${manifestWarning ? ` Warning: ${manifestWarning}` : ""}` +
 						b.line,
@@ -897,8 +901,8 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				return fail(
 					"E_TIMEOUT",
 					`E_TIMEOUT — settle observation for ${canonical} failed: ${errText(err)}\n` +
-						"Status unknown (worker may have exited or herdr is unreachable) — poll delegate_status " +
-						"instead of repeating delegate." +
+						"Status unknown (worker may have exited or herdr is unreachable) — the watcher reports " +
+						"worker-dead if it truly died; check delegate_status, never repeat delegate." +
 						b.line,
 					{
 						canonical,
@@ -1022,15 +1026,21 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				} else {
 				// E_TIMEOUT: not a spawn failure — the worker is simply still running
 				// (or its state is unknown: it may have exited / herdr is unreachable).
+				// v1.11 (§21): this text IS the discipline — end the turn, the watcher
+				// owns the wait. Polling stays valid, bash sleep does not.
 				const statusLine =
 					settle.status === "unknown"
-						? `status unknown (worker may have exited or herdr is unreachable) — poll delegate_status`
-						: `status ${settle.status} — the worker is still running — poll delegate_status`;
+						? "status unknown — worker may have exited or herdr is unreachable"
+						: `status ${settle.status} — still running`;
 				const b = gaugeSummary();
 				return fail(
 					"E_TIMEOUT",
-					`E_TIMEOUT — worker ${canonical} did not settle within ${timeoutMs} ms (${statusLine}).\n` +
-						`Poll delegate_status instead of repeating delegate; Esc already detached cleanly.${uniquified ? ` ${uniquified}` : ""}` +
+					`E_TIMEOUT — worker ${canonical} did not settle within ${timeoutMs} ms (${statusLine}). Detached; it keeps running.\n` +
+						"END YOUR TURN — the watcher wakes you on this worker's report-ready / mailbox-question / " +
+						"grill-deck / context-critical / worker-dead event. No bash sleep, no repeat delegate call; " +
+						"delegate_status polling stays valid. Bash sleep is a fallback ONLY when the watcher is " +
+						"unavailable (old extension build)." +
+						`${uniquified ? ` ${uniquified}` : ""}` +
 						b.line,
 					{
 						timedOut: true,

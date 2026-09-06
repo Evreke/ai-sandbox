@@ -28,7 +28,14 @@ ritual in [REFERENCE.md](REFERENCE.md) and report that the extension is missing.
    - `mode: "probe"` first when fanning out ≥3 workers (smoke gate).
    - `mode: "tab"` for sub-orchestrators and file-slice fan-outs; `worktree` (default)
      for independent tickets. One worktree = one worker = one branch.
-   - Blocking call. Esc detaches — the worker keeps running; recover via `delegate_status`.
+   - Short blocking call (default gate ~15 s: it proves the worker started, then hands
+     over). Esc detaches — the worker keeps running.
+   - **After a detach or `E_TIMEOUT`: END YOUR TURN.** A background watcher wakes you
+     when that worker's report lands, it asks a question, it invokes `grill_deck`, its
+     context goes critical, or it dies. Do NOT wait with a bash/python `sleep` and do
+     not re-call `delegate` to wait; `delegate_status` is for when you must look NOW.
+     (A short sleep is a fallback only when the watcher tooling is absent — an old
+     extension build without it.)
 4. **Verify** — the report file is the completion criterion, never `status: done`.
    Check the report verdict against the brief's acceptance criteria with file:line evidence.
    `status: "fail"` in a valid report is an honest completion, not a tool error.
@@ -41,7 +48,7 @@ ritual in [REFERENCE.md](REFERENCE.md) and report that the extension is missing.
 | Tool result | Meaning | Your move |
 |---|---|---|
 | `E_REPORT_MISSING` / `E_REPORT_INVALID` | worker settled without a valid report | read the pane (`herdr agent read`), diagnose root cause, **diagnosed retry** — new brief naming the wrong path, root cause, fix shape. Never retry verbatim. ≤2 repeats per issue, then escalate to the user |
-| `E_TIMEOUT` | settle wait expired, worker alive | poll `delegate_status`; do not re-spawn |
+| `E_TIMEOUT` | settle gate expired; worker detached, still alive | **End your turn** — the watcher wakes you on report-ready / mailbox-question / grill-deck / context-critical / worker-dead. `delegate_status` when you need to look now; no bash sleep, no re-spawn |
 | `E_NAME` | name taken by a live agent | choose a different name |
 | `E_PROMPT_STALLED` | pane not at a prompt | inspect via `delegate_status`, answer or re-brief |
 | `E_PLACE` / `E_START` | placement/start failed | read the embedded herdr stderr; reconcile via `herdr workspace list` |

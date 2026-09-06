@@ -51,6 +51,7 @@ pi-delegate/
 │   ├── exchange.ts           # exchange dir conventions + manifest (deep module)
 │   ├── state.ts              # worker registry persisted via pi.appendEntry (survives restarts)
 │   ├── usage.ts              # session-JSONL usage parsing + budget math
+│   ├── watch.ts              # event-driven background watcher: wakes the orchestrator (§21)
 │   ├── archive.ts            # report archive (§19.3)
 │   ├── tools/
 │   │   ├── delegate.ts       # delegate tool
@@ -209,6 +210,9 @@ unknown-status rather than first-class taxonomy entries.
 - **Static/design conformance**: dependency-rule check (tools never import herdr.ts),
   read-only check on `delegate_status`, name validation, authority-mode unit tests
   (fake cwd under worktrees dir).
+- **Watcher checks** (`test/watcher-check.ts`, §21): dependency rule + lifecycle wiring,
+  config resolution (child process with `$HOME`), every event detection from temp-dir
+  fixtures, dedup/reset, one-send-per-batch delivery, inert headless sender, self-mute.
 - **Transport contract tests** against real herdr, cheap: `capabilities()`, placement+
   teardown round-trip in a throwaway repo, name uniquification.
 - **Live E2E (the DoD demo)**: from a pi session with the extension loaded, call `delegate`
@@ -577,3 +581,84 @@ reads "OUTPUT: acceptance criteria only" — report path/shape come from the
 tool's fixed prompt, never pasted into a brief. Delegate run: worker
 `contract` (worktree, flash tier) built it; orchestrator verified diff + full
 test suite before the ff-merge.
+
+## 21. Event-driven background watcher (v1.11, field: improvised `sleep 1500`)
+
+**Field report.** After `E_TIMEOUT` the orchestrator had no sanctioned way to
+wait. §20.1 removed the long blocking window but left only "poll
+`delegate_status`" behind — and polling is not something a model can do while
+idle. So it improvised: `sleep 1500` in a bash tool call. The session sat
+parked for 25 minutes inside a shell command — invisible to the fleet widget,
+no gauges, no abort short of Esc, and the worker had finished long before.
+The fix is not a better sleep; it is removing the need to wait: the extension
+wakes the orchestrator when a worker actually needs attention.
+
+**Module.** `src/watch.ts` — a background poller independent of the fleet UI
+(no `ctx.hasUI` guard: the wake-up matters headless too). Mounted on
+`session_start`, stopped on `session_shutdown` (module-level registry, exactly
+the `mountFleetUI`/`disposeFleetUI` shape; double-start replaces). It takes the
+`Transport` injected by `index.ts` and imports `transport/types.ts` +
+`exchange.ts` + `usage.ts` only — the dependency rule holds (pinned by
+`test/watcher-check.ts` W1).
+
+**Each tick** aggregates `transport.listStatuses()` (tolerant — unreachable →
+statuses *unknown*, which is NOT "everyone died"), `scanAllManifests()` and the
+workers' session JSONL (usage gauges + a tail-window tool-call scan).
+
+| Event | Trigger | Wake-up text (the concrete next action) |
+|---|---|---|
+| `report-ready` | readable report at manifest `reportPath`, passes `validateReport` | report path + verdict + "read it and verify against the brief" |
+| `report-invalid` | report file exists but fails validation (the distinct message of the same detection) | quoted validation error + "read the pane, diagnose, diagnosed retry" |
+| `mailbox-question` | `q-<name>.json` holds a valid envelope | question text + options + "answer via `delegate_mailbox` (action 'answer')" |
+| `grill-deck` | worker's session JSONL contains a `grill_deck` toolCall | "blocked on an interactive deck in its OWN pane — only a human there can answer (or steer it to the mailbox)" |
+| `context-critical` | `contextPct ≥ CONTEXT_CRITICAL_PCT` (90) vs `resolveContextWindow(model)` | pct + "steer it to wrap up now / plan a fresh-name retry" |
+| `worker-dead` | herdr knows the agent is gone (no live status) AND no report on disk | "exited without producing anything — read the pane, then diagnosed retry" |
+
+**Dedup.** Key = `dir#worker#kind`; an event fires **at most once** per key
+until the condition stops being true, at which point the key is forgotten and
+the condition can fire again. Three kinds carry a payload fingerprint in the
+key — `report-ready`/`report-invalid` the report mtime, `mailbox-question` the
+envelope `ts`, `grill-deck` the invocation count — because a *rewritten*
+report, a *re-asked* question and a *second* deck are new facts, and
+suppressing them would silently drop the only signal the orchestrator has.
+`context-critical` and `worker-dead` stay key-only: they must fire exactly
+once. One `sendUserMessage` per **batch** (per tick), never per event.
+
+**Suppressions** (each pinned by a test): `worker-dead` never fires while herdr
+is unreachable (statuses unknown ≠ dead), inside the 60 s placement grace
+window, for probe runs (probes write no report, §19.4), or when a report
+exists. Manifests older than the 24 h lookback are dropped — a fresh session
+must not be woken for last week's fleet.
+
+**Self-mute.** Every pi session runs this extension, workers included, so the
+watcher identifies *itself* in the manifests (session JSONL path, or the unique
+worktree checkout path) and (a) never delivers events about its own worker and
+(b) stays silent altogether when it is a leaf **worktree** worker — that fleet
+belongs to whoever spawned it. Sub-orchestrators (tab placements, per the skill)
+keep their watcher; tab workers are never muted on cwd alone, because a tab
+shares the orchestrator's checkout and cwd cannot tell them apart.
+
+**Delivery.** `pi.sendUserMessage(text, { deliverAs: "followUp" })` — it wakes
+an idle orchestrator and never interrupts a turn in flight. Guarded twice:
+`typeof pi.sendUserMessage === "function"` (old/headless builds stay inert) and
+a try/catch that logs and drops the batch. **Advisory by contract**: no watcher
+failure — bad manifest, dead herdr, throwing sink — can affect a spawn or a
+collect; the report file remains the only completion criterion.
+
+**Config** (`~/.pi/agent/pi-delegate.config.json`, tolerant, never throws):
+
+```json
+{ "watch": { "intervalMs": 10000, "settleGateMs": 15000 } }
+```
+
+`intervalMs` (default 10 000, floor 1 000) is the poll period; `settleGateMs`
+(default 15 000) is `delegate`'s new DEFAULT blocking window — a spawn now
+proves "the worker started" and hands over. Explicit `waitMs` still wins
+(uncapped opt-in), the legacy `timeoutMs` cap of 120 s stays, probe keeps its
+120 s smoke window.
+
+**Result texts.** `E_TIMEOUT` and the detached result now carry the discipline
+in one line: *end your turn — the watcher wakes you*. `delegate_status` polling
+remains valid (it is the tool for "look now"), bash sleep is stated as a
+fallback **only** when the watcher is absent (old extension build). Same wording
+in `promptGuidelines` of both tools and in `skills/delegate/SKILL.md`.

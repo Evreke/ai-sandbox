@@ -114,7 +114,7 @@ export function registerStatusTool(pi: import("@earendil-works/pi-coding-agent")
 			"Pass name for one worker; omit to see all known workers (from manifests + live herdr). Never mutates anything.",
 		promptSnippet: "Read-only status of delegate workers (never mutates)",
 		promptGuidelines: [
-			"Use delegate_status to poll workers after a timed-out or detached delegate call instead of repeating delegate.",
+			"Use delegate_status to check a specific worker after a timed-out or detached delegate call instead of repeating delegate — but do NOT poll it in a loop: the background watcher (DESIGN.md §21) wakes you on report-ready / mailbox-question / grill-deck / context-critical / worker-dead.",
 			"When delegate_status shows a worker as blocked, read the pane via herdr and either answer the worker's question or send a re-brief.",
 		],
 		parameters: Type.Object({
