@@ -84,7 +84,7 @@ import {
 	type WatchEvent,
 	type WatchSnapshot,
 } from "../src/observe.ts";
-import { questionPathFor, reportPathFor, type ExchangeManifest, type ManifestWorker } from "../src/exchange.ts";
+import { mismatchFiredPathFor, questionPathFor, reportPathFor, type ExchangeManifest, type ManifestWorker } from "../src/exchange.ts";
 import type { AgentStatus, Transport } from "../src/host.ts";
 
 let failures = 0;
@@ -1459,9 +1459,7 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 
 {
 	const dir = taskDir("mismatch-restart");
-	// RED: the marker-path convention is pinned as a literal here; the GREEN
-	// commit swaps this for the exchange.ts helper (mismatchFiredPathFor).
-	const mmMarkerPath = join(dir, "mismatch-fired-w-mismatch-restart.json");
+	const mmMarkerPath = mismatchFiredPathFor(dir, "w-mismatch-restart");
 	const startedAtRun1 = new Date(NOW - 10 * 60_000).toISOString();
 	const w1 = mkWorker(dir, "w-mismatch-restart", { startedAt: startedAtRun1 });
 	w1.sessionPath = writeSession(dir, "w-mismatch-restart", [assistantUsage(1000)]);

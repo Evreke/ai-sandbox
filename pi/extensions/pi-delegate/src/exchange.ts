@@ -29,7 +29,8 @@
  *     loadLibrarySchema
  *   - mailbox: questionPathFor, answerPathFor, releasePathFor,
  *     ReleaseEnvelope, readQuestion, writeAnswer, writeRelease,
- *     progressPathFor, readLastProgress
+ *     mismatchFiredPathFor, MismatchFiredEnvelope, readMismatchFiredMarker,
+ *     writeMismatchFiredMarker, progressPathFor, readLastProgress
  *   - archive: ARCHIVE_DIR, ARCHIVE_TTL_MS, archiveRoot, archiveReport,
  *     pruneArchive, listArchivedTasks
  *
@@ -41,9 +42,13 @@
  *     updateManifest's withFileMutationQueue serialization is what makes
  *     that claim/rollback protocol safe against parallel spawns.
  *   - collectedAt-dedup (write side): only COLLECT stamps collectedAt, on
- *     successful report delivery; the watcher is a reader, never a writer
+ *     successful report delivery; the watcher never writes collectedAt
  *     (its `seen` dedup lives only in session memory — the stamp is what
- *     keeps a fresh session's watcher from re-waking on old reports).
+ *     keeps a fresh session's watcher from re-waking on old reports). The
+ *     ONE deliberate watcher write is the mismatch-fired-<name>.json marker
+ *     (D3 absence-kind dedup: exactly-once report-mismatch per worker RUN
+ *     across watcher restarts, keyed by startedAtMs) — it carries no
+ *     report/collect facts.
  *   - answer-consumed-mtime: no worker-side ack exists — an answer counts
  *     as consumed iff the worker's report mtime POSTDATES the a-<name>.json
  *     answer file written by writeAnswer.
@@ -1039,6 +1044,96 @@ export function readNudgeFailedMarker(path: string): NudgeFailedEnvelope | null 
 	} catch {
 		return null; // corrupt JSON → no marker, never throw
 	}
+}
+
+// ---------------------------------------------------------------------------
+// report-mismatch fired marker (D3 of the report-mismatch critique) —
+// watcher-written, startedAt-keyed: exactly-once per worker RUN across
+// watcher session restarts
+// ---------------------------------------------------------------------------
+
+/** Conventional mismatch-fired marker path — next to the brief, worker-scoped. */
+export function mismatchFiredPathFor(dir: string, name: string): string {
+	return `${dir}/mismatch-fired-${name}.json`;
+}
+
+/** Watcher → future watcher sessions marker (mismatch-fired-<name>.json):
+ *  written by the watcher tick AFTER a report-mismatch event was successfully
+ *  delivered. Fingerprints the wake by startedAtMs, so the absence-event is
+ *  exactly-once per worker RUN across watcher session restarts — a new
+ *  same-name spawn (new startedAt) legitimately re-arms the event. This is
+ *  the ONE deliberate watcher write into the exchange dir: the reader-only
+ *  invariant is amended for this absence-kind ONLY (the marker never carries
+ *  report/collect facts — those stay write-once by collect).
+ *  EXTERNAL_DEPENDENCY: filesystem at <exchange dir>/mismatch-fired-<name>.json. */
+export interface MismatchFiredEnvelope {
+	name: string;
+	/** startedAt (ms epoch) of the run whose mismatch was already delivered. */
+	startedAtMs: number;
+	ts: string;
+}
+
+/**
+ * Tolerantly read a mismatch-fired marker; null when absent/invalid.
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: path to mismatch-fired-<name>.json
+ * Output: the parsed envelope, or null when the file is absent, unreadable,
+ *   corrupt JSON, or has no finite numeric startedAtMs (the fingerprint)
+ * Guarantees: never throws; a torn mid-write read degrades to null and the
+ *   detection simply re-fires on a later tick (the marker stays on disk)
+ * Raises: never
+ */
+export function readMismatchFiredMarker(path: string): MismatchFiredEnvelope | null {
+	let raw: string;
+	try {
+		raw = readFileSync(path, "utf8");
+	} catch {
+		return null; // absent/unreadable → no marker
+	}
+	try {
+		const parsed: unknown = JSON.parse(raw);
+		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+		const o = parsed as Record<string, unknown>;
+		if (typeof o.startedAtMs !== "number" || !Number.isFinite(o.startedAtMs)) return null;
+		return {
+			name: typeof o.name === "string" ? o.name : "",
+			startedAtMs: o.startedAtMs,
+			ts: typeof o.ts === "string" ? o.ts : "",
+		};
+	} catch {
+		return null; // corrupt JSON → no marker, never throw
+	}
+}
+
+/**
+ * Write a mismatch-fired marker atomically (tmp+rename; withFileMutationQueue
+ * on the path — the same mutation-queue discipline as every exchange-dir
+ * artifact).
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input:
+ *   - path: mismatch-fired-<name>.json mailbox-adjacent path
+ *   - name: the canonical worker name (recorded for auditability)
+ *   - startedAtMs: the startedAt of the run whose mismatch was delivered
+ * Output: resolves when the marker is durably on disk
+ * Guarantees:
+ *   - atomic write (tmp+rename) under the per-path mutation queue
+ *   - envelope shape: {name, startedAtMs, ts: ISO-8601}
+ *   - creates the parent dir on demand
+ * Raises:
+ *   - propagates filesystem errors (the watcher caller logs them, advisory)
+ */
+export function writeMismatchFiredMarker(path: string, name: string, startedAtMs: number): Promise<void> {
+	const envelope: MismatchFiredEnvelope = {
+		name,
+		startedAtMs,
+		ts: new Date().toISOString(),
+	};
+	return withFileMutationQueue(path, async () => {
+		mkdirSync(dirname(path), { recursive: true });
+		atomicWriteFileSync(path, JSON.stringify(envelope, null, "\t") + "\n");
+	});
 }
 
 // ---------------------------------------------------------------------------

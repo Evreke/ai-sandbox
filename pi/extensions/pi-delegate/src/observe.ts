@@ -40,6 +40,11 @@
  *     session memory only, so a fresh session would re-wake on old reports
  *     without the stamp. Observe only READS the stamp; collect (spawn flow,
  *     W4) writes it.
+ *   - mismatch-fired-marker (D3, the ONE deliberate watcher write): the tick
+ *     persists mismatch-fired-<name>.json after a SUCCESSFUL report-mismatch
+ *     delivery, keyed by startedAtMs — a watcher session restart must not
+ *     re-fire the wake for the same worker run (in-memory `seen` dies with
+ *     the session). A new same-name spawn (new startedAt) re-arms the event.
  *   - answer-consumed-mtime: no worker-side ack for mailbox answers exists;
  *     an answer counts as consumed iff the worker's report mtime postdates
  *     the a-<name>.json file (mailboxDrained) — otherwise the mailbox is not
@@ -88,11 +93,13 @@ import {
 } from "./exchange.ts";
 import {
 	answerPathFor,
+	mismatchFiredPathFor,
 	nudgeFailedPathFor,
 	parseBriefSchema,
 	progressPathFor,
 	questionPathFor,
 	readLastProgress,
+	readMismatchFiredMarker,
 	readNudgeFailedMarker,
 	readQuestion,
 	releasePathFor,
@@ -101,6 +108,7 @@ import {
 	updateManifest,
 	validateReport,
 	validateReportAgainstSchema,
+	writeMismatchFiredMarker,
 	type ExchangeManifest,
 } from "./exchange.ts";
 import {
@@ -1243,15 +1251,36 @@ export function detectWorkerEvents(w: WatchWorker, opts: DetectOptions = {}): Wa
 	//     than startedAt in the task dir, so the orchestrator sees exactly what
 	//     landed instead of the watched path. A later landing report still
 	//     fires the ordinary fingerprinted report-ready on top.
+	//     BUG_FIX_CONTEXT (D3, report-mismatch critique): symptom — after a
+	//     watcher session restart a fresh `seen` set re-fired report-mismatch
+	//     for every still-missing worker (the key-only dedup was per SESSION,
+	//     not per worker lifetime). Why the in-memory set cannot work — a new
+	//     session starts with an empty `seen`; disk facts are the only
+	//     cross-session memory. What was done — the event carries a startedAtMs
+	//     fingerprint (stateless identity: a new same-name spawn has a new
+	//     startedAt and re-arms), and the watcher tick persists a
+	//     mismatch-fired-<name>.json marker after a SUCCESSFUL delivery;
+	//     detection suppresses the event while a marker with the SAME
+	//     startedAtMs exists (the invariant "the watcher is a reader, never a
+	//     writer" is amended for this absence-kind only — see exchange.ts).
+	//     W-MM4: a worker whose only activity is a PENDING mailbox question is
+	//     already covered by the mailbox-question wake — report-mismatch stays
+	//     silent while a question is pending (once the question is answered and
+	//     still no report lands, the mismatch wake fires). One stall, one wake.
 	//     Invariant: for every non-probe live worker that has produced output,
 	//     exactly one of report-ready, report-invalid or report-mismatch is
 	//     eventually firable — an indefinitely silent finished worker is
 	//     unreachable.
+	const mismatchMarker = readMismatchFiredMarker(mismatchFiredPathFor(w.dir, w.name));
+	const mismatchAlreadyFired =
+		mismatchMarker !== null && w.startedAtMs !== undefined && mismatchMarker.startedAtMs === w.startedAtMs;
 	if (
 		w.live &&
 		!w.probe &&
 		w.collectedAt === undefined &&
 		reportMtime === null &&
+		!q &&
+		!mismatchAlreadyFired &&
 		w.sessionPath !== undefined &&
 		parseSessionUsage(w.sessionPath).turns > 0 &&
 		w.startedAtMs !== undefined &&
@@ -1266,6 +1295,7 @@ export function detectWorkerEvents(w: WatchWorker, opts: DetectOptions = {}): Wa
 						? `report files newer than start in ${w.dir}: ${strays.join(", ")} (siblings' reports belong to their own workers) — `
 						: `no report-* file newer than start in ${w.dir} either — `) +
 						"read the pane, salvage the work, collect manually or do a diagnosed retry",
+				String(w.startedAtMs),
 			),
 		);
 	}
@@ -1692,8 +1722,13 @@ export function createWatcher(deps: WatcherDeps): WatcherHandle {
 		if (stopped) return [];
 		let events: WatchEvent[];
 		let leafWorker = false;
+		// D3: the tick's snapshot view — consumed by the post-delivery marker
+		// write (report-mismatch fired-marker keyed by startedAtMs). Null when
+		// the snapshot itself failed (no events, no marker).
+		let tickSnap: WatchSnapshot | null = null;
 		try {
 			const snap = deps.snapshot ? await deps.snapshot() : await collectSnapshot(deps.transport, deps.self ?? {});
+			tickSnap = snap;
 			// §23 retire pass — BEFORE event delivery and fully guarded: a stamp/
 			// teardown failure is logged and retried next tick; it can never affect
 			// spawn/collect outcomes or this tick's wake-ups.
@@ -1735,6 +1770,24 @@ export function createWatcher(deps: WatcherDeps): WatcherHandle {
 		if (leafWorker || events.length === 0) return [];
 		try {
 			await deps.send(formatEventBatch(events));
+			// D3 (report-mismatch critique): persist the fired-marker AFTER a
+			// successful delivery — a fresh watcher session (empty `seen`) must not
+			// re-fire the wake for the same worker run; the marker keyed by
+			// startedAtMs is the cross-session memory. Written only on success: a
+			// failed send rolls the batch's keys back out of `seen` AND leaves no
+			// marker, so the wake re-fires while its condition still holds.
+			// Advisory: a marker-write failure costs at most one extra wake after a
+			// watcher restart, never a spawn/collect outcome.
+			for (const e of events) {
+				if (e.kind !== "report-mismatch" || tickSnap === null) continue;
+				const mismatched = tickSnap.workers.find((x) => x.dir === e.dir && x.name === e.worker);
+				if (!mismatched || mismatched.startedAtMs === undefined) continue;
+				try {
+					await writeMismatchFiredMarker(mismatchFiredPathFor(e.dir, e.worker), e.worker, mismatched.startedAtMs);
+				} catch (err) {
+					log(`mismatch-fired marker write failed (${errText(err)}) — at most one extra wake after a watcher restart`);
+				}
+			}
 		} catch (err) {
 			// BUG_FIX_CONTEXT: symptom — one failed send during a transient
 			// delivery outage permanently silenced that wake-up (the `seen` key was
