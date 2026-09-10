@@ -83,9 +83,9 @@ import type {
 	ProgressEvent,
 	WorkerReport,
 } from "./host.ts";
-import {
-	isProgressEvent,
+import { isProgressEvent,
 	isQuestionEnvelope,
+	WORKER_NAME_RE,
 	type AnswerEnvelope,
 	type QuestionEnvelope,
 } from "./host.ts";
@@ -94,7 +94,7 @@ import {
 // exports map (ERR_PACKAGE_PATH_NOT_EXPORTED, verified via node + jiti);
 // "typebox/value" is the exported entry for the same build/value modules.
 import { Check, Errors } from "typebox/value";
-import { mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { parseSessionUsage } from "./usage.ts";
@@ -741,6 +741,94 @@ export function parseBriefSchema(briefPath: string): Record<string, unknown> | n
 		return null; // absent or non-object reportSchema → v1 backward compat
 	}
 	return schema as Record<string, unknown>;
+}
+
+/**
+ * Report-filename mentions in brief prose: report-<word>.json / report-<word>.md.
+ * The word part uses the worker-name alphabet; the file part is matched
+ * case-sensitively (worker writes exactly what the brief says).
+ */
+const REPORT_MENTION_RE = /report-[A-Za-z0-9_-]+\.(?:json|md)/g;
+
+/**
+ * Spawn-time fail-fast validation of the brief's report contract (design
+ * option a; report-path mismatch incident 2026-09). The report destination is
+ * a single fact derived from the worker NAME via reportPathFor — the brief's
+ * FILENAME stem and its PROSE are validated AGAINST that fact, never sources
+ * of it. A brief that disagrees is rejected BEFORE any pane exists, so a
+ * misdirected worker can never go silently unwatched again.
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input:
+ *   - briefPath: absolute path to the brief (the caller already ran
+ *     ensureExchangeDir)
+ *   - requestedName: the worker name as requested on the delegate call
+ *     (uniquification happens after start — compare against the REQUESTED
+ *     name, so pre-uniquification briefs stay valid)
+ *   - manifestDir: the task's exchange dir (canonical report path is derived
+ *     from it + requestedName)
+ * Output: { ok: true } or { ok: false, error } with a copy-pasteable recovery
+ *   text (it always ends with the canonical report path)
+ * Guarantees:
+ *   - checks (1) the brief FILENAME stem — brief-<stem>.md with
+ *     <stem> !== requestedName fails, naming both; (2) every report-filename
+ *     mention in the brief TEXT (report-* with .json or .md extension) must
+ *     resolve to the canonical report-<requestedName>.json — EXCEPT a
+ *     sibling worker's report-<other>.json where <other> is a DIFFERENT
+ *     valid worker name (fan-out briefs legitimately reference sibling
+ *     reports; a .md mention is never a valid sibling — reports are JSON)
+ *   - reads the brief at most once
+ *   - never throws: a missing/unreadable brief is { ok: false } with a
+ *     readable error
+ * Raises: never
+ * EXTERNAL_DEPENDENCY: filesystem — reads the brief file at briefPath.
+ */
+export function validateBriefReportContract(
+	briefPath: string,
+	requestedName: string,
+	manifestDir: string,
+): { ok: true } | { ok: false; error: string } {
+	const canonical = `report-${requestedName}.json`;
+	const canonicalPath = reportPathFor(manifestDir, requestedName);
+	let text: string;
+	try {
+		text = readFileSync(briefPath, "utf8");
+	} catch (err) {
+		return { ok: false, error: `Brief not readable at ${briefPath}: ${(err as Error).message}` };
+	}
+
+	// (1) Filename stem: brief-<stem>.md implies the worker name <stem>.
+	const stemMatch = /^brief-(.+)\.md$/.exec(basename(briefPath));
+	if (stemMatch && stemMatch[1] !== requestedName) {
+		return {
+			ok: false,
+			error:
+				`Brief filename stem "${stemMatch[1]}" does not match the requested worker name "${requestedName}" ` +
+				`(brief: ${briefPath}). Rename the brief to brief-${requestedName}.md or spawn under the matching name. ` +
+				`Canonical report path: ${canonicalPath}`,
+		};
+	}
+
+	// (2) Prose scan: every report-* mention must resolve to the canonical
+	// report, sibling .json mentions of OTHER valid worker names excepted.
+	const offenders = new Set<string>();
+	for (const m of text.matchAll(REPORT_MENTION_RE)) {
+		const mention = m[0];
+		if (mention === canonical) continue;
+		const other = /^report-([A-Za-z0-9_-]+)\.json$/.exec(mention);
+		if (other && other[1] !== requestedName && WORKER_NAME_RE.test(other[1])) continue; // sibling worker's report
+		offenders.add(mention);
+	}
+	if (offenders.size > 0) {
+		return {
+			ok: false,
+			error:
+				`Brief names report file(s) other than the canonical ${canonical}: ${[...offenders].join(", ")}. ` +
+				`A worker's report destination is derived from its name, never from brief prose (only a SIBLING ` +
+				`worker's report-<other>.json may be referenced). Point the OUTPUT section at ${canonicalPath}`,
+		};
+	}
+	return { ok: true };
 }
 
 /**

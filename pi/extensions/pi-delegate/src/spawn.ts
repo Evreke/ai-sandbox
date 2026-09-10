@@ -107,6 +107,7 @@ import {
 	resolveReportSchema,
 	scanAllManifests,
 	updateManifest,
+	validateBriefReportContract,
 	validateReport,
 	validateReportAgainstSchema,
 	writeAnswer,
@@ -971,6 +972,22 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				briefSchema = resolved.schema;
 				schemaProvenance = resolved.provenance;
 				resolvedSchema = resolved.schema;
+			}
+
+			// Report-contract fail-fast (design option a; mismatch incident 2026-09):
+			// the brief's filename stem and prose must agree with the canonical
+			// name-derived report path BEFORE any pane exists — a misdirected worker
+			// would otherwise finish real work no layer ever watches for.
+			if (!isProbe) {
+				const contract = validateBriefReportContract(briefPath, params.name, manifestDir);
+				if (!contract.ok) {
+					return fail(
+						"E_BRIEF",
+						`E_BRIEF — report contract violation for ${params.name}: ${contract.error}\n` +
+							"Fix the brief (or the worker name) so every report mention resolves to the canonical path, then retry.",
+						{ briefPath, name: params.name, contractError: contract.error },
+					);
+				}
 			}
 
 			// 2. Place (worktree create / tab create — transport serializes mutations).
