@@ -31,10 +31,10 @@
  * Exit 0 only if all checks pass.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import {
 	RETIRE_DEFAULT_TTL_MS,
 	RETIRE_DEFAULT_ENABLED,
@@ -51,6 +51,7 @@ import {
 	type ExchangeManifest,
 	type ManifestWorker,
 } from "../src/exchange.ts";
+import { archiveRoot } from "../src/exchange.ts";
 import type { AgentStatus, Placement, TeardownReq, Transport } from "../src/host.ts";
 
 let failures = 0;
@@ -65,6 +66,14 @@ function check(name: string, ok: boolean, detail = "") {
 const ROOT = resolve(dirname(process.argv[1] ?? "."), "..");
 const NOW = Date.parse("2026-09-09T12:00:00.000Z");
 const FIX = mkdtempSync(join(tmpdir(), "retire-check-fix-"));
+
+// Archive sandbox: archive-at-retire (R7) — and any collect-path archive —
+// writes under archiveRoot() = $HOME/.pi/agent/delegate-archive. Redirect
+// $HOME for the WHOLE run so the real archive is never touched (same
+// convention as settle-archive.ts; R1's child spawns override HOME explicitly).
+const SAVED_HOME = process.env.HOME;
+const ARCHIVE_HOME = mkdtempSync(join(tmpdir(), "retire-check-archive-home-"));
+process.env.HOME = ARCHIVE_HOME;
 
 // ---------------------------------------------------------------------------
 // R1. Config — watch.retireTtlMs (child bun process, $HOME at spawn time)
@@ -582,5 +591,76 @@ function dOwnCheckLegacy(t: FakeTransport): boolean {
 }
 
 rmSync(FIX, { recursive: true, force: true });
+
+// ---------------------------------------------------------------------------
+// R7. Archive-at-retire (diag-retire-msg Q3 item 1): a TTL retire of an
+// UNCOLLECTED worker must not orphan the report — retirePass calls the
+// archive helper after stamping retiredAt, so the report + manifest snapshot
+// survive the worktree teardown. Idempotent: a second retire pass (history,
+// skipped) or a re-archive must not duplicate the copy.
+// ---------------------------------------------------------------------------
+
+{
+	const dir = taskDir("archive");
+	const w = mkWorker(dir, "r-archive");
+	writeManifestOnDisk(dir, [w]);
+	writeValidReport(dir, "r-archive");
+	const t = fakeTransport();
+
+	// Tick 1: stamp the TTL clock. Tick 2: TTL elapsed → close + archive.
+	await retirePass(t, snapshotFor([w], [DONE("r-archive")]), { nowMs: NOW, retireEnabled: true, retireTtlMs: 900_000 });
+	const stamped = manifestFromDisk(dir).workers.find((x) => x.name === "r-archive");
+	const decisions = await retirePass(
+		t,
+		snapshotFor([{ ...w, retirableSince: stamped!.retirableSince }], [DONE("r-archive")]),
+		{ nowMs: NOW + 900_001, retireEnabled: true, retireTtlMs: 900_000 },
+	);
+	const archiveTaskDir = join(archiveRoot(), basename(dir));
+	const archivedReport = join(archiveTaskDir, `report-r-archive.json`);
+	check(
+		"R7.1 TTL retire of an uncollected worker archives the report",
+		decisions.length === 1 && existsSync(archivedReport),
+		archivedReport,
+	);
+	check(
+		"R7.2 the archive copy is byte-identical to the exchange report",
+		existsSync(archivedReport) && readFileSync(archivedReport, "utf8") === readFileSync(`${dir}/report-r-archive.json`, "utf8"),
+	);
+	check(
+		"R7.3 the archive carries a manifest snapshot (evidence outlives the worktree)",
+		existsSync(join(archiveTaskDir, "manifest.json")),
+	);
+
+	// Second retire pass: the worker is history (retiredAt) → skipped; the
+	// archive must NOT grow a duplicate.
+	const retiredEntry = manifestFromDisk(dir).workers.find((x) => x.name === "r-archive");
+	await retirePass(
+		t,
+		snapshotFor([{ ...w, retirableSince: stamped!.retirableSince, retiredAt: retiredEntry!.retiredAt }], [DONE("r-archive")]),
+		{ nowMs: NOW + 900_002, retireEnabled: true, retireTtlMs: 900_000 },
+	);
+	check(
+		"R7.4 second retire pass does not duplicate the archive (one report copy)",
+		existsSync(archivedReport) && readdirSync(archiveTaskDir).filter((f) => f.startsWith("report-")).length === 1,
+		JSON.stringify(readdirSync(archiveTaskDir)),
+	);
+
+	// Direct idempotency: re-archiving the SAME report rewrites in place —
+	// the naming mirrors collect (basename preserved, no prefix).
+	await retirePass(
+		t,
+		snapshotFor([{ ...w, retirableSince: stamped!.retirableSince, retiredAt: retiredEntry!.retiredAt }], [DONE("r-archive")]),
+		{ nowMs: NOW + 900_003, retireEnabled: true, retireTtlMs: 900_000 },
+	);
+	check(
+		"R7.5 re-archive keeps exactly one copy (idempotent naming)",
+		readdirSync(archiveTaskDir).filter((f) => f.startsWith("report-")).length === 1,
+	);
+}
+
+rmSync(FIX, { recursive: true, force: true });
+rmSync(ARCHIVE_HOME, { recursive: true, force: true });
+if (SAVED_HOME === undefined) delete process.env.HOME;
+else process.env.HOME = SAVED_HOME;
 console.log(failures === 0 ? "\nALL RETIRE CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

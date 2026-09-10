@@ -80,6 +80,7 @@ import { basename, join } from "node:path";
 import { Type } from "typebox";
 import {
 	aggregateTaskUsage,
+	archiveReport,
 	archiveRoot,
 	listArchivedTasks,
 	readManifest,
@@ -1520,6 +1521,19 @@ export async function retirePass(
 					alreadyGone = true;
 				}
 				await stampWorkerField(w, (x) => ({ ...x, retiredAt: new Date(nowMs).toISOString() }));
+				// Archive at retire (diag-retire-msg Q3 item 1): a TTL close of an
+				// UNCOLLECTED report must not orphan it — without this, the report
+				// survives in /tmp only as a silent artifact and every evidence path
+				// into the worktree dies with the teardown. Same helper + naming as
+				// the collect-path archive (basename preserved, manifest snapshot
+				// rewritten in place) → idempotent by construction. Best-effort by
+				// contract: a failure never blocks the close.
+				try {
+					const manifest = readManifest(w.dir);
+					if (manifest) archiveReport(w.dir, w.reportPath, manifest as unknown as Record<string, unknown>);
+				} catch {
+					// archive is advisory — the retiredAt stamp already guards history
+				}
 				// CONSUME the ACK marker: a leftover release-<name>.json would ACK-close
 				// a fresh same-name retry (spawn appends into the SAME task dir, §23.3
 				// sanctions the retry) on its FIRST retirable tick — silently skipping
