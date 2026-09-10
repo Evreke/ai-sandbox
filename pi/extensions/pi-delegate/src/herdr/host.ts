@@ -1325,14 +1325,28 @@ export class HerdrTransport implements Transport {
 				if (req.force !== false) args.push("--force");
 				await runHerdr(args);
 			} catch (err) {
-				if (!/not_linked_worktree/i.test((err as Error).message)) {
+				const msg = (err as Error).message ?? "";
+				if (/not_linked_worktree/i.test(msg)) {
+					// Orphaned/not-linked workspace — handled by the reconcile below.
+				} else if (/not[\s_-]?found/i.test(msg)) {
+					// BUG_FIX_CONTEXT (parity pin, workerhost impl 2026-09-10): the seam
+					// contract is "teardown of an already-gone placement → idempotent
+					// no-op success" (pinned by the fake and the host-parity-check P3;
+					// the tool layer already mirrored it via observe.ts isAlreadyGone).
+					// Symptom: the SECOND worktree teardown failed E_PLACE with herdr's
+					// `workspace_not_found` — only the tab path was idempotent. Why the
+					// old guard did not work: it tolerated only not_linked_worktree.
+					// What was done: not-found-shaped removal errors are a no-op success
+					// too (the placement is verifiably absent — the reconcile below is
+					// then also a no-op via closeWorkspaceIfPresent).
+					return;
+				} else {
 					throw delegateError(
 						"E_PLACE",
-						`herdr worktree remove failed for workspace ${workspaceId}: ${(err as Error).message}`,
+						`herdr worktree remove failed for workspace ${workspaceId}: ${msg}`,
 						err,
 					);
 				}
-				// Orphaned/not-linked workspace — handled by the reconcile below.
 			}
 			// Reconcile (O2): removing the worktree while the worker agent is live
 			// can leave a non-linked workspace shell that only `workspace close`
