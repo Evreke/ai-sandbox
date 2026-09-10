@@ -166,6 +166,10 @@ export interface AgentStatus {
 	 *  reconcile placements recorded with the old paneId fallback. */
 	tabId?: string;
 	workspaceId?: string;
+	/** Opaque placement reference (workerhost inversion, design §3) — present
+	 *  when the backend tracks agents by ref; the watcher/retire gate proxies
+	 *  on this instead of herdr ids once migration step 3 lands. */
+	placementRef?: string;
 }
 
 export interface TeardownReq {
