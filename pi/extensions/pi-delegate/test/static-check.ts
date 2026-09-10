@@ -19,7 +19,7 @@
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { WORKER_NAME_RE } from "../src/transport.ts";
+import { WORKER_NAME_RE, placementFromTabResult } from "../src/transport.ts";
 import { validateReport } from "../src/exchange.ts";
 
 const ROOT = resolve(dirname(process.argv[1] ?? "."), "..");
@@ -267,6 +267,35 @@ check(
 check(
 	"T2.4 the mandate names the suffixed shape explicitly (<name>-r2) — a same-name retry must read as impossible",
 	/<name>-r2/.test(delegateSrc) && /name stays taken/.test(delegateSrc),
+);
+
+// ---------------------------------------------------------------------------
+// 7. herdr drift pins (2026-09-10 implement-osb field report): herdr renamed
+// tab-create result tab.id → tab.tab_id; the old probe list missed it and the
+// paneId fallback recorded pane ids as tabId — every tab close failed
+// tab_not_found while the agent stayed alive.
+// ---------------------------------------------------------------------------
+
+const CURRENT_TAB_SHAPE = {
+	id: "cli:tab:create",
+	result: {
+		root_pane: { pane_id: "wKD:p4", tab_id: "wKD:t4", workspace_id: "wKD" },
+		tab: { tab_id: "wKD:t4", label: "shape-probe", number: 4, pane_count: 1, workspace_id: "wKD" },
+		type: "tab_created",
+	},
+};
+const LEGACY_TAB_SHAPE = { result: { root_pane: { pane_id: "wKD:p4" }, tab: { id: "wKD:t4" } } };
+
+const tabPlacement = placementFromTabResult(CURRENT_TAB_SHAPE.result, "wKD", "raw");
+check("T3.1 current herdr shape: tabId parsed from tab.tab_id (NOT the paneId fallback)", tabPlacement.tabId === "wKD:t4" && tabPlacement.paneId === "wKD:p4", JSON.stringify(tabPlacement));
+const legacyTabPlacement = placementFromTabResult(LEGACY_TAB_SHAPE.result, "wKD", "raw");
+check("T3.2 legacy herdr shape (tab.id) still parses", legacyTabPlacement.tabId === "wKD:t4");
+check(
+	"T3.3 teardown reconciles the paneId-fallback signature: transport resolves the live tab id when recorded tabId === paneId",
+	(() => {
+		const transportSrc = readFileSync(resolve(ROOT, "src/transport.ts"), "utf8");
+		return /resolveLiveTabId\(req\.name\)/.test(transportSrc) && /recordedTabId === req\.placement\.paneId/.test(transportSrc);
+	})(),
 );
 
 // ---------------------------------------------------------------------------

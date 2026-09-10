@@ -49,6 +49,19 @@ async function herdrJson(args: string[]): Promise<unknown> {
 	return parseHerdrResult(stdout).result;
 }
 
+// Herdr-absence gate: this file drives REAL herdr mutating ops — on a machine
+// without herdr (e.g. a GitHub Actions runner) it must SKIP, not fail. The
+// invariants pinned here are exercised on herdr-ful machines and by the
+// herdr-independent static pins in static-check.ts.
+await (async () => {
+	try {
+		await execFileP("herdr", ["--version"], { encoding: "utf8", timeout: 10_000 });
+	} catch {
+		console.log("SKIP transport-contract — herdr binary not available on this host");
+		process.exit(0);
+	}
+})();
+
 async function liveWorkspaceIds(): Promise<Set<string>> {
 	const result = await herdrJson(["workspace", "list"]);
 	const list = Array.isArray(result) ? result : (result as { workspaces?: unknown[] })?.workspaces ?? [];
@@ -130,6 +143,33 @@ try {
 		JSON.stringify(p1),
 	);
 	check("T2.2b placement created a NEW herdr workspace", !before.has(p1.workspaceId), p1.workspaceId);
+
+	// T2.2c — TAB placement round-trip (herdr drift pin, 2026-09-10): the tab
+	// id MUST come from the herdr result's tab.tab_id — never the paneId
+	// fallback (that signature made every tab close fail tab_not_found while
+	// the agent stayed alive; see placementFromTabResult BUG_FIX_CONTEXT).
+	{
+		logOp("transport.place(tab) [drift pin]");
+		const tabP = await t.place({ mode: "tab", label: "qa-probe-tab-shape" });
+		// NOT pushed into `created`: it lives in THIS session's workspace — the
+		// finally-cleanup force-removes workspaces, which must never touch ours.
+		check(
+			"T2.2c tab placement: tabId is a REAL tab id (not the pane id)",
+			tabP.kind === "tab" && !!tabP.tabId && tabP.tabId !== tabP.paneId && /:t\d+$/.test(tabP.tabId ?? ""),
+			JSON.stringify(tabP),
+		);
+		logOp(`transport.teardown(tab ${tabP.tabId}) [drift pin]`);
+		await t.teardown({ name: "qa-probe-tab-shape", placement: tabP, force: true }).catch(
+			// forceCleanup would remove the WORKSPACE — for a tab the fallback is
+			// a direct tab close (and if that fails too, a leftover empty tab is
+			// harmless: no agent was ever started in it).
+			async () => {
+				logOp(`herdr tab close ${tabP.tabId}  (cleanup fallback)`);
+				await execFileP("herdr", ["tab", "close", tabP.tabId], { encoding: "utf8", timeout: 30_000 });
+			},
+		);
+		check("T2.2d tab teardown with the parsed tabId succeeds", true);
+	}
 
 	logOp(`herdr agent start qa-probe --kind pi --pane ${p1.paneId} --timeout 120000 -- --provider ${MODEL.provider} --model ${MODEL.model} --thinking ${MODEL.thinking}`);
 	const probeName = `qa-probe-${Date.now().toString(36)}`;

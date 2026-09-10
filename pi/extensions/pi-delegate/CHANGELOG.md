@@ -10,6 +10,8 @@ Version numbers align with the iteration numbering in DESIGN.md (v1.x sections).
 
 ### Added
 
+### Added
+
 - **F6 — two-tier delegation wake-up**: a session that is a worker of a parent
   manifest AND the orchestrator of its own child manifests (a tier-1 lead)
   now mounts a watcher scoped to ITS OWN children — tier-2 report-ready/
@@ -26,6 +28,14 @@ Version numbers align with the iteration numbering in DESIGN.md (v1.x sections).
 
 ### Fixed
 
+- **herdr tab-id drift (implement-osb field report)**: herdr renamed the
+  tab-create result key `tab.id` → `tab.tab_id`; the parser missed the new
+  spelling and recorded the PANE id as `tabId`, so every autonomous tab close
+  failed `tab_not_found` while the agent stayed alive (the paneId fallback
+  also masked the failure as an idempotent retire). The parser now reads the
+  current spelling (legacy accepted), `AgentStatus` carries `tabId`, and
+  teardown re-resolves the live tab id from the herdr registry when the
+  recorded one carries the broken paneId-fallback signature.
 - **Retire pass idempotency**: a herdr "not found" during the autonomous
   close (pane already gone) is treated as a successful retire — no more
   `tab_not_found` error spam every tick; genuine teardown failures keep the

@@ -216,6 +216,10 @@ export interface AgentStatus {
 	name: string;
 	status: AgentStatusName;
 	paneId?: string;
+	/** herdr tab id (wKD:t4) — present in `agent list` entries since the
+	 *  herdr build that renamed tab.id → tab.tab_id; teardown uses it to
+	 *  reconcile placements recorded with the old paneId fallback. */
+	tabId?: string;
 	workspaceId?: string;
 }
 
@@ -1803,7 +1807,20 @@ export class HerdrTransport implements Transport {
 		}
 
 		// kind === "tab"
-		const tabId = p.tabId ?? req.placement.paneId;
+		// herdr drift guard: manifests written while placementFromTabResult fell
+		// back to the pane id carry tabId === paneId — closing that id always
+		// fails tab_not_found while the agent (and its REAL tab) stays alive. The
+		// fallback masked this as an idempotent retire (F6 follow-up, 2026-09-10
+		// implement-osb field report). Resolve the live tab id from the herdr
+		// agent registry when the recorded one carries the broken signature.
+		const recordedTabId = p.tabId ?? req.placement.paneId;
+		let tabId = recordedTabId;
+		if (recordedTabId === req.placement.paneId) {
+			const live = await this.resolveLiveTabId(req.name);
+			if (live && live !== recordedTabId) {
+				tabId = live; // manifest recorded a pane id — close the REAL tab
+			}
+		}
 		try {
 			await runHerdr(["tab", "close", tabId]);
 		} catch (err) {
@@ -1812,6 +1829,42 @@ export class HerdrTransport implements Transport {
 				`herdr tab close ${tabId} failed: ${(err as Error).message}`,
 				err,
 			);
+		}
+	}
+
+	/** Resolve the LIVE herdr tab id for a named agent (herdr drift guard):
+	 *  the `agent list` registry entry carries the real tab_id even when the
+	 *  manifest's recorded placement fell back to a pane id. Read-only socket
+	 *  path first (non-queued by contract), CLI fallback; null when the agent
+	 *  is gone (the caller then closes the recorded id and lets the not-found
+	 *  → idempotent semantics handle it).
+	 * <p>
+	 * EXTERNAL_DEPENDENCY: herdr socket (HERDR_SOCK env) / `herdr agent list`
+	 * subprocess.
+	 */
+	private async resolveLiveTabId(name: string): Promise<string | null> {
+		if (this.socketForReadOnly()) {
+			try {
+				const statuses = await this.listStatuses();
+				return statuses.find((s) => s.name === name)?.tabId ?? null;
+			} catch {
+				return null; // statuses unavailable — fall through to the recorded id
+			}
+		}
+		try {
+			const { stdout } = await runHerdr(["agent", "list"]);
+			const { result } = parseHerdrResult(stdout);
+			const list = Array.isArray(result)
+				? result
+				: isRecord(result) && Array.isArray(result.agents)
+					? result.agents
+					: [];
+			const entry = list.find(
+				(a) => isRecord(a) && String((a as Record<string, unknown>).name ?? (a as Record<string, unknown>).agent_name ?? "") === name,
+			);
+			return entry ? asString(pick(entry, "tab_id", "tabId")) : null;
+		} catch {
+			return null; // registry unreachable — fall through to the recorded id
 		}
 	}
 
@@ -1928,6 +1981,7 @@ function agentStatusFromResult(result: unknown, fallbackName: string): AgentStat
 		// `agent list` entries: agent_name when present; `agent get`: name under result.agent.
 		name: asString(pick(result, "name", "agent.name", "agent_name")) ?? fallbackName,
 		paneId: asString(pick(result, "pane_id", "paneId", "agent.pane_id", "pane.pane_id")),
+		tabId: asString(pick(result, "tab_id", "tabId", "agent.tab_id", "tab.tab_id")),
 		workspaceId: asString(pick(result, "workspace_id", "workspaceId", "agent.workspace_id", "workspace.workspace_id")),
 	};
 }
@@ -1988,9 +2042,10 @@ function placementFromWorktreeResult(
  * Raises:
  *   - DelegateErrorImpl E_PLACE for unparseable output or missing root pane id
  * EXTERNAL_DEPENDENCY: `herdr tab create` result shape (frozen fields:
- *   tab.id, root_pane.pane_id); process.cwd() as the shared checkout.
+ *   tab.tab_id, root_pane.pane_id; legacy spellings tab.id/tab_id accepted);
+ *   process.cwd() as the shared checkout.
  */
-function placementFromTabResult(
+export function placementFromTabResult(
 	result: unknown,
 	workspaceId: string,
 	raw: string,
@@ -1999,7 +2054,13 @@ function placementFromTabResult(
 		throw delegateError("E_PLACE", `herdr tab create returned unparseable output: ${truncate(raw)}`);
 	}
 	const paneId = asString(pick(result, "root_pane.pane_id", "pane_id", "root_pane.id"));
-	const tabId = asString(pick(result, "tab.id", "tab_id", "tabId")) ?? paneId;
+	// BUG_FIX_CONTEXT (herdr drift, 2026-09-10): herdr renamed the tab-create
+	// result key tab.id → tab.tab_id; the old probe list missed the new spelling
+	// so the fallback recorded the PANE id as tabId — every later `tab close`
+	// failed with tab_not_found (the pane id is not a tab id), which the retire
+	// pass masked as an idempotent close while the agent stayed alive. The
+	// current spelling is probed first; the legacy spellings stay for older herdr.
+	const tabId = asString(pick(result, "tab.tab_id", "tab.id", "tab_id", "tabId")) ?? paneId;
 	if (!paneId) {
 		throw delegateError(
 			"E_PLACE",
