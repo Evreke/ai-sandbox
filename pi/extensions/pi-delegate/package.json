@@ -27,7 +27,9 @@
     }
   },
   "devDependencies": {
-    "@types/node": "22"
+    "@types/node": "22",
+    "@earendil-works/pi-coding-agent": "0.85.1",
+    "@earendil-works/pi-ai": "0.85.1"
   },
   "files": [
     "index.ts",
