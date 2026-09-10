@@ -52,7 +52,7 @@
  * Exit 0 only if all checks pass.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
@@ -1447,6 +1447,107 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 	check(
 		"W17.15 below-floor mismatchGraceMs falls back (floor 10 s)",
 		watchConfigInHome(JSON.stringify({ watch: { mismatchGraceMs: 5 } })).mismatchGraceMs === WATCH_DEFAULT_MISMATCH_GRACE_MS,
+	);
+}
+// ---------------------------------------------------------------------------
+// W-MM3 (D3): report-mismatch is exactly-once per worker RUN across watcher
+// session restarts — the fingerprint (startedAtMs) is PERSISTED on disk
+// (mismatch-fired-<name>.json, written by the watcher tick after a successful
+// delivery), so a fresh session's empty `seen` set cannot re-fire the wake.
+// A NEW same-name spawn (new startedAt) legitimately re-arms the event.
+// ---------------------------------------------------------------------------
+
+{
+	const dir = taskDir("mismatch-restart");
+	// RED: the marker-path convention is pinned as a literal here; the GREEN
+	// commit swaps this for the exchange.ts helper (mismatchFiredPathFor).
+	const mmMarkerPath = join(dir, "mismatch-fired-w-mismatch-restart.json");
+	const startedAtRun1 = new Date(NOW - 10 * 60_000).toISOString();
+	const w1 = mkWorker(dir, "w-mismatch-restart", { startedAt: startedAtRun1 });
+	w1.sessionPath = writeSession(dir, "w-mismatch-restart", [assistantUsage(1000)]);
+	const transport = { listStatuses: async () => [LIVE("w-mismatch-restart")] } as unknown as Transport;
+	let snap = snapshotFor([w1], [LIVE("w-mismatch-restart")]);
+	const mkWatcher = () =>
+		createWatcher({
+			transport,
+			intervalMs: 3_600_000, // driven by hand — the test never waits on a timer
+			send: () => {},
+			snapshot: async () => snap,
+			log: () => {},
+		});
+
+	const first = mkWatcher();
+	const batch1 = await first.tick();
+	check("W-MM3.1 first watcher session: the mismatch fires", batch1.some((e) => e.kind === "report-mismatch"), kindsOf(batch1));
+	check(
+		"W-MM3.2 the event is fingerprinted by startedAtMs (stateless disk-keyed identity)",
+		batch1.find((e) => e.kind === "report-mismatch")?.fingerprint === String(Date.parse(startedAtRun1)),
+		JSON.stringify(batch1.map((e) => e.fingerprint)),
+	);
+	first.stop();
+	check(
+		"W-MM3.3 the fired marker is persisted on disk (mismatch-fired-<name>.json)",
+		existsSync(mmMarkerPath),
+		mmMarkerPath,
+	);
+
+	// A RESTARTED watcher session = a fresh instance (empty `seen`) over the
+	// same disk facts → must NOT re-fire for the same startedAt.
+	const second = mkWatcher();
+	const batch2 = await second.tick();
+	check(
+		"W-MM3.4 a restarted watcher session does NOT re-fire report-mismatch for the same startedAt",
+		!batch2.some((e) => e.kind === "report-mismatch"),
+		kindsOf(batch2),
+	);
+	second.stop();
+
+	// A NEW same-name spawn (new startedAt, past the grace) legitimately
+	// re-arms the mismatch wake.
+	const startedAtRun2 = new Date(NOW - 5 * 60_000).toISOString();
+	const w2 = mkWorker(dir, "w-mismatch-restart", { startedAt: startedAtRun2 });
+	w2.sessionPath = w1.sessionPath;
+	snap = snapshotFor([w2], [LIVE("w-mismatch-restart")]);
+	const third = mkWatcher();
+	const batch3 = await third.tick();
+	check(
+		"W-MM3.5 a NEW same-name spawn (new startedAt) re-arms the mismatch",
+		batch3.some((e) => e.kind === "report-mismatch") &&
+			batch3.find((e) => e.kind === "report-mismatch")?.fingerprint === String(Date.parse(startedAtRun2)),
+		kindsOf(batch3),
+	);
+	third.stop();
+	rmSync(mmMarkerPath, { force: true }); // fixture hygiene
+}
+
+// ---------------------------------------------------------------------------
+// W-MM4: a worker whose ONLY activity is a pending mailbox question does NOT
+// false-fire report-mismatch — the mailbox-question wake already covers it
+// (the mismatch wake would be a duplicate). Once the question is ANSWERED
+// (q-file gone) and still no report lands, the mismatch wake fires.
+// ---------------------------------------------------------------------------
+
+{
+	const dir = taskDir("mismatch-question");
+	const w = mkWorker(dir, "w-mismatch-question");
+	w.sessionPath = writeSession(dir, "w-mismatch-question", [assistantUsage(1000)]);
+	writeFileSync(
+		questionPathFor(dir, "w-mismatch-question"),
+		JSON.stringify({ worker: "w-mismatch-question", ts: "T-MM4", question: "which schema fragment?" }),
+	);
+	const kinds = kindsOf(eventsFor(w));
+	check(
+		"W-MM4.1 a pending mailbox question suppresses report-mismatch (no duplicate wake)",
+		!kinds.includes("report-mismatch"),
+		kinds,
+	);
+	check("W-MM4.2 the question itself still wakes the orchestrator", kinds.includes("mailbox-question"), kinds);
+
+	rmSync(questionPathFor(dir, "w-mismatch-question")); // answered → q-file consumed
+	check(
+		"W-MM4.3 after the question is answered and no report lands, report-mismatch fires",
+		kindsOf(eventsFor(w)).includes("report-mismatch"),
+		kindsOf(eventsFor(w)),
 	);
 }
 
