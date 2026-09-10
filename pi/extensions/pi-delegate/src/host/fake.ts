@@ -71,7 +71,8 @@ export class FakeWorkerHost implements Transport {
 	readonly opts: FakeHostOptions;
 	private seq = 0;
 	private script: AgentStatusName[];
-	/** Keyed by paneId (the seam's StartReq key until migration step 3 lands). */
+	/** Keyed by placementRef (opaque — the seam's StartReq key since migration
+	 *  step 3; legacy pane ids accepted as fallback keys). */
 	private placements = new Map<string, Placement>();
 	private agents = new Map<string, FakeAgent>();
 	/** Last status consumed from the script — getStatus falls back to it once
@@ -112,16 +113,18 @@ export class FakeWorkerHost implements Transport {
 			backend: "fake",
 			placementRef,
 		};
-		this.placements.set(placement.paneId, placement);
+		this.placements.set(placement.placementRef ?? placement.paneId, placement);
 		return placement;
 	}
 
 	async startAgent(req: StartReq): Promise<StartResult> {
-		const placement = this.placements.get(req.paneId);
+		// Keyed by the opaque placementRef (migration step 3); a legacy raw id
+		// (req.paneId-style fallback key) still resolves.
+		const placement = this.placements.get(req.placementRef);
 		if (!placement) {
 			throw new DelegateErrorImpl(
 				"E_START",
-				`fake host: unknown placement ${req.paneId}`,
+				`fake host: unknown placement ${req.placementRef}`,
 				"Place first, then start.",
 			);
 		}
@@ -186,8 +189,6 @@ export class FakeWorkerHost implements Transport {
 		return {
 			name,
 			status: this.script[0] ?? this.lastObserved,
-			paneId: agent.placement.paneId,
-			workspaceId: agent.placement.workspaceId,
 			placementRef: agent.placement.placementRef,
 		};
 	}

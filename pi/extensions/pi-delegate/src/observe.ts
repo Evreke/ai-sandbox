@@ -1401,8 +1401,17 @@ export async function retirePass(
 			}
 			// Already retired → history, never re-closed.
 			if (w.retiredAt !== undefined) continue;
-			// A placement without a pane cannot be closed (corrupt manifest entry).
-			if (!w.placement || typeof w.placement.paneId !== "string" || w.placement.paneId.length === 0) {
+			// A placement without a closable handle cannot be closed (corrupt
+			// manifest entry). Ref-aware (workerhost inversion, design §3): a
+			// placementRef OR a legacy paneId counts — old manifests (paneId only)
+			// stay closeable, ref-only entries would too.
+			if (
+				!w.placement ||
+				!(
+					(typeof w.placement.placementRef === "string" && w.placement.placementRef.length > 0) ||
+					(typeof w.placement.paneId === "string" && w.placement.paneId.length > 0)
+				)
+			) {
 				continue;
 			}
 

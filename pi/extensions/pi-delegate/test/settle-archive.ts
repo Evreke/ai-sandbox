@@ -383,7 +383,7 @@ try {
 	// -------------------------------------------------------------------------
 	const startReq: StartReq = {
 		name: "routing-rev",
-		paneId: "pane-stub",
+		placementRef: "pane-stub",
 		provider: "llm-platform",
 		model: "tensorzero::function_name::flash",
 		thinking: "high",

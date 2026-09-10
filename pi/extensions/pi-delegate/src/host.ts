@@ -86,10 +86,11 @@ export interface Placement {
 	/** True when herdr reported a linked worktree workspace. */
 	isLinkedWorktree?: boolean;
 	/** Opaque placement reference — adapter-defined, unique per live placement
-	 *  (workerhost inversion, design §2/§4: the herdr adapter decodes its own
-	 *  ref; the seam only ever does opaque equality matching). PoC: the fake
-	 *  synthesizes "fake:<n>"; the herdr adapter keeps keying on its legacy ids
-	 *  until migration step 3 lands. */
+	 *  (workerhost inversion, design §2/§4: the adapter decodes its own ref;
+	 *  the seam only ever does opaque equality matching). The fake synthesizes
+	 *  "fake:<n>"; the herdr adapter "herdr:pane:<paneId>" and always writes
+	 *  the legacy id fields ALONGSIDE it (version-skew rule, design §4:
+	 *  never delete legacy fields while any 1.15.x cohort reads). */
 	placementRef?: string;
 	/** Backend that created this placement ("herdr" | "fake" | …). Written into
 	 *  manifest records ALONGSIDE the legacy id fields (version-skew rule,
@@ -109,7 +110,12 @@ export interface StartReq {
 	 *  candidate guidance; no auto-uniquification exists. Implementations MUST
 	 *  still read back the effective name from the response. */
 	name: string;
-	paneId: string;
+	/** Opaque placement reference from the Placement that place() returned —
+	 *  the adapter decodes its own ref (workerhost inversion, design §3:
+	 *  herdr pane ids never cross the seam). Callers pass
+	 *  `placement.placementRef ?? placement.paneId` so a legacy placement
+	 *  record (no ref) still works. */
+	placementRef: string;
 	provider: string;
 	model: string;
 	thinking: string;
@@ -160,15 +166,11 @@ export interface SettleResult {
 export interface AgentStatus {
 	name: string;
 	status: AgentStatusName;
-	paneId?: string;
-	/** herdr tab id (wKD:t4) — present in `agent list` entries since the
-	 *  herdr build that renamed tab.id → tab.tab_id; teardown uses it to
-	 *  reconcile placements recorded with the old paneId fallback. */
-	tabId?: string;
-	workspaceId?: string;
-	/** Opaque placement reference (workerhost inversion, design §3) — present
-	 *  when the backend tracks agents by ref; the watcher/retire gate proxies
-	 *  on this instead of herdr ids once migration step 3 lands. */
+	/** Opaque placement reference (workerhost inversion, design §3) — the
+	 *  adapter's own ref for the agent's placement; the watcher/retire gate
+	 *  proxies on this (with a legacy paneId fallback from the manifest
+	 *  record, which stays outside the read model). Backend ids (paneId/
+	 *  tabId/workspaceId) live ONLY in the adapter's own types. */
 	placementRef?: string;
 }
 

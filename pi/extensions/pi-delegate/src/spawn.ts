@@ -1060,16 +1060,18 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			}
 
 			// 4. Start the agent; read back the canonical name.
-			step(`Starting agent in pane ${placement.paneId} (provider=${provider}, model=${model}, thinking=${thinking})…`, {
+			step(`Starting agent in placement ${placement.placementRef ?? placement.paneId} (provider=${provider}, model=${model}, thinking=${thinking})…`, {
 				phase: "start",
 				name: params.name,
-				paneId: placement.paneId,
+				placementRef: placement.placementRef ?? placement.paneId,
 			});
 			let start;
 			try {
 				start = await transport.startAgent({
 					name: params.name,
-					paneId: placement.paneId,
+					// Workerhost inversion (design §3): StartReq keyed by the opaque ref;
+					// legacy pane id as fallback so pre-ref placement records still start.
+					placementRef: placement.placementRef ?? placement.paneId,
 					provider: provider as string,
 					model: model as string,
 					thinking: thinking as string,
@@ -1080,9 +1082,10 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				// The manifest entry was appended BEFORE startAgent (step 3, deliberate
 				// teardown-safety invariant — do not move the append). A refused start
 				// would leave a phantom entry with no sessionPath, so roll back ONLY the
-				// entry THIS call appended: match by requested name + this call's paneId
-				// and only if it never gained a sessionPath — a pre-existing same-name
-				// worker (its own paneId / a real sessionPath) is preserved.
+				// entry THIS call appended: match by requested name + this call's
+				// placement ref (legacy pane id fallback) and only if it never gained a
+				// sessionPath — a pre-existing same-name
+				// worker (its own placement / a real sessionPath) is preserved.
 				try {
 					await updateManifest(manifestDir, (m) => ({
 						...m,
@@ -1090,14 +1093,15 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 							(w) =>
 								!(
 									w.name === params.name &&
-									w.placement.paneId === placement.paneId &&
+									(w.placement.placementRef ?? w.placement.paneId) ===
+										(placement.placementRef ?? placement.paneId) &&
 									!w.sessionPath
 								),
 						),
 					}));
 				} catch {
 					// Best-effort rollback — the failure text below already points at
-					// manual reconciliation via /delegate-teardown / herdr workspace list.
+					// manual reconciliation via /delegate-teardown.
 				}
 				return fail(
 					"E_START",
@@ -1155,9 +1159,10 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				try {
 					await updateManifest(manifestDir, (m) => ({
 						...m,
-						workers: m.workers.map((w) =>
-							w.name === params.name && w.placement.paneId === placement.paneId
-								? ({
+					workers: m.workers.map((w) =>
+						w.name === params.name &&
+						(w.placement.placementRef ?? w.placement.paneId) === (placement.placementRef ?? placement.paneId)
+							? ({
 									...w,
 									name: canonical,
 									reportPath: canonicalReportPath,

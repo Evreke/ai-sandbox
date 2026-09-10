@@ -180,7 +180,7 @@ try {
 	logOp(`herdr agent start qa-probe --kind pi --pane ${p1.paneId} --timeout 120000 -- --provider ${MODEL.provider} --model ${MODEL.model} --thinking ${MODEL.thinking}`);
 	const probeName = `qa-probe-${Date.now().toString(36)}`;
 	logOp(`herdr agent start ${probeName} (unique suffix avoids collision with live agents)`);
-	const s1 = await t.startAgent({ name: probeName, paneId: p1.paneId, timeoutMs: 120_000, ...MODEL });
+	const s1 = await t.startAgent({ name: probeName, placementRef: p1.placementRef ?? p1.paneId, timeoutMs: 120_000, ...MODEL });
 	check("T2.2c startAgent returns canonical name", !!s1.name, JSON.stringify(s1));
 
 	logOp(`herdr agent prompt ${s1.name} "Reply with exactly: OK"  (submit, no --wait)`);
@@ -227,11 +227,11 @@ try {
 	// CONTRACT (types.ts StartReq): "herdr auto-uniquifies on collision" → canonical
 	// name must differ. OBSERVED herdr behavior: rejects with agent_name_taken.
 	logOp(`herdr agent start qa-probe (workspace A) ... -- --provider ${MODEL.provider} --model ${MODEL.model} --thinking ${MODEL.thinking}`);
-	const sA = await t.startAgent({ name: "qa-probe", paneId: pA.paneId, timeoutMs: 120_000, ...MODEL });
+	const sA = await t.startAgent({ name: "qa-probe", placementRef: pA.placementRef ?? pA.paneId, timeoutMs: 120_000, ...MODEL });
 	logOp(`herdr agent start qa-probe (workspace B, colliding with live ${sA.name}) ...`);
 	let collErr: unknown;
 	try {
-		await t.startAgent({ name: "qa-probe", paneId: pB.paneId, timeoutMs: 120_000, ...MODEL });
+		await t.startAgent({ name: "qa-probe", placementRef: pB.placementRef ?? pB.paneId, timeoutMs: 120_000, ...MODEL });
 	} catch (e) {
 		collErr = e;
 	}

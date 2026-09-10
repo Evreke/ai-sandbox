@@ -100,7 +100,7 @@ check("A4 place() rejects worktree requests when capabilities().worktrees is fal
 
 const start = await fake.startAgent({
 	name: NAME,
-	paneId: placement.paneId,
+	placementRef: placement.placementRef ?? placement.paneId,
 	provider: "p",
 	model: "m",
 	thinking: "low",
@@ -111,7 +111,7 @@ check("A5 startAgent reads back the canonical name (seam contract)", start.name 
 // Name-taken → E_NAME (D4 seam contract the fake must reproduce).
 let nameTaken = false;
 try {
-	await fake.startAgent({ name: NAME, paneId: placement.paneId, provider: "p", model: "m", thinking: "low", timeoutMs: 1000 });
+	await fake.startAgent({ name: NAME, placementRef: placement.placementRef ?? placement.paneId, provider: "p", model: "m", thinking: "low", timeoutMs: 1000 });
 } catch (err) {
 	nameTaken = (err as { code?: string }).code === "E_NAME";
 }

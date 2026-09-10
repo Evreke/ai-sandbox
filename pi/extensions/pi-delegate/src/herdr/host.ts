@@ -103,6 +103,37 @@ const SETTLED: readonly AgentStatusName[] = ["idle", "done", "blocked"];
  *  settled phase is entered immediately. */
 const STARTED: readonly AgentStatusName[] = ["working", "blocked", "done"];
 
+// ---------------------------------------------------------------------------
+// placementRef codec (workerhost inversion, design §3/§4) — adapter-private.
+// The ref format is herdr-internal; the seam only ever compares refs opaquely.
+// ---------------------------------------------------------------------------
+
+/** Synthesize the opaque placementRef for a herdr pane. Written into manifest
+ *  records ALONGSIDE the legacy id fields (design §4: never delete legacy). */
+function herdrRefFromPane(paneId: string): string {
+	return `herdr:pane:${paneId}`;
+}
+
+/** herdrRefFromPane for possibly-absent ids: no pane id → undefined (no ref). */
+function herdrRefOrNull(paneId: string | undefined): string | undefined {
+	return paneId ? herdrRefFromPane(paneId) : undefined;
+}
+
+/** Decode a placementRef back to the herdr pane id. Accepts the current
+ *  `herdr:pane:<paneId>` shape AND a raw pane id (legacy callers/tests that
+ *  pass a bare id where a ref is expected) — anything else → undefined.
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: ref — opaque placement reference (or legacy raw pane id)
+ * Output: the herdr pane id, or undefined when the ref is not decodable
+ * Guarantees: pure; never throws
+ */
+function paneFromHerdrRef(ref: string | undefined): string | undefined {
+	if (!ref) return undefined;
+	const m = /^herdr:pane:(.+)$/.exec(ref);
+	return m?.[1] || ref;
+}
+
 
 
 // ---------------------------------------------------------------------------
@@ -812,7 +843,7 @@ export class HerdrTransport implements Transport {
 	 */
 	async listStatuses(): Promise<AgentStatus[]> {
 		if (this.listStatusesInFlight) return this.listStatusesInFlight;
-		const flight = this.listStatusesOnce();
+		const flight = this.listStatusesOnce().then(stripToSeamStatuses);
 		this.listStatusesInFlight = flight;
 		try {
 			return await flight;
@@ -821,9 +852,11 @@ export class HerdrTransport implements Transport {
 		}
 	}
 
-	private async listStatusesOnce(): Promise<AgentStatus[]> {
+	private async listStatusesOnce(): Promise<HerdrAgentStatus[]> {
 		// W3 read-only path: NDJSON over the herdr unix socket — no subprocess, so
 		// a frozen server costs a bounded per-call error instead of hung children.
+		// Adapter-INTERNAL shape (HerdrAgentStatus carries the herdr ids the
+		// drift guard needs); the public listStatuses() strips to the seam model.
 		const sock = this.socketForReadOnly();
 		if (sock) {
 			try {
@@ -833,7 +866,7 @@ export class HerdrTransport implements Transport {
 					: isRecord(result) && Array.isArray(result.agents)
 						? result.agents
 						: [];
-				return list.filter(isRecord).map((a) => agentStatusFromResult(a, String(a.name ?? "")));
+				return list.filter(isRecord).map((a) => herdrStatusFromResult(a, String(a.name ?? "")));
 			} catch (err) {
 				throw new DelegateErrorImpl(
 					"E_START",
@@ -852,7 +885,7 @@ export class HerdrTransport implements Transport {
 				: isRecord(result) && Array.isArray(result.agents)
 					? result.agents
 					: [];
-			return list.filter(isRecord).map((a) => agentStatusFromResult(a, String(a.name ?? "")));
+			return list.filter(isRecord).map((a) => herdrStatusFromResult(a, String(a.name ?? "")));
 		} catch (err) {
 			throw new DelegateErrorImpl(
 				"E_START",
@@ -1158,10 +1191,21 @@ export class HerdrTransport implements Transport {
 	 *     unparseable output)
 	 */
 	private async startAgentInner(req: StartReq): Promise<StartResult> {
+		// Workerhost inversion (design §3): StartReq is keyed by the opaque
+		// placementRef — the adapter decodes its own ref to the herdr pane id.
+		// Legacy raw pane ids (no `herdr:pane:` prefix) decode via the fallback
+		// in paneFromHerdrRef, so pre-ref records keep starting.
+		const paneId = paneFromHerdrRef(req.placementRef);
+		if (!paneId) {
+			throw delegateError(
+				"E_START",
+				`herdr agent start ${req.name}: undecodable placementRef ${JSON.stringify(req.placementRef)}`,
+			);
+		}
 		const args = [
 			"agent", "start", req.name,
 			"--kind", "pi",
-			"--pane", req.paneId,
+			"--pane", paneId,
 			"--timeout", String(req.timeoutMs),
 			"--",
 			"--provider", req.provider,
@@ -1337,7 +1381,7 @@ export class HerdrTransport implements Transport {
 	private async resolveLiveTabId(name: string): Promise<string | null> {
 		if (this.socketForReadOnly()) {
 			try {
-				const statuses = await this.listStatuses();
+				const statuses = await this.listStatusesOnce(); // adapter-internal shape (tab id needed)
 				return statuses.find((s) => s.name === name)?.tabId ?? null;
 			} catch {
 				return null; // statuses unavailable — fall through to the recorded id
@@ -1472,10 +1516,38 @@ function agentStatusFromResult(result: unknown, fallbackName: string): AgentStat
 		status: statusFromResult(result) ?? "unknown",
 		// `agent list` entries: agent_name when present; `agent get`: name under result.agent.
 		name: asString(pick(result, "name", "agent.name", "agent_name")) ?? fallbackName,
+		// Seam read model carries ONLY the opaque ref (workerhost inversion,
+		// design §3): herdr ids stay in the adapter (see herdrStatusFromResult).
+		placementRef: herdrRefOrNull(
+			asString(pick(result, "pane_id", "paneId", "agent.pane_id", "pane.pane_id")),
+		),
+	};
+}
+
+/** Adapter-internal read model: the seam AgentStatus PLUS the herdr ids the
+ *  adapter itself needs (resolveLiveTabId drift guard, teardown reconcile).
+ *  NEVER crosses the seam — herdr ids stop at src/herdr/host.ts. */
+interface HerdrAgentStatus extends AgentStatus {
+	paneId?: string;
+	tabId?: string;
+	workspaceId?: string;
+}
+
+function herdrStatusFromResult(result: unknown, fallbackName: string): HerdrAgentStatus {
+	const base = agentStatusFromResult(result, fallbackName);
+	if (!isRecord(result)) return base;
+	return {
+		...base,
 		paneId: asString(pick(result, "pane_id", "paneId", "agent.pane_id", "pane.pane_id")),
 		tabId: asString(pick(result, "tab_id", "tabId", "agent.tab_id", "tab.tab_id")),
 		workspaceId: asString(pick(result, "workspace_id", "workspaceId", "agent.workspace_id", "workspace.workspace_id")),
 	};
+}
+
+/** Strip the adapter-internal HerdrAgentStatus down to the seam read model
+ *  (workerhost inversion, design §3: herdr ids never leave the adapter). */
+function stripToSeamStatuses(list: HerdrAgentStatus[]): AgentStatus[] {
+	return list.map(({ paneId: _p, tabId: _t, workspaceId: _w, ...seam }) => seam);
 }
 
 /**
@@ -1520,6 +1592,11 @@ function placementFromWorktreeResult(
 		branch: asString(pick(result, "workspace.worktree.branch", "branch")) ?? req.branch,
 		checkoutPath,
 		isLinkedWorktree: pick(result, "workspace.worktree.is_linked_worktree") === true,
+		// Workerhost inversion (design §4): the opaque ref + backend tag ride
+		// ALONGSIDE the legacy id fields (version-skew both ways — legacy fields
+		// stay until a full 1.15.x cohort rotation).
+		backend: "herdr",
+		placementRef: herdrRefFromPane(paneId),
 	};
 }
 
@@ -1565,6 +1642,10 @@ export function placementFromTabResult(
 		paneId,
 		checkoutPath: process.cwd(),
 		tabId,
+		// Workerhost inversion (design §4): ref + backend tag ALONGSIDE legacy
+		// fields (see placementFromWorktreeResult).
+		backend: "herdr",
+		placementRef: herdrRefFromPane(paneId),
 	};
 }
 

@@ -122,7 +122,7 @@ try {
 
 		process.env.STUB_SCRIPT = join(STUB_DIR, "slow-list.js");
 		process.env.TG_DELAY_MS = "50";
-		const next = await t.startAgent({ name: "w2", tier: undefined } as never).catch((e) => e);
+		const next = await t.startAgent({ name: "w2", placementRef: "herdr:pane:p1", tier: undefined } as never).catch((e) => e);
 		check("TG.4 queue proceeds after the deadline (next mutating op resolves)", !(next instanceof Error), `${next}`);
 	}
 

@@ -113,7 +113,7 @@ const t = createHerdrTransport(); // cwd is a herdr worktree → sub authority (
 	try {
 		await t.startAgent({
 			name: "qa",
-			paneId: myPane,
+			placementRef: myPane,
 			provider: "llm-platform-alpha",
 			model: "glm-5.3-flash",
 			thinking: "high",
