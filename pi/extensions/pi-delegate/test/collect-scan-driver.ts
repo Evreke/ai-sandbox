@@ -23,6 +23,10 @@
  *              new run's report) and the failure must name the file.
  *   respawn-fresh — same setup, but the canonical report is FRESH (mtime
  *              after the new startedAt): collect adopts it as before.
+ *   probe-mismatch — a PROBE spawn (mode "probe") with a deliberately
+ *              contract-violating brief (wrong stem + foreign report
+ *              mention): the probe must START and reach its own verdict —
+ *              no E_BRIEF (the !isProbe gate skips brief validation; B13).
  */
 
 import { mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
@@ -133,6 +137,9 @@ const transport: Transport =
 			teardownCalls++;
 		},
 		capabilities: () => ({ worktrees: true, authority: "root" }),
+		// B13: the probe verdict needs the pane smoke marker (probes write no
+		// report) — a pane readback containing "OUTPUT: OK" proves the pass.
+		...(CASE === "probe-mismatch" ? { readPane: async () => "OUTPUT: OK" } : {}),
 	}) as Transport;
 
 let captured: { execute: (...a: unknown[]) => Promise<{ content: Array<{ text: string }>; details: Record<string, unknown> }> };
@@ -145,7 +152,16 @@ registerDelegateTool(fakePi as never, transport);
 
 const result = await captured.execute(
 	"t1",
-	{ name: NAME, briefPath, provider: "p", model: "m", thinking: "low", waitMs: 1000, repoPath: repoDir },
+	{
+		name: NAME,
+		briefPath,
+		provider: "p",
+		model: "m",
+		thinking: "low",
+		waitMs: 1000,
+		repoPath: repoDir,
+		...(CASE === "probe-mismatch" ? { mode: "probe" } : {}),
+	},
 	undefined,
 	() => {},
 	{ cwd: repoDir, hasUI: false },

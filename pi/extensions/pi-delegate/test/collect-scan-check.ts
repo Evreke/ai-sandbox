@@ -146,5 +146,19 @@ function drive(scenario: string): DriverOut {
 	);
 }
 
+// ---------------------------------------------------------------------------
+// B13. Probe spawns skip brief validation entirely (the !isProbe gate)
+// ---------------------------------------------------------------------------
+
+{
+	const probe = drive("probe-mismatch");
+	check(
+		"B13.1 a probe with a deliberately contract-violating brief still reaches its verdict (no E_BRIEF)",
+		probe.code !== "E_BRIEF" && !probe.text.includes("report contract violation"),
+		`${probe.code} — ${probe.text.slice(0, 300)}`,
+	);
+	check("B13.2 the probe verdict is a PASS (smoke marker verified)", probe.ok && /probe OK/.test(probe.text), probe.text.slice(0, 300));
+}
+
 console.log(failures === 0 ? "\nALL COLLECT-SCAN CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
