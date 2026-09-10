@@ -1,0 +1,46 @@
+# CI — gates every PR into main (trunk-based development).
+# Checks: full bun check suite of the pi-delegate extension + version sync
+# of the two package.json files (they ship together and must never diverge —
+# see AGENTS.md release ritual).
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Version sync (root package.json == extension package.json)
+        run: |
+          root=$(node -p "require('./package.json').version")
+          ext=$(node -p "require('./pi/extensions/pi-delegate/package.json').version")
+          echo "root=$root ext=$ext"
+          if [ "$root" != "$ext" ]; then
+            echo "::error::version mismatch: root package.json ($root) != pi/extensions/pi-delegate/package.json ($ext) — they ship together, bump BOTH"
+            exit 1
+          fi
+
+      # The check suite is plain check() scripts (no .test.ts suffix), so
+      # `bun test ./test/<file>` is the fallback runner; `bun run <file>` is
+      # the primary. First failure fails the job.
+      - name: Run check suite (pi/extensions/pi-delegate)
+        working-directory: pi/extensions/pi-delegate
+        run: |
+          set -e
+          for f in test/*.ts; do
+            echo "::group::$f"
+            bun run "$f" || bun test "./$f"
+            echo "::endgroup::"
+          done

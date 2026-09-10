@@ -1,5 +1,20 @@
 # ai-sandbox — repo instructions
 
+## Workflow — trunk-based development (TBD)
+
+`main` is the trunk: always green, always releasable. **No direct commits to
+`main`** (the only exception: bootstrap/meta commits that establish these
+rules themselves). All work happens in short-lived branches:
+
+- `feature/<topic>` — new behavior,
+- `fix/<topic>` — bug fixes.
+
+Merge to `main` **only via PR, squash-merge only** (one clean commit per
+PR; the branch dies after the merge). CI gates every PR (bun check suite +
+package.json version sync). History rewrites of `main` are FORBIDDEN — the
+one-time NDA scrub (orphan squash, 2026-09) was an explicit operator
+exception and sets no precedent.
+
 ## Release command
 
 When the user says **"release"** (in this repo), run the release ritual — no
@@ -15,23 +30,29 @@ commit against HEAD and look at WHAT changed:
   files) → **NO version inc, NO changelog** — the application did not
   change. Report "nothing to release" and stop.
 
-Full ritual:
+Full ritual (TBD edition — release is a PR, not a push):
 
-1. **Inc version** in BOTH files — they ship together and must never diverge:
+1. **Branch** `feature/release-x.y.z` from `main`.
+2. **Inc version** in BOTH files — they ship together and must never diverge:
    - `pi/extensions/pi-delegate/package.json`
    - `package.json` (bundle root)
    Bump level follows the changelog content: new behavior → minor (`1.x.0`),
    fixes only → patch (`1.14.x`).
-2. **Changelog**: prepend a `## [x.y.z] — YYYY-MM-DD` section to
+3. **Changelog**: prepend a `## [x.y.z] — YYYY-MM-DD` section to
    `pi/extensions/pi-delegate/CHANGELOG.md` (Keep a Changelog format; the
-   section covers exactly the commits going out in this release).
-3. **Commit** the version + changelog changes.
-4. **Push**: `git push origin main` (source of truth is this repo; the
-   GitHub remote is the publication target).
+   section covers exactly the changes going out in this release).
+4. **Commit, push the branch, open a PR** into `main`, let CI pass, then
+   **squash-merge**.
+5. **Tagging is CI's job, not yours**: the release workflow on `main` reruns
+   the suite, sees the version is higher than the latest `v*` tag, creates
+   the semver tag `v{x.y.z}` and a GitHub Release whose notes come from the
+   fresh CHANGELOG section. If the version was not bumped, no tag is
+   created (safe default — the merge just lands without a release).
 
-Never push a release with uncommitted unrelated changes mixed into the
+Never open a release PR with uncommitted unrelated changes mixed into the
 release commit — park them in a separate commit first. A mistaken release
-commit is corrected by a forward `git revert`, never a force-push.
+is corrected by a forward `git revert` (via its own `fix/` PR), never a
+force-push.
 
 ## Zero-Context Survival (self-sufficient files) — MANDATORY for production code
 
