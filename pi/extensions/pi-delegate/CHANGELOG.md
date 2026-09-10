@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Version numbers align with the iteration numbering in DESIGN.md (v1.x sections).
 
-## [Unreleased]
+## [1.16.0] — 2026-09-10
 
 ### Changed
 
@@ -26,34 +26,52 @@ Version numbers align with the iteration numbering in DESIGN.md (v1.x sections).
   names in tool descriptions, event messages and error guidance replaced
   with backend-neutral phrasing (retry/mailbox/escalation semantics
   unchanged); herdr CLI recipes stay inside adapter error messages.
+- **Watcher log UX**: routine watcher bookkeeping (e.g. retire successes) no
+  longer surfaces in the pane — every line goes to the audit file
+  `~/.pi/agent/delegate-watch.log`; the pane shows only errors and anomalies.
 
 ### Fixed
 
+- **Duplicate report-ready wake-ups (true defect, diag D1)**: the watcher's
+  dedup state reset treated a no-observation tick (transient report ENOENT)
+  as "condition stopped being true" and forgot fingerprinted seen-keys —
+  the same report fired twice with an UNCHANGED mtime. Fingerprinted kinds
+  keep their key until the worker vanishes or the fingerprint changes
+  (regression: W16.16).
+- **Foreign-fleet wake broadcast narrowed (diag B1)**: the ownership gate
+  consults the manifest-level `masterSessionPath` when a worker entry lacks
+  `orchestratorSessionPath` — a known foreign owner stays silent; fail-open
+  remains only for manifests with no owner field anywhere (W14.18–W14.23).
+- **Archive-at-retire**: a TTL auto-retire of an UNCOLLECTED worker no
+  longer orphans its report — retirePass archives the report + manifest
+  snapshot before teardown (idempotent; retire-check R7).
+- **herdr tab-id drift (implement-osb field report)**: herdr renamed the
+  tab-create result key `tab.id` → `tab.tab_id`; the parser missed the new
+  spelling and recorded the PANE id as `tabId`, so every autonomous tab close
+  failed `tab_not_found` while the agent stayed alive (the paneId fallback
+  also masked the failure as an idempotent retire). The parser now reads the
+  current spelling (legacy accepted), `AgentStatus` carried `tabId` during
+  the transition, and teardown re-resolves the live tab id from the herdr
+  registry when the recorded one carries the broken paneId-fallback signature.
 - **Worktree teardown idempotency (parity-pin find)**: a SECOND teardown of
   an already-removed worktree failed E_PLACE with herdr
   `workspace_not_found`; the seam contract (and the fake, and the tool
   layer's already-gone handling) requires a no-op success. Not-found-shaped
   removal errors are now idempotent in the herdr adapter.
+- **`/delegate-teardown` output**: manifest history entries (retired workers
+  are never deleted) are skipped with a count instead of being attempted —
+  no more wall of `tab_not_found` errors for long-closed workers; a
+  not-found close inside the command is a clean "already closed, no-op".
+- **Stale nudge-failed marker**: a same-name retry deletes any leftover
+  marker at spawn (a fresh watcher session would re-fire it once).
 - **Fixture hygiene / manifest scan backend gate** (field lesson
   2026-09-10): a test manifest written into the live /tmp/exchange root
   woke a bystander orchestrator through the fail-open legacy scan. The scan
   now drops entries whose placement declares a non-empty backend other than
-  the active host (`backend:"fake"` never wakes a herdr session; legacy
-  entries keep fail-open); the exchange root is overridable via
+  the active host; the exchange root is overridable via
   `$PI_DELEGATE_EXCHANGE_ROOT` and all test fixtures sandbox under mkdtemp
   dirs.
-
-### Added
-
-- **host-parity pin** (`test/host-parity-check.ts`): one place → manifest →
-  teardown flow asserted on BOTH adapters — fake always (CI), real herdr
-  behind the existing `herdr --version` skip guard.
-- Static pins re-targeted after the split: T1.1d (the seam imports node
-  builtins only), T1.1c positive pin (only index.ts imports the adapter).
-
-## [1.16.0] — 2026-09-10
-
-### Added
+- Root `package.json` version synced to the extension's (1.15.1 divergence).
 
 ### Added
 
@@ -70,6 +88,11 @@ Version numbers align with the iteration numbering in DESIGN.md (v1.x sections).
   GitHub Actions — `ci.yml` (bun check suite + package.json version sync on
   every PR) and `release.yml` (on main: rerun suite → semver tag → GitHub
   Release with notes from the fresh CHANGELOG section).
+- **host-parity pin** (`test/host-parity-check.ts`): one place → manifest →
+  teardown flow asserted on BOTH adapters — fake always (CI), real herdr
+  behind the existing `herdr --version` skip guard.
+- Static pins re-targeted after the split: T1.1d (the seam imports node
+  builtins only), T1.1c positive pin (only index.ts imports the adapter).
 
 ### Fixed
 
