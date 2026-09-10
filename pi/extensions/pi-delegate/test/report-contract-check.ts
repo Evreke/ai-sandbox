@@ -29,7 +29,11 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { validateReport } from "../src/exchange.ts";
-import { REPORT_EXAMPLE, WORKER_NAME_RE, briefPrompt } from "../src/transport.ts";
+import {
+	REPORT_EXAMPLE,
+	WORKER_NAME_RE,
+	briefPrompt,
+} from "../src/host.ts";
 
 let failures = 0;
 

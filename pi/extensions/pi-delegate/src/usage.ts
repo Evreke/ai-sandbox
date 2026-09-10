@@ -45,11 +45,11 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { SessionUsage, SpawnTier } from "./transport.ts";
+import type { SessionUsage, SpawnTier } from "./host.ts";
 import {
 	CONTEXT_WINDOWS,
 	DEFAULT_CONTEXT_WINDOW,
-} from "./transport.ts";
+} from "./host.ts";
 
 
 

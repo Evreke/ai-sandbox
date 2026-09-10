@@ -23,7 +23,9 @@ import { spawn } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync, readFileSync, appendFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HerdrTransport } from "../src/transport.ts";
+import {
+	HerdrTransport,
+} from "../src/herdr/host.ts";
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = "") {
@@ -122,7 +124,7 @@ try {
 
 		process.env.STUB_SCRIPT = join(STUB_DIR, "slow-list.js");
 		process.env.TG_DELAY_MS = "50";
-		const next = await t.startAgent({ name: "w2", tier: undefined } as never).catch((e) => e);
+		const next = await t.startAgent({ name: "w2", placementRef: "herdr:pane:p1", tier: undefined } as never).catch((e) => e);
 		check("TG.4 queue proceeds after the deadline (next mutating op resolves)", !(next instanceof Error), `${next}`);
 	}
 

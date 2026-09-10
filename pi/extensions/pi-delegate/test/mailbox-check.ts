@@ -30,7 +30,8 @@
  * Exit 0 only if all checks pass.
  */
 
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	updateManifest,
@@ -42,7 +43,14 @@ import {
 	type WatchWorker,
 } from "../src/observe.ts";
 import { registerMailboxTool } from "../src/spawn.ts";
-import type { AgentStatusName, Placement, PromptReq, Transport } from "../src/transport.ts";
+import type { AgentStatusName, Placement, PromptReq, Transport } from "../src/host.ts";
+
+// Fixture hygiene (field lesson 2026-09-10): the exchange root is SANDBOXED
+// via $PI_DELEGATE_EXCHANGE_ROOT → a mkdtemp dir — test manifests never land
+// in the live /tmp/exchange root (a bystander orchestrator's fail-open legacy
+// scan used to wake on them).
+const EXCHANGE_SANDBOX = mkdtempSync(join(tmpdir(), "mailbox-check-exchange-"));
+process.env.PI_DELEGATE_EXCHANGE_ROOT = EXCHANGE_SANDBOX;
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = "") {
@@ -80,7 +88,7 @@ async function drive(
 	capture: Capture;
 	dir: string;
 }> {
-	const dir = join("/tmp/exchange", `mb-${process.pid}-${opts.label ?? `${action}-${status}`}`);
+	const dir = join(EXCHANGE_SANDBOX, `mb-${process.pid}-${opts.label ?? `${action}-${status}`}`);
 	const placement: Placement = {
 		kind: "worktree",
 		workspaceId: "ws-1",
@@ -332,7 +340,7 @@ for (const status of ["idle", "blocked"] as const) {
 // ---------------------------------------------------------------------------
 
 {
-	const dir = join("/tmp/exchange", `mb-${process.pid}-f6-detect`);
+	const dir = join(EXCHANGE_SANDBOX, `mb-${process.pid}-f6-detect`);
 	const ts = "2026-09-10T12:00:00.000Z";
 	mkdirSync(dir, { recursive: true });
 	writeFileSync(nudgeFailedPathFor(dir, NAME), JSON.stringify({ name: NAME, ts, error: "herdr socket: connection_closed: server closed the connection" }));

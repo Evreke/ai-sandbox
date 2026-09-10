@@ -26,7 +26,11 @@ import { mkdtempSync, writeFileSync, rmSync, readFileSync, mkdirSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { HerdrTransport, HerdrSocketClient, parseHerdrResult } from "../src/transport.ts";
+import {
+	HerdrTransport,
+	HerdrSocketClient,
+	parseHerdrResult,
+} from "../src/herdr/host.ts";
 
 const execFileP = promisify(execFile);
 
@@ -117,7 +121,7 @@ try {
 		const statuses = await t.listStatuses();
 		check(
 			"TS.1 listStatuses maps the stub agent.list response",
-			statuses.length === 2 && statuses[0].name === "alpha" && statuses[0].status === "idle" && statuses[0].paneId === "w:p1" && statuses[1].status === "working",
+			statuses.length === 2 && statuses[0].name === "alpha" && statuses[0].status === "idle" && statuses[0].placementRef === "herdr:pane:w:p1" && statuses[1].status === "working",
 			JSON.stringify(statuses),
 		);
 		server.close();

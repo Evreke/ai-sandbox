@@ -1068,15 +1068,15 @@ opens with a ZCS MODULE_CONTRACT header naming its owned invariants. One line
 each — where the invariants live:
 
 - **index.ts** — wiring-only composition root, only exporter of the
-  extension. Binds `createHerdrTransport()` exactly once and injects it
-  (dependency rule, pinned by static-check T1.1/T1.1b); calls
+  extension. Binds the configured WorkerHost adapter exactly once
+  (config `"host"` key, default herdr — §24.1) and injects it (dependency
+  rule, pinned by static-check T1.1/T1.1b/T1.1c); calls
   `registerCommands` for the command wiring (/delegate-fleet,
   /delegate-teardown — absorbed from src/commands.ts in W5, moved to
   src/observe.ts in W6), fleet-UI mount, watcher mount, archive prune.
-- **src/transport.ts** — the herdr boundary: seam types + E_* taxonomy +
-  briefPrompt + the CLI implementation in one file. Owns serialized-mutations,
-  D3 settle-before-start, aged-finish, abort-detaches, fresh-session,
-  worktree-authority, seam purity.
+- **src/host.ts** (seam) + **src/herdr/host.ts** (herdr adapter) — the old
+  single src/transport.ts split by the workerhost inversion (§24): the seam
+  owns the contracts, the adapter the herdr CLI/socket implementation.
 - **src/exchange.ts** — everything durable on disk: exchange-dir conventions,
   manifests, reports, schemas, mailbox files, archive. Owns
   append-before-start (file side), collectedAt-dedup (write side),
@@ -1104,3 +1104,64 @@ each — where the invariants live:
   header).
 - **src/usage.ts** — session-JSONL gauges (§20); unchanged bodies, ZCS
   MODULE_CONTRACT header added in W6.
+
+# workerhost inversion — the WorkerHost seam (unreleased)
+
+## 24. WorkerHost: the backend-neutral seam (workerhost migration, 2026-09)
+
+The herdr boundary is split into a backend-neutral SEAM and a herdr ADAPTER,
+so a second backend (the in-memory fake ships first) can serve the same tool
+layer. The seam interface keeps its historical type name `Transport`
+(design prose says "WorkerHost" — same thing); its method names are frozen.
+
+### 24.1 File layout and the binding rule
+
+- **`src/host.ts`** — the seam: `Transport` interface + req/result types, the
+  E_* taxonomy (+ `GUIDANCE`), report/mailbox/progress contracts, `briefPrompt`,
+  budget constants, and `sessionHasReply`. Imports node builtins ONLY — bottom
+  of the graph (pinned fail-closed by static-check T1.1d). Backend ids
+  (workspaceId/paneId/tabId) are absent from the OPERATION types: `StartReq`/
+  `TeardownReq` key on the opaque, adapter-defined `placementRef`, and the read
+  model `AgentStatus` carries only `{name, status, placementRef?}`. The legacy
+  id fields survive ONLY as deprecated-compat: `Placement` keeps `workspaceId`
+  and `paneId` (no `tabId`), and manifest records may carry them alongside
+  `backend` + `placementRef` — the ALONGSIDE rule (§24.2 invariant 4) keeps
+  them for the 1.15.x version-skew cohort; do not delete them.
+- **`src/herdr/host.ts`** — the herdr adapter: CLI plumbing (`runHerdr` with
+  SIGKILL escalation), the NDJSON socket client, the mutation queue, result
+  mappers, and the adapter-private id codec (`herdr:pane:<paneId>` refs).
+  Imported ONLY by `index.ts` (pinned by T1.1/T1.1c; watcher-check W1.1).
+- **`src/host/fake.ts`** — the in-memory fake (statusScript-driven settle,
+  `fake:<n>` refs). Confinement: imports only the seam + exchange.
+- **`index.ts`** — the composition root and the ONLY adapter importer: it
+  reads the config's `"host"` key (default `"herdr"`; unknown value →
+  structured E_START error) and injects the chosen adapter into every tool.
+
+### 24.2 Seam invariants (every adapter must honor these)
+
+1. **Serialized mutations** — mutating ops (place/start/prompt/teardown) run
+   one at a time, internally queued (DESIGN.md §9); the herdr adapter adds a
+   per-op deadline (W2 pile-up guard).
+2. **Opaque refs** — `Placement.placementRef` is adapter-defined and unique
+   per live placement; the seam only ever does opaque equality matching.
+   `StartReq` is keyed by `placementRef`; the read model `AgentStatus`
+   exposes only `{name, status, placementRef?}`.
+3. **Not-found → idempotent** — teardown of an already-gone placement is a
+   no-op SUCCESS (pinned on both adapters by test/host-parity-check.ts).
+4. **Version-skew manifests** — new placements write `backend` +
+   `placementRef` ALONGSIDE the legacy id fields (workspaceId/paneId/tabId);
+   legacy fields are never deleted while any 1.15.x cohort may read/close.
+   Legacy entries (no backend) read fail-open as herdr.
+5. **Scan backend gate** — the manifest scan drops entries whose placement
+   declares a non-empty backend ≠ the active host, so foreign-backend
+   fixtures (e.g. fake manifests from tests) never wake a live session.
+6. **Neutral texts** — tool descriptions, event messages and error guidance
+   name no backend commands; herdr CLI recipes stay inside the adapter's own
+   errors, where they are true.
+
+### 24.3 Parity pin
+
+`test/host-parity-check.ts` drives one scripted flow — place → manifest
+round-trip → teardown ×2 (idempotent) → ref-based dedup — against the fake
+(always, CI) and real herdr (skip-guarded on `herdr --version`), asserting
+identical seam-level outcomes on both legs.

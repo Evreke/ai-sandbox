@@ -26,7 +26,11 @@ import { spawn } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync, readFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runHerdr, parseHerdrResult, SIGKILL_GRACE_MS } from "../src/transport.ts";
+import {
+	runHerdr,
+	parseHerdrResult,
+	SIGKILL_GRACE_MS,
+} from "../src/herdr/host.ts";
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = "") {

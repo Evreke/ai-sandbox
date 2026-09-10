@@ -18,7 +18,9 @@
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createHerdrTransport } from "../src/transport.ts";
+import {
+	createHerdrTransport,
+} from "../src/herdr/host.ts";
 import { resolveWatchConfig } from "../src/observe.ts";
 
 let failures = 0;

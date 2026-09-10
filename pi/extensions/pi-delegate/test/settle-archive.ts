@@ -13,10 +13,15 @@
 import { mkdtempSync, mkdirSync, existsSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DelegateErrorImpl, createHerdrTransport } from "../src/transport.ts";
+import {
+	DelegateErrorImpl,
+} from "../src/host.ts";
+import {
+	createHerdrTransport,
+} from "../src/herdr/host.ts";
 import { archiveReport, archiveRoot, listArchivedTasks, pruneArchive } from "../src/exchange.ts";
 import { resolvePiSessionCandidates } from "../src/usage.ts";
-import type { StartReq } from "../src/transport.ts";
+import type { StartReq } from "../src/host.ts";
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = "") {
@@ -383,7 +388,7 @@ try {
 	// -------------------------------------------------------------------------
 	const startReq: StartReq = {
 		name: "routing-rev",
-		paneId: "pane-stub",
+		placementRef: "pane-stub",
 		provider: "llm-platform",
 		model: "tensorzero::function_name::flash",
 		thinking: "high",

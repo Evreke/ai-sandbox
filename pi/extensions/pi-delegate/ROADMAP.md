@@ -12,8 +12,7 @@ in-memory fake (second adapter = real seam), opaque `placementRef` in
 Placement/manifests (`backend` field alongside legacy ids for version skew),
 neutral user-facing texts, binding via config (`host: "herdr"` default).
 Design doc: `docs/design-host-interface.md` (re-derived from the gap analysis,
-committed with the epic). Conveyer: research ✅ → PoC (in flight) → impl →
-e2e ∥ QA → review.
+committed with the epic). Pipeline: research → PoC → impl → e2e ∥ QA → fix wave → review — ALL DONE (merged here).
 
 ## Milestone: provider/model selection for workers AND orchestrators
 
@@ -58,10 +57,39 @@ e2e ∥ QA → review.
   (path-builder property tests, C:\\ fixtures, static pin) — manual QA checklist for a
   real Windows machine in the doc.
 
+## Fix wave 2026-09-10 (watch-fix, on top of the WorkerHost impl) — DONE
+
+Diagnosed by watch-leak-diag + retire-msg-diag (`/tmp/exchange/workerhost-refactor/diag-*.md`):
+
+- **D1 — duplicate wake on an unchanged fingerprint: FIXED.** The watcher's
+  dedup state reset treated "no observation this tick" (transient ENOENT on a
+  report) as "condition stopped being true" and forgot fingerprinted seen-keys
+  → the same report-ready fired twice with an unchanged mtime. Fingerprinted
+  kinds now keep their key until the worker vanishes or the fingerprint
+  changes; gauge kinds keep the reset semantics (regression: W16.16).
+- **B1 — legacy fail-open wake broadcast: CLOSED (mostly).** The ownership
+  gate now consults the manifest-level `masterSessionPath` (F1 field, written
+  since 1.15.0) when a worker entry lacks `orchestratorSessionPath`: a known
+  foreign owner stays silent; fail-open remains only for manifests with NO
+  owner field anywhere (regression: W14.18–W14.23).
+- **Archive-at-retire: DONE.** A TTL auto-retire of an UNCOLLECTED worker no
+  longer orphans the report — retirePass archives the report + manifest
+  snapshot before teardown (idempotent; regression: retire-check R7).
+
 ## Open candidates (untriaged)
 
 - tmux adapter (gated on the WorkerHost epic).
 - CI green on GitHub runner end-to-end (typebox install fixed on the release
   branch; transport-contract skip-guard in place — needs a real PR run).
 - F6 legacy fail-open: consider failing CLOSED for legacy manifests once all
-  writers stamp `orchestratorSessionPath` (review minor #3 follow-up).
+  writers stamp `orchestratorSessionPath` (review minor #3 follow-up; the B1
+  masterSessionPath fallback above already scopes most of the surface).
+- D2 double-mount watcher arbitration: two watcher instances over one session
+  (module-copy double load, two pi processes) each keep their own dedup and
+  deliver the same event twice; the mount registry is module-global, not
+  session-keyed. Low likelihood; fix shape: key the registry by session file
+  or persist a watcher-mounted marker (diag-watch-crossfleet C7).
+- B4 accept-then-log in makeSender: a sink that QUEUES a wake-up and then
+  throws re-fires it after rollback — the user sees the wake twice. Fix
+  shape: treat "accepted by pi" as success, keep rollback for genuine
+  pre-delivery failures (diag-watch-crossfleet C6).
