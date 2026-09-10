@@ -1209,8 +1209,17 @@ export function detectWorkerEvents(w: WatchWorker, opts: DetectOptions = {}): Wa
 /**
  * Deduped detection over a whole snapshot. `seen` is the watcher's memory
  * (worker+kind[+fingerprint] fired since the last reset): an event fires at
- * most once per key; when the condition STOPS being true the key is forgotten,
- * so a re-armed condition fires again. Mutates `seen`, returns the new events.
+ * most once per key. State reset is split by fingerprint presence (D1 fix):
+ *   - keys WITHOUT a fingerprint (gauge/absence kinds: worker-dead,
+ *     context-critical) are forgotten when not observed true this tick —
+ *     re-arming is the point (fire exactly once per episode);
+ *   - keys WITH a fingerprint (report-ready, report-invalid, mailbox-question,
+ *     grill-deck, nudge-failed, worker-stale) are forgotten ONLY when the
+ *     worker vanished from the snapshot or the same worker+kind is observed
+ *     with a DIFFERENT fingerprint. A tick with no observation (transient
+ *     ENOENT on the report, a manifest read between rewrites) must not
+ *     resurrect the event.
+ * Mutates `seen`, returns the new events.
  */
 export function detectEvents(
 	snap: WatchSnapshot,
@@ -1220,23 +1229,61 @@ export function detectEvents(
 	const tickOpts: DetectOptions = { ...opts, statusesKnown: snap.statusesKnown };
 	const fresh: WatchEvent[] = [];
 	const current = new Set<string>();
+	// Fingerprinted-kind observations this tick: `dir#worker#kind` → fingerprint
+	// (used by the reset below — a key is forgotten on a NEW fingerprint, not on
+	// a missed observation).
+	const observedFingerprints = new Map<string, string>();
+	// Workers present in THIS tick's snapshot: `dir#worker`.
+	const presentWorkers = new Set<string>();
 	for (const w of snap.workers) {
+		presentWorkers.add(`${w.dir}#${w.name}`);
 		for (const e of detectWorkerEvents(w, tickOpts)) {
 			const key = eventKey(e);
 			current.add(key);
+			if (e.fingerprint !== undefined) {
+				observedFingerprints.set(`${w.dir}#${w.name}#${e.kind}`, e.fingerprint);
+			}
 			if (!seen.has(key)) {
 				seen.add(key);
 				fresh.push(e);
 			}
 		}
 	}
-	// State reset: forget every key not observed true THIS tick — a condition that
-	// stopped being true re-arms, and keys of workers that vanished from the
-	// manifests are dropped too (nothing observes them any more, so `seen` cannot
-	// grow without bound and a worker that comes back can fire again). Manifest
-	// writes are atomic (exchange.ts atomicWriteFileSync), so a vanished worker is
-	// a real removal, not a half-written read.
-	for (const key of [...seen]) if (!current.has(key)) seen.delete(key);
+	// State reset: forget every key not observed true THIS tick, EXCEPT
+	// fingerprinted keys of workers still present (see the contract above).
+	// Gauge keys of vanished workers are dropped too, and `seen` cannot grow
+	// without bound: a fingerprinted key is bounded by one per worker+kind and
+	// is replaced on a new fingerprint; the 24 h lookback (WATCH_LOOKBACK_MS)
+	// drops vanished workers. Manifest writes are atomic
+	// (exchange.ts atomicWriteFileSync), so a vanished worker is a real removal,
+	// not a half-written read.
+	for (const key of [...seen]) {
+		if (current.has(key)) continue;
+		// Parse from the right: dir#worker#kind[#fingerprint] — kind and worker
+		// never contain '#' (kinds are fixed tokens; worker names are
+		// [a-z][a-z0-9_-]{0,31}), so the dir can safely be re-joined.
+		const parts = key.split("#");
+		const fp = parts.length > 3 ? parts.pop() : undefined;
+		const kind = parts.pop() ?? "";
+		const name = parts.pop() ?? "";
+		const dir = parts.join("#");
+		if (fp !== undefined) {
+			const workerGone = !presentWorkers.has(`${dir}#${name}`);
+			const currentFp = observedFingerprints.get(`${dir}#${name}#${kind}`);
+			// BUG_FIX_CONTEXT: symptom — duplicate [report-ready] wake-ups for a
+			// report whose mtime never changed (field: two deliveries, same
+			// fingerprint; diag-watch-crossfleet case C5). Root cause — the old
+			// reset deleted every key not observed true this tick, so ONE tick
+			// with a missed observation (transient ENOENT on the report;
+			// fileMtimeMs → null suppresses the event) FORGOT the fingerprinted
+			// key and the restored file re-fired. Missed observation was treated
+			// as condition reset. What was done: fingerprinted keys survive a
+			// no-observation tick of a still-present worker; they are forgotten
+			// only on worker-vanished or a different fingerprint.
+			if (!workerGone && (currentFp === undefined || currentFp === fp)) continue;
+		}
+		seen.delete(key);
+	}
 	return fresh;
 }
 

@@ -52,7 +52,7 @@
  * Exit 0 only if all checks pass.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
@@ -472,7 +472,12 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 	rmSync(reportPathFor(dir, "w-dedup"));
 	check("W8.3 removed report produces no new event", detectEvents(snap, seen, { nowMs: NOW }).length === 0);
 	writeValidReport(dir, "w-dedup");
-	check("W8.4 report re-appearing re-fires (state reset)", detectEvents(snap, seen, { nowMs: NOW }).some((e) => e.kind === "report-ready"));
+	// D1: the fingerprinted key now survives a no-observation tick, so the
+	// re-appearance re-fires only when the fingerprint CHANGES. Force a distinct
+	// mtime — two writes can land in the same millisecond, and an identical
+	// fingerprint is deliberately NOT a new fact (the W16.16 contract).
+	utimesSync(reportPathFor(dir, "w-dedup"), new Date(NOW + 30_000), new Date(NOW + 30_000));
+	check("W8.4 report re-appearing with a NEW fingerprint re-fires", detectEvents(snap, seen, { nowMs: NOW }).some((e) => e.kind === "report-ready"));
 
 	const p = reportPathFor(dir, "w-dedup");
 	utimesSync(p, new Date(NOW + 60_000), new Date(NOW + 60_000));
@@ -1203,6 +1208,88 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 		);
 	}
 }
+
+// ---------------------------------------------------------------------------
+// W16.16 duplicate-wake guard (D1, diag-watch-crossfleet C5): the `seen` dedup
+// state reset must NOT treat "no observation this tick" (e.g. a transient
+// ENOENT on the report) as "condition stopped being true" for FINGERPRINTED
+// kinds — the same fingerprint (mtime unchanged) must never fire twice.
+// Fingerprinted kinds re-arm only on a NEW fingerprint or on the worker
+// VANISHING from the snapshot; gauge/absence kinds (worker-dead etc.) keep the
+// old reset semantics (they must fire exactly once).
+// ---------------------------------------------------------------------------
+
+{
+	const dir = taskDir("dup-wake");
+	const w = mkWorker(dir, "w-dup-wake");
+	writeValidReport(dir, "w-dup-wake");
+	const snap = snapshotFor([w], [LIVE("w-dup-wake")]);
+	const seen = new Set<string>();
+
+	// Tick 1: report readable → delivered exactly once.
+	const t1 = detectEvents(snap, seen, { nowMs: NOW });
+	check(
+		"W16.16 tick 1: readable report → report-ready delivered once",
+		t1.filter((e) => e.kind === "report-ready").length === 1,
+		kindsOf(t1),
+	);
+
+	// Tick 2: report transiently unreadable (rename-away → ENOENT) → no event,
+	// and the fingerprinted seen-key must SURVIVE the missed observation.
+	const p = reportPathFor(dir, "w-dup-wake");
+	const parked = `${p}.parked`;
+	renameSync(p, parked);
+	const t2 = detectEvents(snap, seen, { nowMs: NOW });
+	check("W16.16b tick 2: renamed-away report → no event", t2.length === 0, kindsOf(t2));
+	check(
+		"W16.16c tick 2: the fingerprinted seen-key survives the missed observation",
+		[...seen].some((k) => k.includes("#report-ready#")),
+		JSON.stringify([...seen]),
+	);
+
+	// Tick 3: report back with the SAME mtime (rename-back) → NO second delivery.
+	renameSync(parked, p);
+	const t3 = detectEvents(snap, seen, { nowMs: NOW });
+	check(
+		"W16.16d tick 3: same fingerprint restored → NO duplicate report-ready",
+		t3.length === 0,
+		kindsOf(t3),
+	);
+
+	// Contrast: the fingerprint CHANGES (mtime moves) → the event re-fires
+	// (a rewritten report is a NEW fact — the W8.5 contract stays intact).
+	utimesSync(p, new Date(NOW + 60_000), new Date(NOW + 60_000));
+	const t4 = detectEvents(snap, seen, { nowMs: NOW });
+	check(
+		"W16.16e contrast: a CHANGED fingerprint (new mtime) re-fires",
+		t4.some((e) => e.kind === "report-ready"),
+		kindsOf(t4),
+	);
+
+	// Gauge/absence kinds keep the old reset semantics: a condition that stops
+	// being true forgets its key and re-fires when true again (exactly-once per
+	// continuous episode, not forever-silent).
+	const gdir = taskDir("dup-wake-gauge");
+	const gw = mkWorker(gdir, "w-dup-gauge");
+	const gsnap = snapshotFor([gw], NO_STATUS); // not live, no report → worker-dead
+	const gseen = new Set<string>();
+	check(
+		"W16.16f gauge kind (worker-dead) fires once",
+		detectEvents(gsnap, gseen, { nowMs: NOW }).some((e) => e.kind === "worker-dead"),
+	);
+	const gAlive = snapshotFor([gw], [LIVE("w-dup-gauge")]); // condition stops being true
+	detectEvents(gAlive, gseen, { nowMs: NOW });
+	check(
+		"W16.16g gauge kind: the key is FORGOTTEN when the condition stops being true (reset semantics intact)",
+		gseen.size === 0,
+		JSON.stringify([...gseen]),
+	);
+	check(
+		"W16.16h gauge kind: dead again → re-fires",
+		detectEvents(gsnap, gseen, { nowMs: NOW }).some((e) => e.kind === "worker-dead"),
+	);
+}
+
 
 rmSync(FIX, { recursive: true, force: true });
 console.log(failures === 0 ? "\nALL WATCHER CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
