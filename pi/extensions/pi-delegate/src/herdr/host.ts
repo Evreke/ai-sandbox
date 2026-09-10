@@ -7,9 +7,9 @@
  * src/transport.ts SECTION 2 byte-verbatim (workerhost seam split, PoC).
  *
  * Dependencies: node builtins (child_process, os, path, net) + the seam module
- * ../host.ts ONLY (no other src/ imports). Bound ONCE in index.ts via the
- * src/transport.ts shim — no tool module may import this file directly
- * (static-check T1.1 / positive pin; watcher-check W1.1).
+ * ../host.ts ONLY (no other src/ imports). Bound ONCE in index.ts (the
+ * composition root — the sole sanctioned importer of this file; static-check
+ * T1.1/T1.1c, watcher-check W1.1).
  *
  * Critical invariants carried over verbatim: serialized-mutations (one mutating
  * op in flight), settle-before-start-race-d3, aged-finish-blind-spot (via

@@ -42,7 +42,7 @@ import {
 	type WatchWorker,
 } from "../src/observe.ts";
 import { registerMailboxTool } from "../src/spawn.ts";
-import type { AgentStatusName, Placement, PromptReq, Transport } from "../src/transport.ts";
+import type { AgentStatusName, Placement, PromptReq, Transport } from "../src/host.ts";
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = "") {

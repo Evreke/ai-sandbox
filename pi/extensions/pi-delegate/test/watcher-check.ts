@@ -84,7 +84,7 @@ import {
 	type WatchSnapshot,
 } from "../src/observe.ts";
 import { questionPathFor, reportPathFor, type ExchangeManifest, type ManifestWorker } from "../src/exchange.ts";
-import type { AgentStatus, Transport } from "../src/transport.ts";
+import type { AgentStatus, Transport } from "../src/host.ts";
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = "") {
@@ -110,17 +110,14 @@ const IMPORT_HERDR_RE = /(import[\s\S]*?from\s*["']|\bimport\s*["'])([^"']*(tran
 const watchSrc = readFileSync(resolve(ROOT, "src/observe.ts"), "utf8");
 check("W1.1 observe.ts (watcher) does not import the herdr implementation (src/herdr/host.ts; dependency rule)", !IMPORT_HERDR_RE.test(watchSrc));
 check(
-	"W1.1b observe.ts takes the Transport seam from transport.ts",
-	/from\s+["']\.\/transport\.ts["']/.test(watchSrc),
+	"W1.1b observe.ts takes the Transport seam from host.ts",
+	/from\s+["']\.\/host\.ts["']/.test(watchSrc),
 );
 const toolOffenders = readdirSync(resolve(ROOT, "src"), { withFileTypes: true })
 	.filter((e) => e.isFile() && e.name.endsWith(".ts"))
 	.map((e) => resolve(ROOT, "src", e.name))
-	.filter((f) => IMPORT_HERDR_RE.test(readFileSync(f, "utf8")))
-	// The re-export shim is the ONE sanctioned importer during the transition
-	// (dies at migration step 6) — same exemption as static-check T1.1.
-	.filter((f) => f !== resolve(ROOT, "src/transport.ts"));
-check("W1.1c no src/ module imports the herdr implementation (src/herdr/host.ts; impl reachable only via the src/transport.ts shim)", toolOffenders.length === 0, toolOffenders.join(", "));
+	.filter((f) => IMPORT_HERDR_RE.test(readFileSync(f, "utf8")));
+check("W1.1c no src/ module imports the herdr implementation (src/herdr/host.ts; only index.ts binds it)", toolOffenders.length === 0, toolOffenders.join(", "));
 
 const indexSrc = readFileSync(resolve(ROOT, "index.ts"), "utf8");
 check(

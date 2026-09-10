@@ -51,7 +51,7 @@ import {
 	type ExchangeManifest,
 	type ManifestWorker,
 } from "../src/exchange.ts";
-import type { AgentStatus, Placement, TeardownReq, Transport } from "../src/transport.ts";
+import type { AgentStatus, Placement, TeardownReq, Transport } from "../src/host.ts";
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = "") {

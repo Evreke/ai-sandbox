@@ -70,7 +70,7 @@ import {
 	type AgentStatusName,
 	type Placement,
 	type Transport,
-} from "./transport.ts";
+} from "./host.ts";
 
 // ===========================================================================
 // SECTION 1/4 — worker ownership classification

@@ -21,7 +21,12 @@ import { appendFileSync, writeFileSync, readFileSync, rmSync, mkdirSync } from "
 import { homedir } from "node:os";
 import { promisify } from "node:util";
 import { resolve } from "node:path";
-import { createHerdrTransport, DelegateErrorImpl } from "../src/transport.ts";
+import {
+	DelegateErrorImpl,
+} from "../src/host.ts";
+import {
+	createHerdrTransport,
+} from "../src/herdr/host.ts";
 
 // State dependency: this historical script verifies fixes against a LIVE agent
 // named "qa" (the v1.2 QA worker). That agent no longer exists; when absent,
@@ -40,7 +45,7 @@ if (!liveQa) {
 	console.log("SKIP: its assertions are permanently covered by test/transport-contract.ts.");
 	process.exit(0);
 }
-import type { Transport } from "../src/transport.ts";
+import type { Transport } from "../src/host.ts";
 
 const execFileP = promisify(execFile);
 const OPS_LOG = "/tmp/exchange/pi-delegate-ext/qa-herdr-ops.log";

@@ -26,7 +26,11 @@ import { mkdtempSync, writeFileSync, rmSync, readFileSync, mkdirSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { HerdrTransport, HerdrSocketClient, parseHerdrResult } from "../src/transport.ts";
+import {
+	HerdrTransport,
+	HerdrSocketClient,
+	parseHerdrResult,
+} from "../src/herdr/host.ts";
 
 const execFileP = promisify(execFile);
 

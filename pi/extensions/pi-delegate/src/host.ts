@@ -13,10 +13,11 @@
  * backend-neutral sessionHasReply/Errors blocks, byte-verbatim).
  *
  * The herdr IMPLEMENTATION lives in src/herdr/host.ts (SECTION 2 verbatim);
- * src/transport.ts is a full re-export shim during the transition. Tool
- * modules (spawn/observe/fleet) import the seam from ./transport.ts and must
- * NEVER import ./herdr/host.ts directly (pinned by static-check T1.1 /
- * watcher-check W1.1 + the positive-existence pin).
+ * it is bound ONCE in index.ts (workerhost migration steps 5–6 — the old
+ * src/transport.ts re-export shim is deleted). Tool modules (spawn/observe/
+ * fleet) import the seam from ./host.ts and must NEVER import
+ * ./herdr/host.ts directly (pinned by static-check T1.1/T1.1c /
+ * watcher-check W1.1).
  */
 
 import { readFileSync } from "node:fs";

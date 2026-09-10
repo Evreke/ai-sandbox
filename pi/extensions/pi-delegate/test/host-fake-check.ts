@@ -26,7 +26,7 @@ import { join } from "node:path";
 import { readManifest, updateManifest } from "../src/exchange.ts";
 import { registerDelegateTool } from "../src/spawn.ts";
 import { FakeWorkerHost } from "../src/host/fake.ts";
-import type { Transport } from "../src/transport.ts";
+import type { Transport } from "../src/host.ts";
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = "") {

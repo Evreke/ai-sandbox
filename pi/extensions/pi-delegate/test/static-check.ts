@@ -19,7 +19,12 @@
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { WORKER_NAME_RE, placementFromTabResult } from "../src/transport.ts";
+import {
+	WORKER_NAME_RE,
+} from "../src/host.ts";
+import {
+	placementFromTabResult,
+} from "../src/herdr/host.ts";
 import { validateReport } from "../src/exchange.ts";
 
 const ROOT = resolve(dirname(process.argv[1] ?? "."), "..");
@@ -59,22 +64,19 @@ const restricted = listTsFiles(resolve(ROOT, "src"));
 // T1.1c below was what caught the offender).
 const IMPORT_HERDR_RE = /(import[\s\S]*?from\s*["']|\bimport\s*["'])([^"']*(transport\/herdr|herdr\/host))[^"']*["']/;
 const offenders = restricted
-	.filter((f) => IMPORT_HERDR_RE.test(readFileSync(f, "utf8")))
-	// The re-export shim is the ONE sanctioned importer during the transition
-	// (it dies at migration step 6); anything else importing the adapter is a
-	// dependency-rule violation.
-	.filter((f) => f !== resolve(ROOT, "src/transport.ts"));
+	.filter((f) => IMPORT_HERDR_RE.test(readFileSync(f, "utf8")));
 check(
-	"T1.1 dependency rule: no src/ module ever imports the herdr implementation (src/herdr/host.ts; impl reachable only via the src/transport.ts shim)",
+	"T1.1 dependency rule: no src/ module ever imports the herdr implementation (src/herdr/host.ts; only index.ts binds it)",
 	offenders.length === 0,
 	offenders.join(", "),
 );
 
 // Positive pin (workerhost split PoC, design §6 risk 1): the herdr adapter file
-// EXISTS and only the src/transport.ts re-export shim imports it — a tool
-// module importing the adapter directly (or the file going missing) fails here.
-// Direction note: this pin is fail-CLOSED on the file (existence is asserted,
-// unlike the vacuous-pass risk of a no-offender regex after a rename).
+// EXISTS and is imported ONLY by index.ts (the composition root / binding
+// point, workerhost migration steps 5–6) — a tool module importing the
+// adapter directly (or the file going missing) fails here. Direction note:
+// this pin is fail-CLOSED on the file (existence is asserted, unlike the
+// vacuous-pass risk of a no-offender regex after a rename).
 const herdrHostPath = resolve(ROOT, "src/herdr/host.ts");
 let herdrHostExists = false;
 try {
@@ -83,19 +85,31 @@ try {
 } catch {
 	herdrHostExists = false;
 }
-const herdrHostImporters = restricted
+const herdrHostImporters = [...restricted, resolve(ROOT, "index.ts")]
 	.filter((f) => f !== herdrHostPath)
 	.filter((f) => /from\s*["'][^"']*herdr\/host\.ts["']/.test(readFileSync(f, "utf8")) || /import\s*["'][^"']*herdr\/host\.ts["']/.test(readFileSync(f, "utf8")));
 check(
-	"T1.1c src/herdr/host.ts exists and is imported ONLY by the src/transport.ts shim (positive pin — impl reachable solely via the shim + index.ts binding)",
-	herdrHostExists && herdrHostImporters.every((f) => f === resolve(ROOT, "src/transport.ts")),
+	"T1.1c src/herdr/host.ts exists and is imported ONLY by index.ts (positive pin — the composition root is the sole adapter importer)",
+	herdrHostExists && herdrHostImporters.every((f) => f === resolve(ROOT, "index.ts")),
 	`exists=${herdrHostExists} importers=${herdrHostImporters.join(", ")}`,
 );
 
 const indexImportsHerdr = readFileSync(resolve(ROOT, "index.ts"), "utf8").includes(
-	"./src/transport.ts",
+	"./src/herdr/host.ts",
 );
-check("T1.1b index.ts DOES import src/transport.ts (transport injection point)", indexImportsHerdr);
+check("T1.1b index.ts DOES import src/herdr/host.ts (adapter binding point, workerhost migration step 6)", indexImportsHerdr);
+
+// Bottom-of-graph pin (workerhost inversion, research risk #2): the seam
+// module imports node builtins ONLY — zero relative/src imports (error
+// guidance strings and helpers get DUPLICATED into it, never imported from
+// tool modules — a shared helper would drag the whole graph under the seam).
+const hostSrc = readFileSync(resolve(ROOT, "src/host.ts"), "utf8");
+const hostRelativeImports = hostSrc.match(/from\s*["']\.[^"']*["']/g) ?? [];
+check(
+	"T1.1d src/host.ts (the seam) imports node builtins only — no relative imports (bottom of the graph)",
+	hostRelativeImports.length === 0,
+	hostRelativeImports.join(", "),
+);
 
 // ---------------------------------------------------------------------------
 // 1.5 No hardcoded worker tier in src/ (v1.9.2)

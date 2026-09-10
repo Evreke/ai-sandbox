@@ -23,7 +23,9 @@ import { spawn } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync, readFileSync, appendFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HerdrTransport } from "../src/transport.ts";
+import {
+	HerdrTransport,
+} from "../src/herdr/host.ts";
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = "") {

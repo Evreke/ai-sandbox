@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readManifest, reportPathFor, updateManifest } from "../src/exchange.ts";
 import { registerDelegateTool } from "../src/spawn.ts";
-import type { Transport } from "../src/transport.ts";
+import type { Transport } from "../src/host.ts";
 
 const CASE = process.argv[2] ?? "valid";
 const NAME = `ct-${process.pid}`;

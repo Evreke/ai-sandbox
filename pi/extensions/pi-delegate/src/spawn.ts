@@ -143,7 +143,7 @@ import {
 	type SpawnTier,
 	type Transport,
 	type WorkerReport,
-} from "./transport.ts";
+} from "./host.ts";
 
 // ===========================================================================
 // SECTION 1/2 — delegate_mailbox tool (DESIGN.md §12, §23)

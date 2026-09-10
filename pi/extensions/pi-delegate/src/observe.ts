@@ -119,7 +119,7 @@ import {
 	type DelegateError,
 	type Placement,
 	type Transport,
-} from "./transport.ts";
+} from "./host.ts";
 
 // ===========================================================================
 // SECTION 1/3 — `delegate_status` tool

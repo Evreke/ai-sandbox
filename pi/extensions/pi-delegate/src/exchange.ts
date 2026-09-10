@@ -82,13 +82,13 @@ import type {
 	Placement,
 	ProgressEvent,
 	WorkerReport,
-} from "./transport.ts";
+} from "./host.ts";
 import {
 	isProgressEvent,
 	isQuestionEnvelope,
 	type AnswerEnvelope,
 	type QuestionEnvelope,
-} from "./transport.ts";
+} from "./host.ts";
 // typebox Value.Check/Errors — NOTE: the contract's deep specifiers
 // ("typebox/build/value/check/check.mjs") are blocked by typebox 1.3.7's
 // exports map (ERR_PACKAGE_PATH_NOT_EXPORTED, verified via node + jiti);

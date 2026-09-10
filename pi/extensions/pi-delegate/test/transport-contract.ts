@@ -23,8 +23,11 @@ import { mkdtempSync, appendFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { promisify } from "node:util";
 import { join, resolve } from "node:path";
-import { createHerdrTransport, parseHerdrResult } from "../src/transport.ts";
-import type { Placement } from "../src/transport.ts";
+import {
+	createHerdrTransport,
+	parseHerdrResult,
+} from "../src/herdr/host.ts";
+import type { Placement } from "../src/host.ts";
 
 const execFileP = promisify(execFile);
 const OPS_LOG = "/tmp/exchange/pi-delegate-ext/qa-herdr-ops.log";
