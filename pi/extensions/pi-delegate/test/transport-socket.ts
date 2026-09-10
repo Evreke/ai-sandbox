@@ -181,12 +181,44 @@ try {
 	}
 
 	// -- TS.5: black-hole server → bounded request_timeout --------------------------
+	// BUG_FIX_CONTEXT (CI, 2026-09-10): the black-hole server script lived as an
+	// OUT-OF-REPO artifact (/tmp/exchange/herdr-resilience/... — a leftover
+	// diagnosis file on the author's machine); on a runner the spawn failed
+	// instantly, no server existed, and the client got connect_error at ~0ms
+	// instead of the bounded request_timeout. The server is now INLINE (python3
+	// -c) and readiness is awaited by polling for the socket file (no fixed
+	// sleep race). Fixture hygiene: no /tmp/exchange dependency.
 	{
 		const bhSock = join(ART, "blackhole.sock");
-		const bh = spawn("python3", ["/tmp/exchange/herdr-resilience/resilience-fix-artifacts/blackhole2.py", bhSock], {
-			stdio: ["ignore", "ignore", "ignore"],
+		const bhScript = [
+			"import os, socket, sys, time",
+			"SOCK = sys.argv[1]",
+			"if os.path.exists(SOCK): os.unlink(SOCK)",
+			"srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)",
+			"srv.bind(SOCK); srv.listen(256)",
+			"sys.stdout.write('ready\\n'); sys.stdout.flush()",
+			"held = []",
+			"while True:",
+			"    conn, _ = srv.accept()",
+			"    held.append(conn)",
+		].join("\n");
+		const bh = spawn("python3", ["-c", bhScript, bhSock], {
+			stdio: ["ignore", "pipe", "ignore"],
 		});
-		await new Promise((r) => setTimeout(r, 300));
+		// Deterministic readiness: wait for the server's 'ready' line (bounded).
+		await new Promise<void>((resolve, reject) => {
+			const timer = setTimeout(() => reject(new Error("black-hole server never became ready")), 5000);
+			bh.stdout?.on("data", (chunk: Buffer) => {
+				if (chunk.toString().includes("ready")) {
+					clearTimeout(timer);
+					resolve();
+				}
+			});
+			bh.on("exit", () => {
+				clearTimeout(timer);
+				reject(new Error("black-hole server exited before ready"));
+			});
+		}).catch(() => undefined); // if readiness never came, the checks below fail with the real code
 		const client = new HerdrSocketClient({ socketPath: bhSock, requestTimeoutMs: 500, connectTimeoutMs: 500 });
 		const t0 = Date.now();
 		let code = "";
