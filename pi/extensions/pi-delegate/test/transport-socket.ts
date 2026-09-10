@@ -296,7 +296,21 @@ try {
 	}
 
 	// -- TS.8: LIVE read-only validation against the real server --------------------
+	// herdr-absence gate (CI lesson 2026-09-10): on a runner there is no herdr
+	// server/socket — the LIVE leg must SKIP, not crash the whole file with an
+	// unhandled connect ENOENT (offline legs TS.1–TS.7 already passed above).
 	{
+		const herdrLive = await (async () => {
+			try {
+				await execFileP("herdr", ["--version"], { encoding: "utf8", timeout: 10_000 });
+				return true;
+			} catch {
+				return false;
+			}
+		})();
+		if (!herdrLive) {
+			console.log("SKIP TS.8 LIVE leg — herdr not available on this host (offline legs TS.1–TS.7 all ran)");
+		} else {
 		const t = new HerdrTransport(); // default socket resolution (env/default path)
 		const socketStatuses = await t.listStatuses();
 		check("TS.8 LIVE socket listStatuses resolves with ≥1 agent", socketStatuses.length >= 1, `n=${socketStatuses.length}`);
@@ -317,6 +331,7 @@ try {
 			symDiff <= 2 && socketNames.size >= 1,
 			`cli=${cliNames.size} socket=${socketNames.size} symDiff=${symDiff}`,
 		);
+		}
 	}
 } finally {
 	process.env.PATH = savedPath;

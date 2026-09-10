@@ -535,7 +535,12 @@ try {
 		pruneArchive() === 1 && !existsSync(oldDir) && existsSync(join(archiveRoot(), "v16-demo")),
 	);
 	// The TTL is injectable: 0 prunes everything (including "half-written",
-	// which needs no manifest.json — retention is mtime-based).
+	// which needs no manifest.json — retention is mtime-based). Backdate the
+	// dirs explicitly: a same-millisecond creation would make age === 0 and
+	// race the prune (CI flake 2026-09-10).
+	const everything = [join(archiveRoot(), "v16-demo"), join(archiveRoot(), "half-written")];
+	const justPast = new Date(Date.now() - 1000);
+	for (const dir of everything) utimesSync(dir, justPast, justPast);
 	check(
 		"A.7b injectable TTL prunes everything at 0",
 		pruneArchive(0) === 2 && !existsSync(join(archiveRoot(), "v16-demo")),
