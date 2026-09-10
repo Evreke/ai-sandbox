@@ -6,6 +6,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Version numbers align with the iteration numbering in DESIGN.md (v1.x sections).
 
+## [Unreleased]
+
+### Changed
+
+- **WorkerHost inversion (migration complete)**: the herdr boundary is now a
+  backend-neutral seam (`src/host.ts`, type name `Transport` kept) plus a
+  herdr adapter (`src/herdr/host.ts`) bound once in `index.ts` from the
+  config's `"host"` key (default `herdr`; unknown value → structured error).
+  The `src/transport.ts` re-export shim is deleted. Zero behavior change on
+  the herdr path; the in-memory fake (`src/host/fake.ts`) ships as the
+  second adapter (PoC promoted).
+- **Opaque `placementRef` threading**: `StartReq` is keyed by an
+  adapter-defined `placementRef` (herdr ids left the seam read model —
+  `AgentStatus` is `{name, status, placementRef?}`); spawn manifest
+  dedup/rollback matches on name+placementRef with a legacy-paneId fallback;
+  the retire closeability gate is ref-aware.
+- **Neutralized texts**: all 19 model/user-facing herdr-specific command
+  names in tool descriptions, event messages and error guidance replaced
+  with backend-neutral phrasing (retry/mailbox/escalation semantics
+  unchanged); herdr CLI recipes stay inside adapter error messages.
+
+### Fixed
+
+- **Worktree teardown idempotency (parity-pin find)**: a SECOND teardown of
+  an already-removed worktree failed E_PLACE with herdr
+  `workspace_not_found`; the seam contract (and the fake, and the tool
+  layer's already-gone handling) requires a no-op success. Not-found-shaped
+  removal errors are now idempotent in the herdr adapter.
+- **Fixture hygiene / manifest scan backend gate** (field lesson
+  2026-09-10): a test manifest written into the live /tmp/exchange root
+  woke a bystander orchestrator through the fail-open legacy scan. The scan
+  now drops entries whose placement declares a non-empty backend other than
+  the active host (`backend:"fake"` never wakes a herdr session; legacy
+  entries keep fail-open); the exchange root is overridable via
+  `$PI_DELEGATE_EXCHANGE_ROOT` and all test fixtures sandbox under mkdtemp
+  dirs.
+
+### Added
+
+- **host-parity pin** (`test/host-parity-check.ts`): one place → manifest →
+  teardown flow asserted on BOTH adapters — fake always (CI), real herdr
+  behind the existing `herdr --version` skip guard.
+- Static pins re-targeted after the split: T1.1d (the seam imports node
+  builtins only), T1.1c positive pin (only index.ts imports the adapter).
+
 ## [1.16.0] — 2026-09-10
 
 ### Added
