@@ -60,6 +60,7 @@ import {
 	GRILL_DECK_TOOL,
 	WATCH_DEAD_GRACE_MS,
 	WATCH_DEFAULT_INTERVAL_MS,
+	WATCH_DEFAULT_MISMATCH_GRACE_MS,
 	WATCH_DEFAULT_SETTLE_GATE_MS,
 	WATCH_DEFAULT_STALE_AFTER_MS,
 	WATCH_MIN_STALE_AFTER_MS,
@@ -1336,6 +1337,116 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 	check(
 		"W16.16h gauge kind: dead again → re-fires",
 		detectEvents(gsnap, gseen, { nowMs: NOW }).some((e) => e.kind === "worker-dead"),
+	);
+}
+// ---------------------------------------------------------------------------
+// W17. report-mismatch (report-path mismatch incident, 2026-09) — a LIVE
+// worker that has SPOKEN but produced no report at the watched path past the
+// grace window. The old failure mode: the only missing-report salvage
+// (worker-dead) required !live, so a live idle finished worker whose report
+// landed under a misdirected filename produced ZERO events forever.
+// ---------------------------------------------------------------------------
+
+{
+	const dir = taskDir("mismatch");
+	const w = mkWorker(dir, "w-mismatch");
+	w.sessionPath = writeSession(dir, "w-mismatch", [assistantUsage(1000)]); // has spoken
+	// Watched report absent; a stray .md landed (the incident shape).
+	const stray = join(dir, "report-impl.md");
+	writeFileSync(stray, "# report\n\nDone (markdown).\n");
+	utimesSync(stray, new Date(NOW + 1000), new Date(NOW + 1000));
+
+	const fired = (opts: DetectOptions = {}) =>
+		kindsOf(eventsFor(w, { statuses: [LIVE("w-mismatch")], ...opts })).split(",").includes("report-mismatch");
+
+	check(
+		"W17.1 live + spoken + no watched report + past grace → report-mismatch",
+		fired(),
+		kindsOf(eventsFor(w)),
+	);
+	const ev = eventsFor(w).find((e) => e.kind === "report-mismatch");
+	check(
+		"W17.1b the event lists the stray report files newer than startedAt",
+		!!ev && ev.message.includes("report-impl.md") && ev.message.includes(w.reportPath),
+		ev?.message ?? "",
+	);
+	check(
+		"W17.1c the event names the concrete moves (pane read / salvage / diagnosed retry)",
+		!!ev && /pane/.test(ev.message) && /salvage|retry/i.test(ev.message),
+		ev?.message ?? "",
+	);
+
+	// Suppressions.
+	const cold = mkWorker(dir, "w-mismatch-cold"); // no session → never spoke
+	check(
+		"W17.2 zero assistant turns (never started) → silent",
+		!kindsOf(eventsFor(cold)).includes("report-mismatch"),
+		kindsOf(eventsFor(cold)),
+	);
+
+	check(
+		"W17.3 inside the grace window → silent",
+		!kindsOf(
+			eventsFor({ ...w, startedAt: new Date(NOW - 1000).toISOString() }, { statuses: [LIVE("w-mismatch")] }),
+		).includes("report-mismatch"),
+	);
+	const probe = mkWorker(taskDir("_probe"), "w-mismatch-probe");
+	probe.sessionPath = writeSession(dir, "w-mismatch-probe", [assistantUsage(1000)]);
+	check(
+		"W17.4 probe runs expect no report → silent",
+		!kindsOf(eventsFor(probe)).includes("report-mismatch"),
+	);
+	const collected = mkWorker(dir, "w-mismatch-collected", { collectedAt: new Date(NOW).toISOString() });
+	collected.sessionPath = writeSession(dir, "w-mismatch-collected", [assistantUsage(1000)]);
+	check(
+		"W17.5 already-collected worker → silent",
+		!kindsOf(eventsFor(collected)).includes("report-mismatch"),
+	);
+	const dead = mkWorker(dir, "w-mismatch-dead");
+	dead.sessionPath = writeSession(dir, "w-mismatch-dead", [assistantUsage(1000)]);
+	check(
+		"W17.6 not live → worker-dead's territory, not report-mismatch",
+		!kindsOf(eventsFor(dead, { statuses: NO_STATUS })).includes("report-mismatch") &&
+			kindsOf(eventsFor(dead, { statuses: NO_STATUS })).includes("worker-dead"),
+	);
+
+	// Once-per-lifetime dedup (key-only, like worker-dead).
+	const snap = snapshotFor([w], [LIVE("w-mismatch")]);
+	const seen = new Set<string>();
+	check("W17.7 first tick fires", detectEvents(snap, seen, { nowMs: NOW }).some((e) => e.kind === "report-mismatch"));
+	check("W17.8 identical second tick fires nothing (once per lifetime)", detectEvents(snap, seen, { nowMs: NOW }).length === 0);
+
+	// Precedence: a stray report that lands and validates still fires the
+	// ordinary fingerprinted report-ready on top of a fired mismatch.
+	writeValidReport(dir, "w-mismatch");
+	const after = eventsFor(w);
+	check(
+		"W17.9 a later valid report → report-ready still fires (fingerprinted by mtime)",
+		after.some((e) => e.kind === "report-ready"),
+		kindsOf(after),
+	);
+	check("W17.10 report-ready is NOT silent-collected while uncollected", after.some((e) => e.kind === "report-ready"));
+
+	// Grace configurability.
+	check(
+		"W17.11 the mismatch grace is injectable (1 h grace → silent at 10 min age)",
+		!fired({ mismatchGraceMs: 3_600_000 }),
+	);
+	check(
+		"W17.12 the mismatch grace default is the documented 2 min",
+		WATCH_DEFAULT_MISMATCH_GRACE_MS === 120_000,
+	);
+	check(
+		"W17.13 mismatchGraceMs threads through resolveWatchConfig (watch.mismatchGraceMs)",
+		watchConfigInHome(JSON.stringify({ watch: { mismatchGraceMs: 240_000 } })).mismatchGraceMs === 240_000,
+	);
+	check(
+		"W17.14 mismatchGraceMs default (no config) is the documented 2 min",
+		watchConfigInHome("").mismatchGraceMs === WATCH_DEFAULT_MISMATCH_GRACE_MS,
+	);
+	check(
+		"W17.15 below-floor mismatchGraceMs falls back (floor 10 s)",
+		watchConfigInHome(JSON.stringify({ watch: { mismatchGraceMs: 5 } })).mismatchGraceMs === WATCH_DEFAULT_MISMATCH_GRACE_MS,
 	);
 }
 
