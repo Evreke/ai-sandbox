@@ -95,6 +95,7 @@ import {
 	archiveReport,
 	describeFleet,
 	ensureExchangeDir,
+	exchangeRoot,
 	persistTaskUsageSnapshot,
 	progressPathFor,
 	questionPathFor,
@@ -549,8 +550,11 @@ const SUBMIT_TIMEOUT_MS = 30_000;
 const PROBE_TIMEOUT_MS = 120_000;
 /** Exchange dir for probe runs — no brief/task, but placements must stay
  *  teardown- and status-visible (scanAllManifests covers every manifest under
- *  /tmp/exchange). */
-const PROBE_EXCHANGE_DIR = "/tmp/exchange/_probe";
+ *  the exchange root). Derived from exchangeRoot() so sandboxed tests
+ *  ($PI_DELEGATE_EXCHANGE_ROOT) never touch the live /tmp/exchange root. */
+function probeExchangeDir(): string {
+	return `${exchangeRoot()}/_probe`;
+}
 /** Fixed probe prompt (DESIGN.md §5.1 step 4). */
 const PROBE_PROMPT = "Reply with exactly: OUTPUT: OK";
 /** Settle-vs-report race grace window: settle can fire before the report file
@@ -894,7 +898,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 					});
 				}
 			}
-			const manifestDir = exchangeDir ?? PROBE_EXCHANGE_DIR;
+			const manifestDir = exchangeDir ?? probeExchangeDir();
 
 			// Dual-gauge governor (DESIGN.md §20): refuse to re-spawn a worker whose
 			// recorded session tripped EITHER gauge — context % (primary, pi's own

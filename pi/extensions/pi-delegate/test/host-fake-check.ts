@@ -23,7 +23,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readManifest, updateManifest } from "../src/exchange.ts";
+import { readManifest, scanAllManifests, updateManifest } from "../src/exchange.ts";
 import { registerDelegateTool } from "../src/spawn.ts";
 import { FakeWorkerHost } from "../src/host/fake.ts";
 import type { Transport } from "../src/host.ts";
@@ -38,9 +38,14 @@ function check(name: string, ok: boolean, detail = "") {
 }
 
 const NAME = `hf-${process.pid}`;
-// EXTERNAL_DEPENDENCY: the real /tmp/exchange root (ensureExchangeDir
-// validates the brief path against it — same as production spawns).
-const ROOT = `/tmp/exchange/host-fake-${process.pid}`;
+// Fixture hygiene (field lesson 2026-09-10): the exchange root is SANDBOXED
+// via $PI_DELEGATE_EXCHANGE_ROOT → a mkdtemp dir. Test manifests are never
+// written into the live /tmp/exchange root (a bystander orchestrator's
+// fail-open legacy scan used to wake on them). ensureExchangeDir validates
+// against the overridden root — same code path as production.
+const EXCHANGE_SANDBOX = mkdtempSync(join(tmpdir(), `host-fake-exchange-`));
+process.env.PI_DELEGATE_EXCHANGE_ROOT = EXCHANGE_SANDBOX;
+const ROOT = join(EXCHANGE_SANDBOX, `host-fake-${process.pid}`);
 const repoDir = mkdtempSync(join(tmpdir(), `host-fake-repo-`));
 const briefPath = join(ROOT, `brief-${NAME}.md`);
 const reportPath = join(ROOT, `report-${NAME}.json`);
@@ -211,7 +216,7 @@ check("B1 version skew: new-shape manifest parses under OLD reader semantics (ki
 // prompt → settle → collect → auto-teardown — all through the seam.
 // ---------------------------------------------------------------------------
 
-const ROOT2 = `/tmp/exchange/host-fake-tool-${process.pid}`;
+const ROOT2 = join(EXCHANGE_SANDBOX, `host-fake-tool-${process.pid}`);
 const brief2 = join(ROOT2, `brief-${NAME}.md`);
 const report2 = join(ROOT2, `report-${NAME}.json`);
 mkdirSync(ROOT2, { recursive: true });
@@ -267,6 +272,41 @@ check(
 if (toolEntry) {
 	await toolFake.teardown({ name: NAME, placement: toolEntry.placement, force: true });
 	check("C5 second teardown after auto-teardown resolves ok (idempotent, tool path)", toolFake.teardownCalls === 2);
+}
+
+// ---------------------------------------------------------------------------
+// Part D — watcher-scan backend gate (fixture hygiene, field lesson
+// 2026-09-10): a manifest entry whose placement carries backend:"fake" must
+// NEVER wake a herdr session through scanAllManifests; legacy entries (no
+// backend) keep their fail-open semantics.
+// ---------------------------------------------------------------------------
+
+{
+	const droot = join(EXCHANGE_SANDBOX, `scan-gate-${process.pid}`);
+	mkdirSync(droot, { recursive: true });
+	const legacyEntry = {
+		name: "legacy-worker",
+		placement: { kind: "tab", workspaceId: "ws-l", paneId: "pane-l", checkoutPath: repoDir },
+		briefPath: "",
+		reportPath: "",
+		provider: "p",
+		model: "m",
+		thinking: "low",
+		startedAt: new Date().toISOString(),
+	};
+	const fakeEntry = {
+		...legacyEntry,
+		name: "fake-worker",
+		placement: { kind: "tab", workspaceId: "ws-f", paneId: "pane-f", checkoutPath: repoDir, backend: "fake", placementRef: "fake:1" },
+	};
+	await updateManifest(droot, (m) => ({ ...m, workers: [legacyEntry, fakeEntry] }));
+	const scanned = scanAllManifests().find((m) => m.dir === droot);
+	const names = scanned?.workers.map((w) => w.name) ?? [];
+	check(
+		"D1 scan backend gate: backend:\"fake\" entries are skipped, legacy (no backend) fail open",
+		!!scanned && names.includes("legacy-worker") && !names.includes("fake-worker"),
+		JSON.stringify(names),
+	);
 }
 
 // --- self cleanup -----------------------------------------------------------
