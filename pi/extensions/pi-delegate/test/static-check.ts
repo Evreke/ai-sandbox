@@ -52,10 +52,20 @@ const restricted = listTsFiles(resolve(ROOT, "src"));
 // not doc-comment mentions. Path updated for the workerhost seam split (PoC):
 // the herdr implementation moved to src/herdr/host.ts; the legacy
 // transport/herdr path stays in the matcher so a revert cannot pass vacuously.
-const IMPORT_HERDR_RE = /(import[\s\S]*?from\s*["']|\bimport\s*["'])([^"']*(transport\/herdr|herdr\/host))["']/;
-const offenders = restricted.filter((f) => IMPORT_HERDR_RE.test(readFileSync(f, "utf8")));
+// NOTE: trailing [^"']* before the closing quote — extensioned imports
+// ("./herdr/host.ts") must match too. The pre-split regex required the path to
+// END at transport/herdr, so it matched NOTHING on extensioned imports and
+// passed vacuously (found by this PoC's efficacy proof — the positive pin
+// T1.1c below was what caught the offender).
+const IMPORT_HERDR_RE = /(import[\s\S]*?from\s*["']|\bimport\s*["'])([^"']*(transport\/herdr|herdr\/host))[^"']*["']/;
+const offenders = restricted
+	.filter((f) => IMPORT_HERDR_RE.test(readFileSync(f, "utf8")))
+	// The re-export shim is the ONE sanctioned importer during the transition
+	// (it dies at migration step 6); anything else importing the adapter is a
+	// dependency-rule violation.
+	.filter((f) => f !== resolve(ROOT, "src/transport.ts"));
 check(
-	"T1.1 dependency rule: no src/ module ever imports the herdr implementation (src/herdr/host.ts; impl bound in index.ts only)",
+	"T1.1 dependency rule: no src/ module ever imports the herdr implementation (src/herdr/host.ts; impl reachable only via the src/transport.ts shim)",
 	offenders.length === 0,
 	offenders.join(", "),
 );
