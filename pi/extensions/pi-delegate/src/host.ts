@@ -494,7 +494,7 @@ const GUIDANCE: Record<DelegateErrorCode, string> = {
 	E_TIER:
 		"Add tiers/defaults to ~/.pi/agent/pi-delegate.config.json or pass provider/model/thinking explicitly on the delegate call.",
 	E_PLACE:
-		"Placement failed; herdr stderr is attached. Reconcile via `herdr workspace list` before retrying.",
+		"Placement failed; backend stderr is attached. Reconcile via /delegate-teardown (or the host workspace listing) before retrying.",
 	E_START: "Check pane readiness (pane must sit at an interactive shell prompt); retry is a new delegate call.",
 	E_PROMPT_STALLED: "Worker pane not at prompt; inspect via delegate_status.",
 	E_TIMEOUT: "Worker still running; poll delegate_status.",

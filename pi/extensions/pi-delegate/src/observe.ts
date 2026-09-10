@@ -266,12 +266,12 @@ export function registerStatusTool(pi: import("@earendil-works/pi-coding-agent")
 		name: "delegate_status",
 		label: "Delegate Status",
 		description:
-			"Read-only status of delegate workers: name, herdr status, placement kind, branch, report presence, elapsed. " +
-			"Pass name for one worker; omit to see all known workers (from manifests + live herdr). Never mutates anything.",
+			"Read-only status of delegate workers: name, live status, placement kind, branch, report presence, elapsed. " +
+			"Pass name for one worker; omit to see all known workers (from manifests + the live host). Never mutates anything.",
 		promptSnippet: "Read-only status of delegate workers (never mutates)",
 		promptGuidelines: [
 			"Use delegate_status to check a specific worker after a timed-out or detached delegate call instead of repeating delegate — but do NOT poll it in a loop: the background watcher (DESIGN.md §21) wakes you on report-ready / mailbox-question / grill-deck / context-critical / worker-dead.",
-			"When delegate_status shows a worker as blocked, read the pane via herdr and either answer the worker's question or send a re-brief.",
+			"When delegate_status shows a worker as blocked, read the worker's pane and either answer the worker's question or send a re-brief.",
 		],
 		parameters: Type.Object({
 			name: Type.Optional(Type.String({ description: "Worker name; omit for all known workers" })),
@@ -343,7 +343,7 @@ export function registerStatusTool(pi: import("@earendil-works/pi-coding-agent")
 			const blocked = selected.filter((v) => v.status === "blocked");
 			if (blocked.length > 0) {
 				lines.push(
-					`Blocked: ${blocked.map((v) => v.name).join(", ")} — read the pane via herdr, then answer or re-brief.`,
+					`Blocked: ${blocked.map((v) => v.name).join(", ")} — read the pane, then answer or re-brief.`,
 				);
 			}
 			// Resume hint (§19.3/§19.4): live fleet empty + non-empty archive.
@@ -1123,7 +1123,7 @@ export function detectWorkerEvents(w: WatchWorker, opts: DetectOptions = {}): Wa
 			mk(
 				"nudge-failed",
 				`pane nudge failed after retries (${truncate(nudgeMarker.error, 160)}) — the answer IS posted at ` +
-					`${answerPathFor(w.dir, w.name)}; re-prompt the pane manually (herdr agent prompt) or retry the ` +
+					`${answerPathFor(w.dir, w.name)}; re-prompt the pane manually or retry the ` +
 					"steer — a successful nudge clears this marker.",
 				nudgeMarker.ts,
 			),
@@ -1138,7 +1138,7 @@ export function detectWorkerEvents(w: WatchWorker, opts: DetectOptions = {}): Wa
 			mk(
 				"grill-deck",
 				`invoked grill_deck (${decks}×) — it is blocked on an interactive question deck in its OWN ` +
-					`pane and only a human can answer there: open the pane (herdr), or steer it to use the ` +
+					`pane and only a human can answer there: open the pane, or steer it to use the ` +
 					`mailbox (q-${w.name}.json) instead.`,
 				`${decks}`,
 			),
@@ -1174,8 +1174,8 @@ export function detectWorkerEvents(w: WatchWorker, opts: DetectOptions = {}): Wa
 		events.push(
 			mk(
 				"worker-dead",
-				`has no live herdr status and no report at ${w.reportPath} — it exited without producing ` +
-					"anything. Treat as a failed spawn: read the pane (herdr agent read), then a diagnosed retry.",
+				`has no live host status and no report at ${w.reportPath} — it exited without producing ` +
+					"anything. Treat as a failed spawn: read the pane, then a diagnosed retry.",
 			),
 		);
 	}
@@ -1810,7 +1810,7 @@ export function registerCommands(pi: import("@earendil-works/pi-coding-agent").E
 					const advice = de?.guidance
 						? ` — ${de.guidance}`
 						// No structured guidance: fall back to the generic recovery recipe.
-						: " — reconcile via `herdr workspace list`; for a not_linked_worktree answer, recover with `herdr workspace close <ID>`.";
+						: " — reconcile via /delegate-teardown; for a not_linked_worktree answer, recover via the host workspace listing/close.";
 					outcomes.push(`✗ ${v.name}: ${errText(err)}${advice}`);
 				}
 			}
