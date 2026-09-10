@@ -154,8 +154,14 @@ try {
 		// NOT pushed into `created`: it lives in THIS session's workspace — the
 		// finally-cleanup force-removes workspaces, which must never touch ours.
 		check(
+			// herdr drift pin (2026-09-10): assert only what the runtime DEPENDS on
+			// (non-empty, ≠ paneId — the paneId fallback was the field bug) plus the
+			// behavioral proof in T2.2d (tab close actually works). NO format regex:
+			// tab id shape (hex numbering, prefixes) is NOT a spec — herdr already
+			// renamed tab.id → tab.tab_id once, and a stricter-than-reality test
+			// would break on the next legitimate herdr change (it did: tA = tab 10).
 			"T2.2c tab placement: tabId is a REAL tab id (not the pane id)",
-			tabP.kind === "tab" && !!tabP.tabId && tabP.tabId !== tabP.paneId && /:t[0-9a-f]+$/i.test(tabP.tabId ?? ""), // tab numbering is HEX (wKD:tA is tab 10)
+			tabP.kind === "tab" && typeof tabP.tabId === "string" && tabP.tabId.length > 0 && tabP.tabId !== tabP.paneId,
 			JSON.stringify(tabP),
 		);
 		logOp(`transport.teardown(tab ${tabP.tabId}) [drift pin]`);
