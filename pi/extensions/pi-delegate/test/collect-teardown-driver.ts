@@ -17,12 +17,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readManifest, reportPathFor, updateManifest } from "../src/exchange.ts";
 import { registerDelegateTool } from "../src/spawn.ts";
-import type { Transport } from "../src/transport.ts";
+import type { Transport } from "../src/host.ts";
 
 const CASE = process.argv[2] ?? "valid";
 const NAME = `ct-${process.pid}`;
-const ROOT = `/tmp/exchange/ct-${process.pid}`;
-const PROBE_DIR = "/tmp/exchange/_probe";
+// Fixture hygiene (field lesson 2026-09-10): the exchange root is SANDBOXED
+// via $PI_DELEGATE_EXCHANGE_ROOT → a mkdtemp dir — test manifests (incl. the
+// shared _probe dir) never land in the live /tmp/exchange root.
+const EXCHANGE_SANDBOX = mkdtempSync(join(tmpdir(), `ct-exchange-${CASE}-`));
+process.env.PI_DELEGATE_EXCHANGE_ROOT = EXCHANGE_SANDBOX;
+const ROOT = join(EXCHANGE_SANDBOX, `ct-${process.pid}`);
+const PROBE_DIR = `${EXCHANGE_SANDBOX}/_probe`;
 
 // --- fixture setup -----------------------------------------------------------
 

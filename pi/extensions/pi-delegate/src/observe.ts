@@ -29,8 +29,7 @@
  * CollectConfig, resolveCollectConfig, WatchEventKind, WatchEvent, eventKey,
  * WatchWorker, WatchSnapshot, WATCH_LOOKBACK_MS, WATCH_DEAD_GRACE_MS,
  * SESSION_TAIL_BYTES, GRILL_DECK_TOOL, SelfIdentity, isWorkerSession,
- * ownsChildManifests, nudgeFailedPathFor, readNudgeFailedMarker,
- * workersFromManifests, readStatusesTolerant, collectSnapshot, DetectOptions,
+ * ownsChildManifests, workersFromManifests, readStatusesTolerant, collectSnapshot, DetectOptions,
  * detectWorkerEvents, detectEvents, RetireReason, RetireDecision, RetireEval,
  * mailboxDrained, evaluateRetire, RetirePassOptions, retirePass,
  * formatEventBatch, WatcherDeps, WatcherHandle, createWatcher, stopWatcher,
@@ -81,6 +80,7 @@ import { basename, join } from "node:path";
 import { Type } from "typebox";
 import {
 	aggregateTaskUsage,
+	archiveReport,
 	archiveRoot,
 	listArchivedTasks,
 	readManifest,
@@ -88,10 +88,12 @@ import {
 } from "./exchange.ts";
 import {
 	answerPathFor,
+	nudgeFailedPathFor,
 	parseBriefSchema,
 	progressPathFor,
 	questionPathFor,
 	readLastProgress,
+	readNudgeFailedMarker,
 	readQuestion,
 	releasePathFor,
 	scanAllManifests,
@@ -118,7 +120,7 @@ import {
 	type DelegateError,
 	type Placement,
 	type Transport,
-} from "./transport.ts";
+} from "./host.ts";
 
 // ===========================================================================
 // SECTION 1/3 — `delegate_status` tool
@@ -265,12 +267,12 @@ export function registerStatusTool(pi: import("@earendil-works/pi-coding-agent")
 		name: "delegate_status",
 		label: "Delegate Status",
 		description:
-			"Read-only status of delegate workers: name, herdr status, placement kind, branch, report presence, elapsed. " +
-			"Pass name for one worker; omit to see all known workers (from manifests + live herdr). Never mutates anything.",
+			"Read-only status of delegate workers: name, live status, placement kind, branch, report presence, elapsed. " +
+			"Pass name for one worker; omit to see all known workers (from manifests + the live host). Never mutates anything.",
 		promptSnippet: "Read-only status of delegate workers (never mutates)",
 		promptGuidelines: [
 			"Use delegate_status to check a specific worker after a timed-out or detached delegate call instead of repeating delegate — but do NOT poll it in a loop: the background watcher (DESIGN.md §21) wakes you on report-ready / mailbox-question / grill-deck / context-critical / worker-dead.",
-			"When delegate_status shows a worker as blocked, read the pane via herdr and either answer the worker's question or send a re-brief.",
+			"When delegate_status shows a worker as blocked, read the worker's pane and either answer the worker's question or send a re-brief.",
 		],
 		parameters: Type.Object({
 			name: Type.Optional(Type.String({ description: "Worker name; omit for all known workers" })),
@@ -342,7 +344,7 @@ export function registerStatusTool(pi: import("@earendil-works/pi-coding-agent")
 			const blocked = selected.filter((v) => v.status === "blocked");
 			if (blocked.length > 0) {
 				lines.push(
-					`Blocked: ${blocked.map((v) => v.name).join(", ")} — read the pane via herdr, then answer or re-brief.`,
+					`Blocked: ${blocked.map((v) => v.name).join(", ")} — read the pane, then answer or re-brief.`,
 				);
 			}
 			// Resume hint (§19.3/§19.4): live fleet empty + non-empty archive.
@@ -634,60 +636,6 @@ export function eventKey(e: Pick<WatchEvent, "worker" | "dir" | "kind" | "finger
 }
 
 // ---------------------------------------------------------------------------
-// F6 — nudge-failed marker (mailbox answer posted, pane nudge failed)
-// ---------------------------------------------------------------------------
-
-/** Conventional nudge-failed marker path — next to the brief, worker-scoped. */
-export function nudgeFailedPathFor(dir: string, name: string): string {
-	return `${dir}/nudge-failed-${name}.json`;
-}
-
-/** Mailbox tool → watcher fallback marker (nudge-failed-<name>.json): written
- *  by the delegate_mailbox answer/steer handler when the pane nudge fails after
- *  retries; the watcher delivers the wake-up on the next tick instead of the
- *  socket. A SUBSEQUENT successful nudge DELETES the marker (the §23
- *  retire-ack consume discipline — see the BUG_FIX_CONTEXT at the top of this
- *  module about leftover ACKs closing fresh same-name retries). */
-export interface NudgeFailedEnvelope {
-	name: string;
-	ts: string;
-	error: string;
-}
-
-/**
- * Tolerantly read a nudge-failed marker; null when absent/invalid.
- * <p>
- * FUNCTION_CONTRACT:
- * Input: path to nudge-failed-<name>.json
- * Output: the parsed envelope, or null when the file is absent, unreadable,
- *   corrupt JSON, or has no non-empty string `ts` (the fingerprint source)
- * Guarantees: never throws; a torn mid-write read degrades to null and the
- *   detection simply re-fires on a later tick (the marker stays on disk)
- * Raises: never
- */
-export function readNudgeFailedMarker(path: string): NudgeFailedEnvelope | null {
-	let raw: string;
-	try {
-		raw = readFileSync(path, "utf8");
-	} catch {
-		return null; // absent/unreadable → no marker
-	}
-	try {
-		const parsed: unknown = JSON.parse(raw);
-		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
-		const o = parsed as Record<string, unknown>;
-		if (typeof o.ts !== "string" || o.ts.length === 0) return null;
-		return {
-			name: typeof o.name === "string" ? o.name : "",
-			ts: o.ts,
-			error: typeof o.error === "string" ? o.error : "",
-		};
-	} catch {
-		return null; // corrupt JSON → no marker, never throw
-	}
-}
-
-// ---------------------------------------------------------------------------
 // Snapshot — manifests + live statuses + self-identification, no judgement
 // ---------------------------------------------------------------------------
 
@@ -719,6 +667,15 @@ export interface WatchWorker {
 	 *  (legacy manifest) → legacy behavior. Reader-only: spawn writes the
 	 *  field, the watcher never does. */
 	orchestratorSessionPath?: string;
+	/** Manifest-level fleet owner (F1 field, written since 1.15.0 by spawn —
+	 *  the first delegate call hoists its own session path here; set-once).
+	 *  B1 fallback ownership: when a worker entry carries NO worker-level
+	 *  orchestratorSessionPath, a masterSessionPath different from the
+	 *  watcher's own session still proves a KNOWN foreign owner →
+	 *  detectWorkerEvents emits NOTHING (a bystander session must not be woken
+	 *  by a foreign/legacy manifest in the shared exchange root). Absent →
+	 *  fail-open (true legacy, no owner field anywhere). Reader-only. */
+	masterSessionPath?: string;
 	/** §23 retire inputs/outputs, threaded from the manifest (reader-only for
 	 *  the clock fields — the retire pass writes them, the snapshot stays a
 	 *  view): brief path + resolved report-schema fragment (condition 1
@@ -895,6 +852,11 @@ export function workersFromManifests(
 					: {}),
 				...(typeof w.orchestratorSessionPath === "string" && w.orchestratorSessionPath.length > 0
 					? { orchestratorSessionPath: w.orchestratorSessionPath }
+					: {}),
+				// B1 fallback ownership — manifest-level field, threaded per manifest
+				// (the fleet owner is the same for every worker in this manifest).
+				...(typeof manifest.masterSessionPath === "string" && manifest.masterSessionPath.length > 0
+					? { masterSessionPath: manifest.masterSessionPath }
 					: {}),
 				// §23 retire threading — every field tolerant: a manifest is untyped
 				// JSON, garbage reads as absent (legacy behavior).
@@ -1104,6 +1066,19 @@ export function detectWorkerEvents(w: WatchWorker, opts: DetectOptions = {}): Wa
 	) {
 		return [];
 	}
+	// B1 fallback ownership (diag-watch-crossfleet C1): a worker entry with NO
+	// orchestratorSessionPath on a manifest that carries masterSessionPath ≠ my
+	// session has a KNOWN owner and it is not me → silent. Fail-open only when
+	// NO owner field exists anywhere on the manifest (true legacy) or the
+	// self-id is degraded (a lost report-ready is worse than a duplicate).
+	if (
+		w.orchestratorSessionPath === undefined &&
+		w.masterSessionPath !== undefined &&
+		opts.selfSessionFile !== undefined &&
+		w.masterSessionPath !== opts.selfSessionFile
+	) {
+		return [];
+	}
 	// §23 retire: a retired worker is HISTORY — the pane is already gone, so
 	// every event kind would be noise (worker-dead above all: the close itself
 	// is the expected cause of any herdr absence). The manifest entry stays.
@@ -1166,16 +1141,17 @@ export function detectWorkerEvents(w: WatchWorker, opts: DetectOptions = {}): Wa
 	// 2b. nudge-failed (F6) — a mailbox answer/steer whose PANE nudge failed
 	//    after bounded retries. The mailbox tool (spawn.ts) wrote the marker;
 	//    the watcher delivers the wake-up instead of the socket. Fingerprint =
-	//    the marker ts; a SUBSEQUENT successful nudge deletes the marker (the
-	//    §23 retire-ack consume discipline — a stale marker must never fire for
-	//    a fresh same-name retry).
+	//    the marker ts. Consume discipline: the marker is deleted by a
+	//    SUBSEQUENT successful nudge AND by a fresh same-name spawn (both in
+	//    spawn.ts) — so a leftover can only re-fire ONCE for a new watcher
+	//    session, and only as an advisory wake (dedup is per-watcher-lifetime).
 	const nudgeMarker = readNudgeFailedMarker(nudgeFailedPathFor(w.dir, w.name));
 	if (nudgeMarker) {
 		events.push(
 			mk(
 				"nudge-failed",
 				`pane nudge failed after retries (${truncate(nudgeMarker.error, 160)}) — the answer IS posted at ` +
-					`${answerPathFor(w.dir, w.name)}; re-prompt the pane manually (herdr agent prompt) or retry the ` +
+					`${answerPathFor(w.dir, w.name)}; re-prompt the pane manually or retry the ` +
 					"steer — a successful nudge clears this marker.",
 				nudgeMarker.ts,
 			),
@@ -1190,7 +1166,7 @@ export function detectWorkerEvents(w: WatchWorker, opts: DetectOptions = {}): Wa
 			mk(
 				"grill-deck",
 				`invoked grill_deck (${decks}×) — it is blocked on an interactive question deck in its OWN ` +
-					`pane and only a human can answer there: open the pane (herdr), or steer it to use the ` +
+					`pane and only a human can answer there: open the pane, or steer it to use the ` +
 					`mailbox (q-${w.name}.json) instead.`,
 				`${decks}`,
 			),
@@ -1226,8 +1202,8 @@ export function detectWorkerEvents(w: WatchWorker, opts: DetectOptions = {}): Wa
 		events.push(
 			mk(
 				"worker-dead",
-				`has no live herdr status and no report at ${w.reportPath} — it exited without producing ` +
-					"anything. Treat as a failed spawn: read the pane (herdr agent read), then a diagnosed retry.",
+				`has no live host status and no report at ${w.reportPath} — it exited without producing ` +
+					"anything. Treat as a failed spawn: read the pane, then a diagnosed retry.",
 			),
 		);
 	}
@@ -1261,8 +1237,17 @@ export function detectWorkerEvents(w: WatchWorker, opts: DetectOptions = {}): Wa
 /**
  * Deduped detection over a whole snapshot. `seen` is the watcher's memory
  * (worker+kind[+fingerprint] fired since the last reset): an event fires at
- * most once per key; when the condition STOPS being true the key is forgotten,
- * so a re-armed condition fires again. Mutates `seen`, returns the new events.
+ * most once per key. State reset is split by fingerprint presence (D1 fix):
+ *   - keys WITHOUT a fingerprint (gauge/absence kinds: worker-dead,
+ *     context-critical) are forgotten when not observed true this tick —
+ *     re-arming is the point (fire exactly once per episode);
+ *   - keys WITH a fingerprint (report-ready, report-invalid, mailbox-question,
+ *     grill-deck, nudge-failed, worker-stale) are forgotten ONLY when the
+ *     worker vanished from the snapshot or the same worker+kind is observed
+ *     with a DIFFERENT fingerprint. A tick with no observation (transient
+ *     ENOENT on the report, a manifest read between rewrites) must not
+ *     resurrect the event.
+ * Mutates `seen`, returns the new events.
  */
 export function detectEvents(
 	snap: WatchSnapshot,
@@ -1272,23 +1257,61 @@ export function detectEvents(
 	const tickOpts: DetectOptions = { ...opts, statusesKnown: snap.statusesKnown };
 	const fresh: WatchEvent[] = [];
 	const current = new Set<string>();
+	// Fingerprinted-kind observations this tick: `dir#worker#kind` → fingerprint
+	// (used by the reset below — a key is forgotten on a NEW fingerprint, not on
+	// a missed observation).
+	const observedFingerprints = new Map<string, string>();
+	// Workers present in THIS tick's snapshot: `dir#worker`.
+	const presentWorkers = new Set<string>();
 	for (const w of snap.workers) {
+		presentWorkers.add(`${w.dir}#${w.name}`);
 		for (const e of detectWorkerEvents(w, tickOpts)) {
 			const key = eventKey(e);
 			current.add(key);
+			if (e.fingerprint !== undefined) {
+				observedFingerprints.set(`${w.dir}#${w.name}#${e.kind}`, e.fingerprint);
+			}
 			if (!seen.has(key)) {
 				seen.add(key);
 				fresh.push(e);
 			}
 		}
 	}
-	// State reset: forget every key not observed true THIS tick — a condition that
-	// stopped being true re-arms, and keys of workers that vanished from the
-	// manifests are dropped too (nothing observes them any more, so `seen` cannot
-	// grow without bound and a worker that comes back can fire again). Manifest
-	// writes are atomic (exchange.ts atomicWriteFileSync), so a vanished worker is
-	// a real removal, not a half-written read.
-	for (const key of [...seen]) if (!current.has(key)) seen.delete(key);
+	// State reset: forget every key not observed true THIS tick, EXCEPT
+	// fingerprinted keys of workers still present (see the contract above).
+	// Gauge keys of vanished workers are dropped too, and `seen` cannot grow
+	// without bound: a fingerprinted key is bounded by one per worker+kind and
+	// is replaced on a new fingerprint; the 24 h lookback (WATCH_LOOKBACK_MS)
+	// drops vanished workers. Manifest writes are atomic
+	// (exchange.ts atomicWriteFileSync), so a vanished worker is a real removal,
+	// not a half-written read.
+	for (const key of [...seen]) {
+		if (current.has(key)) continue;
+		// Parse from the right: dir#worker#kind[#fingerprint] — kind and worker
+		// never contain '#' (kinds are fixed tokens; worker names are
+		// [a-z][a-z0-9_-]{0,31}), so the dir can safely be re-joined.
+		const parts = key.split("#");
+		const fp = parts.length > 3 ? parts.pop() : undefined;
+		const kind = parts.pop() ?? "";
+		const name = parts.pop() ?? "";
+		const dir = parts.join("#");
+		if (fp !== undefined) {
+			const workerGone = !presentWorkers.has(`${dir}#${name}`);
+			const currentFp = observedFingerprints.get(`${dir}#${name}#${kind}`);
+			// BUG_FIX_CONTEXT: symptom — duplicate [report-ready] wake-ups for a
+			// report whose mtime never changed (field: two deliveries, same
+			// fingerprint; diag-watch-crossfleet case C5). Root cause — the old
+			// reset deleted every key not observed true this tick, so ONE tick
+			// with a missed observation (transient ENOENT on the report;
+			// fileMtimeMs → null suppresses the event) FORGOT the fingerprinted
+			// key and the restored file re-fired. Missed observation was treated
+			// as condition reset. What was done: fingerprinted keys survive a
+			// no-observation tick of a still-present worker; they are forgotten
+			// only on worker-vanished or a different fingerprint.
+			if (!workerGone && (currentFp === undefined || currentFp === fp)) continue;
+		}
+		seen.delete(key);
+	}
 	return fresh;
 }
 
@@ -1403,6 +1426,18 @@ async function stampWorkerField(
 }
 
 /**
+ * A teardown that reports "not found" means the pane/workspace is ALREADY
+ * gone (herdr dropped it, another session closed it, the user closed the
+ * pane) — an IDEMPOTENT close, not a failure. Matched on the message text:
+ * herdr's error JSON carries code "tab_not_found"/"workspace_not_found" and
+ * the transport wraps it verbatim into the DelegateError message; there is
+ * no dedicated E_* code for it.
+ */
+function isAlreadyGone(err: unknown): boolean {
+	return /not[\s_-]?found/i.test(err instanceof Error ? err.message : String(err));
+}
+
+/**
  * One retire pass over a snapshot (§23): stamp/clear `retirableSince` on
  * state transitions (persisted — watcher restarts must not lose the clock),
  * close retirable workers via the Transport (the same teardown path the
@@ -1441,8 +1476,17 @@ export async function retirePass(
 			}
 			// Already retired → history, never re-closed.
 			if (w.retiredAt !== undefined) continue;
-			// A placement without a pane cannot be closed (corrupt manifest entry).
-			if (!w.placement || typeof w.placement.paneId !== "string" || w.placement.paneId.length === 0) {
+			// A placement without a closable handle cannot be closed (corrupt
+			// manifest entry). Ref-aware (workerhost inversion, design §3): a
+			// placementRef OR a legacy paneId counts — old manifests (paneId only)
+			// stay closeable, ref-only entries would too.
+			if (
+				!w.placement ||
+				!(
+					(typeof w.placement.placementRef === "string" && w.placement.placementRef.length > 0) ||
+					(typeof w.placement.paneId === "string" && w.placement.paneId.length > 0)
+				)
+			) {
 				continue;
 			}
 
@@ -1460,8 +1504,36 @@ export async function retirePass(
 				continue;
 			}
 			if (outcome.decision) {
-				await transport.teardown({ name: w.name, placement: w.placement, force: true });
+				let alreadyGone = false;
+				try {
+					await transport.teardown({ name: w.name, placement: w.placement, force: true });
+				} catch (err) {
+					// BUG_FIX_CONTEXT: symptom — the retire pass spammed "retire pass
+					// error … tab_not_found" every tick when the pane had ALREADY been
+					// closed elsewhere (herdr, user, another session): the failed close
+					// never stamped retiredAt, so the decision re-fired forever.
+					// Why not fixed in the transport: teardown is also the interactive
+					// /delegate-teardown path, where a genuinely misconfigured placement
+					// must stay a visible error; only the autonomous pass needs the
+					// idempotent semantics. What was done: "not found" from the close is
+					// treated as a successful retire (stamp retiredAt, log the variance).
+					if (!isAlreadyGone(err)) throw err;
+					alreadyGone = true;
+				}
 				await stampWorkerField(w, (x) => ({ ...x, retiredAt: new Date(nowMs).toISOString() }));
+				// Archive at retire (diag-retire-msg Q3 item 1): a TTL close of an
+				// UNCOLLECTED report must not orphan it — without this, the report
+				// survives in /tmp only as a silent artifact and every evidence path
+				// into the worktree dies with the teardown. Same helper + naming as
+				// the collect-path archive (basename preserved, manifest snapshot
+				// rewritten in place) → idempotent by construction. Best-effort by
+				// contract: a failure never blocks the close.
+				try {
+					const manifest = readManifest(w.dir);
+					if (manifest) archiveReport(w.dir, w.reportPath, manifest as unknown as Record<string, unknown>);
+				} catch {
+					// archive is advisory — the retiredAt stamp already guards history
+				}
 				// CONSUME the ACK marker: a leftover release-<name>.json would ACK-close
 				// a fresh same-name retry (spawn appends into the SAME task dir, §23.3
 				// sanctions the retry) on its FIRST retirable tick — silently skipping
@@ -1472,7 +1544,7 @@ export async function retirePass(
 					// marker cleanup is advisory — the retiredAt stamp already guards the history
 				}
 				log(
-					`retired worker ${w.name} (${outcome.decision.reason}) — pane closed, ` +
+					`retired worker ${w.name} (${outcome.decision.reason}${alreadyGone ? ", pane was already gone — idempotent close" : ""}) — ` +
 						"herdr name freed for a same-name retry",
 				);
 				decisions.push(outcome.decision);
@@ -1692,6 +1764,21 @@ export function startWatcher(
 		intervalMs: cfg.intervalMs,
 		self: { sessionFile, cwd: ctx.cwd },
 		send: makeSender(pi),
+		// Watcher log sink (UX fix, 2026-09-10): the default console.error sink
+		// surfaced INTERNAL bookkeeping (routine retire successes) into the user's
+		// pane. Every line now goes to the audit file (append-only, best-effort);
+		// the pane shows ONLY lines that need a human: errors and anomalies
+		// ("already gone" — the pane vanished before the TTL close, the agent may
+		// still be alive detached; see resolveLiveTabId's drift guard).
+		log: (m: string) => {
+			void appendFile(
+				join(homedir(), ".pi", "agent", "delegate-watch.log"),
+				`${new Date().toISOString()} ${m}\n`,
+			).catch(() => undefined); // audit is advisory — never throw past the tick
+			if (/\berror\b|\bfail|already gone|unavailable/i.test(m)) {
+				console.error(`[pi-delegate watch] ${m}`);
+			}
+		},
 		// v1.12.1: the worker-stale threshold threads from watch.staleAfterMs
 		// (deps.detect can still override per-mount, e.g. in tests).
 		// §23: the retire TTL threads the same way.
@@ -1755,12 +1842,29 @@ export function registerCommands(pi: import("@earendil-works/pi-coding-agent").E
 				return;
 			}
 
-			const list = views
+			// Manifest history vs actionable workers (UX fix, 2026-09-10): manifest
+			// worker entries are NEVER deleted, so the scan returns every worker
+			// ever spawned — the wall of “✗ tab_not_found” for long-closed workers
+			// looked like a catastrophe while meaning “nothing to close”. Retired
+			// entries are HISTORY: skipped with a count, never attempted.
+			const retiredViews = views.filter((v) => v.retired === true);
+			const actionable = views.filter((v) => v.retired !== true);
+			if (actionable.length === 0) {
+				ctx.ui.notify(
+					`Nothing to tear down — all ${views.length} manifest entries are retired history.`,
+					"info",
+				);
+				disposeFleetUI();
+				return;
+			}
+
+			const list = actionable
 				.map((v) => `${v.name} (${v.kind}${v.branch ? `, branch ${v.branch}` : ""})`)
 				.join(", ");
+			const retiredNote = retiredViews.length > 0 ? ` (plus ${retiredViews.length} retired history entries skipped)` : "";
 			const confirmed = await ctx.ui.confirm(
 				"Tear down delegate workers?",
-				`${views.length} worker(s): ${list}`,
+				`${actionable.length} worker(s): ${list}${retiredNote}`,
 			);
 			if (!confirmed) {
 				ctx.ui.notify("Teardown cancelled — workers left running.", "info");
@@ -1768,7 +1872,7 @@ export function registerCommands(pi: import("@earendil-works/pi-coding-agent").E
 			}
 
 			const outcomes: string[] = [];
-			for (const v of views) {
+			for (const v of actionable) {
 				// Pre-log the planned mutating op BEFORE executing it (audit trail).
 				await logTo(
 					v.dir,
@@ -1781,12 +1885,20 @@ export function registerCommands(pi: import("@earendil-works/pi-coding-agent").E
 					await logTo(v.dir, `done: teardown worker=${v.name} ok`);
 					outcomes.push(`✓ ${v.name} (${v.kind}) torn down`);
 				} catch (err) {
+					// Idempotent close (parity with the retire pass): a "not found"
+					// teardown means the pane/workspace is ALREADY gone — a success for
+					// bookkeeping, not an error. Only genuine failures stay ✗.
+					if (isAlreadyGone(err)) {
+						await logTo(v.dir, `done: teardown worker=${v.name} no-op (already gone)`);
+						outcomes.push(`✓ ${v.name} (${v.kind}) — already closed, no-op`);
+						continue;
+					}
 					await logTo(v.dir, `error: teardown worker=${v.name} failed: ${errText(err)}`);
 					const de = asDelegateError(err);
 					const advice = de?.guidance
 						? ` — ${de.guidance}`
 						// No structured guidance: fall back to the generic recovery recipe.
-						: " — reconcile via `herdr workspace list`; for a not_linked_worktree answer, recover with `herdr workspace close <ID>`.";
+						: " — reconcile via /delegate-teardown; for a not_linked_worktree answer, recover via the host workspace listing/close.";
 					outcomes.push(`✗ ${v.name}: ${errText(err)}${advice}`);
 				}
 			}

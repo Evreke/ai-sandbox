@@ -23,8 +23,11 @@ import { mkdtempSync, appendFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { promisify } from "node:util";
 import { join, resolve } from "node:path";
-import { createHerdrTransport, parseHerdrResult } from "../src/transport.ts";
-import type { Placement } from "../src/transport.ts";
+import {
+	createHerdrTransport,
+	parseHerdrResult,
+} from "../src/herdr/host.ts";
+import type { Placement } from "../src/host.ts";
 
 const execFileP = promisify(execFile);
 const OPS_LOG = "/tmp/exchange/pi-delegate-ext/qa-herdr-ops.log";
@@ -48,6 +51,19 @@ async function herdrJson(args: string[]): Promise<unknown> {
 	const { stdout } = await execFileP("herdr", args, { encoding: "utf8", timeout: 30_000 });
 	return parseHerdrResult(stdout).result;
 }
+
+// Herdr-absence gate: this file drives REAL herdr mutating ops — on a machine
+// without herdr (e.g. a GitHub Actions runner) it must SKIP, not fail. The
+// invariants pinned here are exercised on herdr-ful machines and by the
+// herdr-independent static pins in static-check.ts.
+await (async () => {
+	try {
+		await execFileP("herdr", ["--version"], { encoding: "utf8", timeout: 10_000 });
+	} catch {
+		console.log("SKIP transport-contract — herdr binary not available on this host");
+		process.exit(0);
+	}
+})();
 
 async function liveWorkspaceIds(): Promise<Set<string>> {
 	const result = await herdrJson(["workspace", "list"]);
@@ -131,10 +147,43 @@ try {
 	);
 	check("T2.2b placement created a NEW herdr workspace", !before.has(p1.workspaceId), p1.workspaceId);
 
+	// T2.2c — TAB placement round-trip (herdr drift pin, 2026-09-10): the tab
+	// id MUST come from the herdr result's tab.tab_id — never the paneId
+	// fallback (that signature made every tab close fail tab_not_found while
+	// the agent stayed alive; see placementFromTabResult BUG_FIX_CONTEXT).
+	{
+		logOp("transport.place(tab) [drift pin]");
+		const tabP = await t.place({ mode: "tab", label: "qa-probe-tab-shape" });
+		// NOT pushed into `created`: it lives in THIS session's workspace — the
+		// finally-cleanup force-removes workspaces, which must never touch ours.
+		check(
+			// herdr drift pin (2026-09-10): assert only what the runtime DEPENDS on
+			// (non-empty, ≠ paneId — the paneId fallback was the field bug) plus the
+			// behavioral proof in T2.2d (tab close actually works). NO format regex:
+			// tab id shape (hex numbering, prefixes) is NOT a spec — herdr already
+			// renamed tab.id → tab.tab_id once, and a stricter-than-reality test
+			// would break on the next legitimate herdr change (it did: tA = tab 10).
+			"T2.2c tab placement: tabId is a REAL tab id (not the pane id)",
+			tabP.kind === "tab" && typeof tabP.tabId === "string" && tabP.tabId.length > 0 && tabP.tabId !== tabP.paneId,
+			JSON.stringify(tabP),
+		);
+		logOp(`transport.teardown(tab ${tabP.tabId}) [drift pin]`);
+		await t.teardown({ name: "qa-probe-tab-shape", placement: tabP, force: true }).catch(
+			// forceCleanup would remove the WORKSPACE — for a tab the fallback is
+			// a direct tab close (and if that fails too, a leftover empty tab is
+			// harmless: no agent was ever started in it).
+			async () => {
+				logOp(`herdr tab close ${tabP.tabId}  (cleanup fallback)`);
+				await execFileP("herdr", ["tab", "close", tabP.tabId], { encoding: "utf8", timeout: 30_000 });
+			},
+		);
+		check("T2.2d tab teardown with the parsed tabId succeeds", true);
+	}
+
 	logOp(`herdr agent start qa-probe --kind pi --pane ${p1.paneId} --timeout 120000 -- --provider ${MODEL.provider} --model ${MODEL.model} --thinking ${MODEL.thinking}`);
 	const probeName = `qa-probe-${Date.now().toString(36)}`;
 	logOp(`herdr agent start ${probeName} (unique suffix avoids collision with live agents)`);
-	const s1 = await t.startAgent({ name: probeName, paneId: p1.paneId, timeoutMs: 120_000, ...MODEL });
+	const s1 = await t.startAgent({ name: probeName, placementRef: p1.placementRef ?? p1.paneId, timeoutMs: 120_000, ...MODEL });
 	check("T2.2c startAgent returns canonical name", !!s1.name, JSON.stringify(s1));
 
 	logOp(`herdr agent prompt ${s1.name} "Reply with exactly: OK"  (submit, no --wait)`);
@@ -181,11 +230,11 @@ try {
 	// CONTRACT (types.ts StartReq): "herdr auto-uniquifies on collision" → canonical
 	// name must differ. OBSERVED herdr behavior: rejects with agent_name_taken.
 	logOp(`herdr agent start qa-probe (workspace A) ... -- --provider ${MODEL.provider} --model ${MODEL.model} --thinking ${MODEL.thinking}`);
-	const sA = await t.startAgent({ name: "qa-probe", paneId: pA.paneId, timeoutMs: 120_000, ...MODEL });
+	const sA = await t.startAgent({ name: "qa-probe", placementRef: pA.placementRef ?? pA.paneId, timeoutMs: 120_000, ...MODEL });
 	logOp(`herdr agent start qa-probe (workspace B, colliding with live ${sA.name}) ...`);
 	let collErr: unknown;
 	try {
-		await t.startAgent({ name: "qa-probe", paneId: pB.paneId, timeoutMs: 120_000, ...MODEL });
+		await t.startAgent({ name: "qa-probe", placementRef: pB.placementRef ?? pB.paneId, timeoutMs: 120_000, ...MODEL });
 	} catch (e) {
 		collErr = e;
 	}

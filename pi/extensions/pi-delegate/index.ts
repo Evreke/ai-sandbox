@@ -15,7 +15,10 @@
  */
 
 import { readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { basename } from "node:path";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { progressPathFor, readLastProgress, scanAllManifests } from "./src/exchange.ts";
 import { buildWorkerView, classifyOwnership, type SelfIdentity } from "./src/fleet.ts";
@@ -30,8 +33,77 @@ import {
 import { contextPct, parseSessionUsage, resolveContextWindow } from "./src/usage.ts";
 import { pruneArchive } from "./src/exchange.ts";
 import { disposeFleetUI, mountFleetUI, type FleetWidgetRow as FleetRow, type FleetUIDeps } from "./src/fleet.ts";
-import { createHerdrTransport } from "./src/transport.ts";
+import { createHerdrTransport } from "./src/herdr/host.ts";
+import { DelegateErrorImpl, type Transport } from "./src/host.ts";
 import { registerDelegateTool, registerMailboxTool } from "./src/spawn.ts";
+
+// ===========================================================================
+// Host binding (workerhost inversion, design §5/§6 migration steps 5–6):
+// index.ts is the ONLY module allowed to import a backend adapter — it
+// chooses one from the config's `"host"` key and injects it everywhere.
+// ===========================================================================
+
+/**
+ * Read the `"host"` key from ~/.pi/agent/pi-delegate.config.json (same file
+ * as the tiers/defaults tables). Missing key / missing file → "herdr" (the
+ * default backend). A non-string or unknown value is a CONFIG ERROR, not a
+ * silent fallback — the operator asked for a backend this build cannot serve.
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: none (reads the config file — EXTERNAL_DEPENDENCY below)
+ * Output: the active host name ("herdr" unless configured otherwise)
+ * Guarantees:
+ *   - missing/corrupt config → "herdr" (default, never throws)
+ *   - unknown value → structured DelegateErrorImpl (E_START — the extension
+ *     cannot start on an unserveable backend), message names the value + the
+ *     supported set
+ * Raises:
+ *   - DelegateErrorImpl E_START for an unknown/non-string host value
+ * EXTERNAL_DEPENDENCY: ~/.pi/agent/pi-delegate.config.json (same file +
+ *   tolerant-read convention as resolveSpawnDefaults in src/usage.ts).
+ */
+function resolveConfiguredHost(): "herdr" {
+	let raw: string;
+	try {
+		raw = readFileSync(join(homedir(), ".pi", "agent", "pi-delegate.config.json"), "utf8");
+	} catch {
+		return "herdr"; // no config → default host
+	}
+	let host: unknown;
+	try {
+		host = (JSON.parse(raw) as { host?: unknown }).host;
+	} catch {
+		return "herdr"; // corrupt config → default host (same tolerance as tiers)
+	}
+	if (host === undefined) return "herdr";
+	if (host !== "herdr" || typeof host !== "string") {
+		throw new DelegateErrorImpl(
+			"E_START",
+			`pi-delegate config: unknown host ${JSON.stringify(host)} — this build ships only the "herdr" backend`,
+			`Set "host": "herdr" in ~/.pi/agent/pi-delegate.config.json (the only supported value) or remove the key.`,
+		);
+	}
+	return host;
+}
+
+/**
+ * Bind the ONE WorkerHost adapter for this session (composition root).
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: none
+ * Output: the adapter implementing the Transport seam
+ * Guarantees: the adapter choice is config-driven; unknown host → structured error (see resolveConfiguredHost)
+ * Raises: propagates resolveConfiguredHost's E_START on unknown host
+ */
+function createConfiguredHost(): Transport {
+	const host = resolveConfiguredHost();
+	if (host === "herdr") return createHerdrTransport();
+	throw new DelegateErrorImpl(
+		"E_START",
+		`pi-delegate: unhandled host "${host}" — no adapter bound`,
+		"This build ships only the \"herdr\" backend; fix the config's host key.",
+	);
+}
 
 /** Per-worker manifest extras not projected onto WorkerView (session JSONL
  *  path + recorded effective budget) — read tolerantly, same shape fleet.ts
@@ -107,7 +179,7 @@ async function readManifestExtras(dir: string, name: string): Promise<ManifestEx
  * Raises: none expected from the wiring itself
  */
 export default function (pi: ExtensionAPI) {
-	const transport = createHerdrTransport();
+	const transport = createConfiguredHost();
 	registerDelegateTool(pi, transport);
 	registerStatusTool(pi, transport);
 	registerMailboxTool(pi, transport);

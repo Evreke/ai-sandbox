@@ -31,10 +31,10 @@
  * Exit 0 only if all checks pass.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import {
 	RETIRE_DEFAULT_TTL_MS,
 	RETIRE_DEFAULT_ENABLED,
@@ -51,7 +51,8 @@ import {
 	type ExchangeManifest,
 	type ManifestWorker,
 } from "../src/exchange.ts";
-import type { AgentStatus, Placement, TeardownReq, Transport } from "../src/transport.ts";
+import { archiveRoot } from "../src/exchange.ts";
+import type { AgentStatus, Placement, TeardownReq, Transport } from "../src/host.ts";
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = "") {
@@ -65,6 +66,14 @@ function check(name: string, ok: boolean, detail = "") {
 const ROOT = resolve(dirname(process.argv[1] ?? "."), "..");
 const NOW = Date.parse("2026-09-09T12:00:00.000Z");
 const FIX = mkdtempSync(join(tmpdir(), "retire-check-fix-"));
+
+// Archive sandbox: archive-at-retire (R7) — and any collect-path archive —
+// writes under archiveRoot() = $HOME/.pi/agent/delegate-archive. Redirect
+// $HOME for the WHOLE run so the real archive is never touched (same
+// convention as settle-archive.ts; R1's child spawns override HOME explicitly).
+const SAVED_HOME = process.env.HOME;
+const ARCHIVE_HOME = mkdtempSync(join(tmpdir(), "retire-check-archive-home-"));
+process.env.HOME = ARCHIVE_HOME;
 
 // ---------------------------------------------------------------------------
 // R1. Config — watch.retireTtlMs (child bun process, $HOME at spawn time)
@@ -368,6 +377,9 @@ function workerView(w: ManifestWorker, statuses: AgentStatus[] | null = [DONE(w.
 interface FakeTransport extends Transport {
 	teardownCalls: Array<{ name: string; placement: Placement }>;
 	failTeardown?: boolean;
+	/** When set, teardown throws an Error with this message (simulates herdr
+	 *  error shapes surfaced verbatim through the transport wrapper). */
+	failTeardownMsg?: string;
 }
 
 function fakeTransport(): FakeTransport {
@@ -375,6 +387,7 @@ function fakeTransport(): FakeTransport {
 		teardownCalls: [],
 		failTeardown: false,
 		teardown: async (req: TeardownReq) => {
+			if (t.failTeardownMsg !== undefined) throw new Error(t.failTeardownMsg);
 			if (t.failTeardown) throw new Error("herdr down");
 			t.teardownCalls.push({ name: req.name, placement: req.placement });
 		},
@@ -444,6 +457,32 @@ function dOwnCheckLegacy(t: FakeTransport): boolean {
 	await retirePass(tFail, snapshotFor([wC], [DONE("r-throw")]), { nowMs: NOW, retireEnabled: true, retireTtlMs: 900_000 });
 	check("R5.7b next tick retries and succeeds", manifestFromDisk(dirC).workers[0]?.retiredAt !== undefined);
 
+	// Teardown says "not found" → the pane is ALREADY gone (closed by herdr,
+	// the user, or another session): IDEMPOTENT close — retiredAt stamped THIS
+	// tick, no error log, and every later tick is silent (no spam).
+	const dirGone = taskDir("pass-gone");
+	const wGone = mkWorker(dirGone, "r-gone", { retirableSince: new Date(NOW - 900_000).toISOString() });
+	writeManifestOnDisk(dirGone, [wGone]);
+	writeValidReport(dirGone, "r-gone");
+	const tGone = fakeTransport();
+	tGone.failTeardownMsg =
+		'herdr tab close wKD:p2 failed: herdr tab close failed {"error":{"code":"tab_not_found","message":"tab wKD:p2 not found"},"id":"cli:tab:close"}';
+	const logsGone: string[] = [];
+	const dGone = await retirePass(tGone, snapshotFor([wGone], [DONE("r-gone")]), { nowMs: NOW, retireEnabled: true, retireTtlMs: 900_000 }, (m) => logsGone.push(m));
+	check(
+		"R5.8 teardown 'not found' → idempotent retire: decision + retiredAt + no error log",
+		dGone.length === 1 &&
+			manifestFromDisk(dirGone).workers[0]?.retiredAt !== undefined &&
+			!logsGone.some((l) => /retire pass error/.test(l)),
+		JSON.stringify(logsGone),
+	);
+	const goneAfter = await retirePass(
+		tGone,
+		snapshotFor([{ ...wGone, retiredAt: manifestFromDisk(dirGone).workers[0]?.retiredAt }], [DONE("r-gone")]),
+		{ nowMs: NOW + 10_000, retireEnabled: true, retireTtlMs: 900_000 },
+	);
+	check("R5.8b already-retired → silent on every later tick (no spam)", goneAfter.length === 0 && tGone.teardownCalls.length === 0);
+
 	// ACK: the release marker closes IMMEDIATELY (no stamp, no TTL wait).
 	const dirD = taskDir("pass-ack");
 	const wD = mkWorker(dirD, "r-ack");
@@ -490,7 +529,7 @@ function dOwnCheckLegacy(t: FakeTransport): boolean {
 	writeValidReport(dirE, "r-foreign");
 	const tOwn = fakeTransport();
 	await retirePass(tOwn, snapshotFor([wForeign], [DONE("r-foreign")]), { nowMs: NOW + 900_000, retireEnabled: true, retireTtlMs: 900_000, selfSessionFile: "/tmp/sessions/orch-b.jsonl" });
-	check("R5.10 foreign-owned worker: NO stamp, NO close", tOwn.teardownCalls.length === 0 && manifestFromDisk(dirE).workers[0]?.retirableSince !== undefined);
+	check("R5.10 foreign-owned worker: NO stamp, NO close", tOwn.teardownCalls.length === 0 && manifestFromDisk(dirGone).workers[0]?.retirableSince !== undefined);
 	const dOwn = await retirePass(tOwn, snapshotFor([wForeign], [DONE("r-foreign")]), { nowMs: NOW + 900_000, retireEnabled: true, retireTtlMs: 900_000, selfSessionFile: ORCH_A });
 	check("R5.10b the OWNING session retires it", tOwn.teardownCalls.length === 1 && dOwn[0]?.reason === "ttl");
 	// Degraded self-id (no sessionFile) fails CLOSED for a declared owner.
@@ -552,5 +591,76 @@ function dOwnCheckLegacy(t: FakeTransport): boolean {
 }
 
 rmSync(FIX, { recursive: true, force: true });
+
+// ---------------------------------------------------------------------------
+// R7. Archive-at-retire (diag-retire-msg Q3 item 1): a TTL retire of an
+// UNCOLLECTED worker must not orphan the report — retirePass calls the
+// archive helper after stamping retiredAt, so the report + manifest snapshot
+// survive the worktree teardown. Idempotent: a second retire pass (history,
+// skipped) or a re-archive must not duplicate the copy.
+// ---------------------------------------------------------------------------
+
+{
+	const dir = taskDir("archive");
+	const w = mkWorker(dir, "r-archive");
+	writeManifestOnDisk(dir, [w]);
+	writeValidReport(dir, "r-archive");
+	const t = fakeTransport();
+
+	// Tick 1: stamp the TTL clock. Tick 2: TTL elapsed → close + archive.
+	await retirePass(t, snapshotFor([w], [DONE("r-archive")]), { nowMs: NOW, retireEnabled: true, retireTtlMs: 900_000 });
+	const stamped = manifestFromDisk(dir).workers.find((x) => x.name === "r-archive");
+	const decisions = await retirePass(
+		t,
+		snapshotFor([{ ...w, retirableSince: stamped!.retirableSince }], [DONE("r-archive")]),
+		{ nowMs: NOW + 900_001, retireEnabled: true, retireTtlMs: 900_000 },
+	);
+	const archiveTaskDir = join(archiveRoot(), basename(dir));
+	const archivedReport = join(archiveTaskDir, `report-r-archive.json`);
+	check(
+		"R7.1 TTL retire of an uncollected worker archives the report",
+		decisions.length === 1 && existsSync(archivedReport),
+		archivedReport,
+	);
+	check(
+		"R7.2 the archive copy is byte-identical to the exchange report",
+		existsSync(archivedReport) && readFileSync(archivedReport, "utf8") === readFileSync(`${dir}/report-r-archive.json`, "utf8"),
+	);
+	check(
+		"R7.3 the archive carries a manifest snapshot (evidence outlives the worktree)",
+		existsSync(join(archiveTaskDir, "manifest.json")),
+	);
+
+	// Second retire pass: the worker is history (retiredAt) → skipped; the
+	// archive must NOT grow a duplicate.
+	const retiredEntry = manifestFromDisk(dir).workers.find((x) => x.name === "r-archive");
+	await retirePass(
+		t,
+		snapshotFor([{ ...w, retirableSince: stamped!.retirableSince, retiredAt: retiredEntry!.retiredAt }], [DONE("r-archive")]),
+		{ nowMs: NOW + 900_002, retireEnabled: true, retireTtlMs: 900_000 },
+	);
+	check(
+		"R7.4 second retire pass does not duplicate the archive (one report copy)",
+		existsSync(archivedReport) && readdirSync(archiveTaskDir).filter((f) => f.startsWith("report-")).length === 1,
+		JSON.stringify(readdirSync(archiveTaskDir)),
+	);
+
+	// Direct idempotency: re-archiving the SAME report rewrites in place —
+	// the naming mirrors collect (basename preserved, no prefix).
+	await retirePass(
+		t,
+		snapshotFor([{ ...w, retirableSince: stamped!.retirableSince, retiredAt: retiredEntry!.retiredAt }], [DONE("r-archive")]),
+		{ nowMs: NOW + 900_003, retireEnabled: true, retireTtlMs: 900_000 },
+	);
+	check(
+		"R7.5 re-archive keeps exactly one copy (idempotent naming)",
+		readdirSync(archiveTaskDir).filter((f) => f.startsWith("report-")).length === 1,
+	);
+}
+
+rmSync(FIX, { recursive: true, force: true });
+rmSync(ARCHIVE_HOME, { recursive: true, force: true });
+if (SAVED_HOME === undefined) delete process.env.HOME;
+else process.env.HOME = SAVED_HOME;
 console.log(failures === 0 ? "\nALL RETIRE CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

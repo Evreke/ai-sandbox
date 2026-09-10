@@ -95,6 +95,7 @@ import {
 	archiveReport,
 	describeFleet,
 	ensureExchangeDir,
+	exchangeRoot,
 	persistTaskUsageSnapshot,
 	progressPathFor,
 	questionPathFor,
@@ -124,7 +125,8 @@ import {
 	resolveSpawnDefaults,
 	resolveTierTable,
 } from "./usage.ts";
-import { resolveCollectConfig, resolveWatchConfig, nudgeFailedPathFor } from "./observe.ts";
+import { resolveCollectConfig, resolveWatchConfig } from "./observe.ts";
+import { nudgeFailedPathFor } from "./exchange.ts";
 import { clampLines, notifyFleetIdle, renderDelegateLines } from "./fleet.ts";
 import {
 	CONTEXT_CRITICAL_PCT,
@@ -142,7 +144,7 @@ import {
 	type SpawnTier,
 	type Transport,
 	type WorkerReport,
-} from "./transport.ts";
+} from "./host.ts";
 
 // ===========================================================================
 // SECTION 1/2 — delegate_mailbox tool (DESIGN.md §12, §23)
@@ -482,7 +484,7 @@ export function registerMailboxTool(pi: import("@earendil-works/pi-coding-agent"
 							nudgeNote =
 								` Nudge prompt failed after ${NUDGE_ATTEMPTS} attempts (${errText(lastErr)}) — the answer IS posted at a-${params.name}.json ` +
 								`and a nudge-failed marker was written (${markerPath}): the watcher delivers the wake-up on its next tick. ` +
-								"If it does not, re-prompt the pane manually (herdr) or retry the steer.";
+								"If it does not, re-prompt the pane manually or retry the steer.";
 						} catch (markerErr) {
 							nudgeNote =
 								` Nudge prompt failed after ${NUDGE_ATTEMPTS} attempts (${errText(lastErr)}) — the answer file IS posted ` +
@@ -548,8 +550,11 @@ const SUBMIT_TIMEOUT_MS = 30_000;
 const PROBE_TIMEOUT_MS = 120_000;
 /** Exchange dir for probe runs — no brief/task, but placements must stay
  *  teardown- and status-visible (scanAllManifests covers every manifest under
- *  /tmp/exchange). */
-const PROBE_EXCHANGE_DIR = "/tmp/exchange/_probe";
+ *  the exchange root). Derived from exchangeRoot() so sandboxed tests
+ *  ($PI_DELEGATE_EXCHANGE_ROOT) never touch the live /tmp/exchange root. */
+function probeExchangeDir(): string {
+	return `${exchangeRoot()}/_probe`;
+}
 /** Fixed probe prompt (DESIGN.md §5.1 step 4). */
 const PROBE_PROMPT = "Reply with exactly: OUTPUT: OK";
 /** Settle-vs-report race grace window: settle can fire before the report file
@@ -749,10 +754,10 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 		name: "delegate",
 		label: "Delegate",
 		description:
-			"Spawn one herdr worker (worktree or tab), brief it, block until it settles, and validate its JSON report. " +
+			"Spawn one worker (worktree or tab), brief it, block until it settles, and validate its JSON report. " +
 			"mode 'probe' is the explicit smoke gate — run one probe before any ≥3 fan-out. " +
 			"Esc detaches without killing the worker. Report status 'fail' still means the worker ran and reported honestly.",
-		promptSnippet: "Spawn a herdr worker with a brief file and block until its report lands",
+		promptSnippet: "Spawn a worker with a brief file and block until its report lands",
 		promptGuidelines: [
 			"Use delegate only after the brief file exists under /tmp/exchange/<task>/ — pass its path as briefPath; the brief is the worker's instructions and its OUTPUT section must point at report-<name>.json.",
 			"delegate blocks until the worker settles; the worker's report file is the completion criterion, not the agent status — status fail in the report is still an honest completion.",
@@ -875,7 +880,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				return fail(
 					"E_NAME",
 					`E_NAME — invalid worker name "${params.name}". ` +
-						"Names must match [a-z][a-z0-9_-]{0,31}; use the canonical name herdr returns when retrying.",
+						"Names must match [a-z][a-z0-9_-]{0,31}; use the canonical name (read back at start) when retrying.",
 				);
 			}
 
@@ -893,7 +898,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 					});
 				}
 			}
-			const manifestDir = exchangeDir ?? PROBE_EXCHANGE_DIR;
+			const manifestDir = exchangeDir ?? probeExchangeDir();
 
 			// Dual-gauge governor (DESIGN.md §20): refuse to re-spawn a worker whose
 			// recorded session tripped EITHER gauge — context % (primary, pi's own
@@ -989,7 +994,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				return fail(
 					"E_PLACE",
 					`E_PLACE — ${mode} placement failed for ${params.name}: ${errText(err)}\n` +
-						"Reconcile via `herdr workspace list`, then retry with a fresh delegate call.",
+						"Reconcile via /delegate-teardown or the host workspace listing, then retry with a fresh delegate call.",
 					{ name: params.name, mode, stderr: errText(err) },
 				);
 			}
@@ -1044,21 +1049,33 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 						{ description: fleetDescription, masterSessionPath: orchestratorSessionPath },
 					),
 				);
+				// F6 review fix: a same-name retry is a NEW worker lifecycle — any
+				// stale nudge-failed-<name>.json from the previous worker of the same
+				// name is history. Without this cleanup a fresh watcher session would
+				// re-fire the old marker once (its seen-dedup is per-lifetime).
+				try {
+					await rm(nudgeFailedPathFor(manifestDir, params.name), { force: true });
+				} catch {
+					// advisory cleanup — the marker's own ts fingerprint keeps old
+					// events deduped within an existing watcher
+				}
 			} catch (err) {
 				manifestWarning = `Manifest update failed (${errText(err)}) — teardown/audit for this placement is degraded; record it manually.`;
 			}
 
 			// 4. Start the agent; read back the canonical name.
-			step(`Starting agent in pane ${placement.paneId} (provider=${provider}, model=${model}, thinking=${thinking})…`, {
+			step(`Starting agent in placement ${placement.placementRef ?? placement.paneId} (provider=${provider}, model=${model}, thinking=${thinking})…`, {
 				phase: "start",
 				name: params.name,
-				paneId: placement.paneId,
+				placementRef: placement.placementRef ?? placement.paneId,
 			});
 			let start;
 			try {
 				start = await transport.startAgent({
 					name: params.name,
-					paneId: placement.paneId,
+					// Workerhost inversion (design §3): StartReq keyed by the opaque ref;
+					// legacy pane id as fallback so pre-ref placement records still start.
+					placementRef: placement.placementRef ?? placement.paneId,
 					provider: provider as string,
 					model: model as string,
 					thinking: thinking as string,
@@ -1069,9 +1086,10 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				// The manifest entry was appended BEFORE startAgent (step 3, deliberate
 				// teardown-safety invariant — do not move the append). A refused start
 				// would leave a phantom entry with no sessionPath, so roll back ONLY the
-				// entry THIS call appended: match by requested name + this call's paneId
-				// and only if it never gained a sessionPath — a pre-existing same-name
-				// worker (its own paneId / a real sessionPath) is preserved.
+				// entry THIS call appended: match by requested name + this call's
+				// placement ref (legacy pane id fallback) and only if it never gained a
+				// sessionPath — a pre-existing same-name
+				// worker (its own placement / a real sessionPath) is preserved.
 				try {
 					await updateManifest(manifestDir, (m) => ({
 						...m,
@@ -1079,21 +1097,22 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 							(w) =>
 								!(
 									w.name === params.name &&
-									w.placement.paneId === placement.paneId &&
+									(w.placement.placementRef ?? w.placement.paneId) ===
+										(placement.placementRef ?? placement.paneId) &&
 									!w.sessionPath
 								),
 						),
 					}));
 				} catch {
 					// Best-effort rollback — the failure text below already points at
-					// manual reconciliation via /delegate-teardown / herdr workspace list.
+					// manual reconciliation via /delegate-teardown.
 				}
 				return fail(
 					"E_START",
 					`E_START — agent start failed for ${params.name}: ${errText(err)}\n` +
 						"Check pane readiness; a retry is a new delegate call. " +
 						(manifestWarning
-							? `Placement NOT tracked in manifest (${manifestWarning}) — clean it up manually via \`herdr workspace list\`.`
+							? `Placement NOT tracked in manifest (${manifestWarning}) — clean it up manually via /delegate-teardown or the host workspace listing.`
 							: "Placement tracked in manifest — run /delegate-teardown to clean up."),
 					{ name: params.name, placement, stderr: errText(err) },
 				);
@@ -1108,7 +1127,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			// keep working.
 			let sessionPath: string | undefined = start.sessionPath;
 			const uniquified = canonical !== params.name
-				? `Note: herdr uniquified the requested name "${params.name}" → "${canonical}".`
+				? `Note: the host uniquified the requested name "${params.name}" → "${canonical}".`
 				: "";
 
 			// Fleet journal (§19.4): record the spawn as soon as the placement is
@@ -1144,9 +1163,10 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				try {
 					await updateManifest(manifestDir, (m) => ({
 						...m,
-						workers: m.workers.map((w) =>
-							w.name === params.name && w.placement.paneId === placement.paneId
-								? ({
+					workers: m.workers.map((w) =>
+						w.name === params.name &&
+						(w.placement.placementRef ?? w.placement.paneId) === (placement.placementRef ?? placement.paneId)
+							? ({
 									...w,
 									name: canonical,
 									reportPath: canonicalReportPath,
@@ -1674,7 +1694,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				return fail(
 					"E_TIMEOUT",
 					`E_TIMEOUT — settle observation for ${canonical} failed: ${errText(err)}\n` +
-						"Status unknown (worker may have exited or herdr is unreachable) — the watcher reports " +
+						"Status unknown (worker may have exited or the host is unreachable) — the watcher reports " +
 						"worker-dead if it truly died; check delegate_status, never repeat delegate." +
 						b.line,
 					{
@@ -1744,7 +1764,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 					return fail(
 						"E_START",
 						`probe FAIL — worker never started (prompt never consumed) for ${canonical}; ` +
-							"inspect via herdr agent read; do NOT fan out. Probes write no report file." +
+							"inspect the pane via a pane read (readPane); do NOT fan out. Probes write no report file." +
 							`${uniquified ? ` ${uniquified}` : ""}` +
 							`${manifestWarning ? ` Warning: ${manifestWarning}` : ""}`,
 						{ probe: "fail", canonical, placement, neverStarted: true, elapsedMs },
@@ -1830,7 +1850,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				// owns the wait. Polling stays valid, bash sleep does not.
 				const statusLine =
 					settle.status === "unknown"
-						? "status unknown — worker may have exited or herdr is unreachable"
+						? "status unknown — worker may have exited or the host is unreachable"
 						: `status ${settle.status} — still running`;
 				const b = gaugeSummary();
 				return fail(
@@ -1941,7 +1961,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			if (collected.verdict.ok) {
 				const note =
 					(collected.fallbackUsed
-						? `Note: report collected from ${collected.usedPath} — the brief pointed the worker at the requested name while herdr recorded the canonical one. `
+						? `Note: report collected from ${collected.usedPath} — the brief pointed the worker at the requested name while the host recorded the canonical one. `
 						: "") +
 					(graceAttempt > 0
 						? `(report landed after settle — collected on grace recheck ${graceAttempt}/${GRACE_RECHECKS}) `
@@ -1996,7 +2016,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				`${code} — worker ${canonical} settled but ${what}.\n` +
 					"Treat as a failed spawn: do a diagnosed retry with root cause + fix shape (at most 2 repeats, then escalate). " +
 					"The retry MUST use a NEW worker name (e.g. <name>-r2) — the original name stays taken by the settled agent. " +
-					"Read the worker's pane via herdr before retrying to find the actual root cause." +
+					"Read the worker's pane before retrying to find the actual root cause." +
 					schemaNote +
 					`${uniquified ? ` ${uniquified}` : ""}` +
 					b.line,

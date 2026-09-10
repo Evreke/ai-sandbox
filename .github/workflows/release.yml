@@ -1,0 +1,110 @@
+# Release — runs on every push to main (i.e. after a squash-merge).
+# AGENTS.md contract: the HUMAN bumps version + changelog in a release PR;
+# this workflow owns ONLY tagging: if package.json version is higher than the
+# latest v* tag, rerun the suite, create the semver tag and a GitHub Release
+# with notes extracted from the fresh CHANGELOG section. No version bump →
+# no tag (docs-only merges land silently).
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  tag-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history — needed for `git tag` comparison
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # Same as ci.yml: typebox is a peerDependency, the checkout has no
+      # node_modules — without the install every check that spawns a bun
+      # subprocess fails with a package-resolution error.
+      - name: Install dependencies (frozen lockfile)
+        working-directory: pi/extensions/pi-delegate
+        run: bun install --frozen-lockfile
+
+      # The tag must only ever point at green code: a squash-merge is a NEW
+      # commit, so re-run the suite here even though the PR already passed CI.
+      - name: Run check suite on main before tagging
+        working-directory: pi/extensions/pi-delegate
+        run: |
+          set -e
+          for f in test/*.ts; do
+            bun run "$f" || bun test "./$f"
+          done
+
+      - name: Version sync (both package.json ship together)
+        id: sync
+        run: |
+          root=$(node -p "require('./package.json').version")
+          ext=$(node -p "require('./pi/extensions/pi-delegate/package.json').version")
+          if [ "$root" != "$ext" ]; then
+            echo "::error::version mismatch: root ($root) != extension ($ext) — refusing to tag"
+            exit 1
+          fi
+          echo "version=$root" >> "$GITHUB_OUTPUT"
+
+      - name: Decide whether a tag is needed
+        id: need
+        run: |
+          version="${{ steps.sync.outputs.version }}"
+          latest=$(git tag -l 'v*' --sort=-v:refname | head -1)
+          echo "version=$version latest_tag=${latest:-none}"
+          if [ -z "$latest" ]; then
+            echo "need=true" >> "$GITHUB_OUTPUT" # first release
+          elif [ "$version" = "${latest#v}" ]; then
+            echo "need=false" >> "$GITHUB_OUTPUT" # no bump — docs-only merge
+          elif [ "$(printf '%s\n%s\n' "$version" "${latest#v}" | sort -V | tail -1)" = "$version" ]; then
+            echo "need=true" >> "$GITHUB_OUTPUT" # semver increment
+          else
+            echo "::error::package.json version ($version) is LOWER than the latest tag ($latest) — a bump was lost or reverted; fix the version in a fix/ PR"
+            exit 1
+          fi
+
+      - name: Extract fresh CHANGELOG section (release notes)
+        if: steps.need.outputs.need == 'true'
+        id: notes
+        run: |
+          version="${{ steps.sync.outputs.version }}"
+          body=$(awk -v ver="[$version]" '
+            /^## \[/ { if (found) exit; if (index($0, ver) != 0) { found=1; print; next } }
+            found { print }
+          ' pi/extensions/pi-delegate/CHANGELOG.md)
+          if [ -z "$body" ]; then
+            echo "::error::no CHANGELOG section for [$version] — the release PR must add one (Keep a Changelog format)"
+            exit 1
+          fi
+          {
+            echo "body<<EOF"
+            echo "$body"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create semver tag
+        if: steps.need.outputs.need == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${{ steps.sync.outputs.version }}" -m "Release v${{ steps.sync.outputs.version }}"
+          git push origin "v${{ steps.sync.outputs.version }}"
+
+      - name: Create GitHub Release
+        if: steps.need.outputs.need == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v${{ steps.sync.outputs.version }}"
+          name: "v${{ steps.sync.outputs.version }}"
+          body: "${{ steps.notes.outputs.body }}"

@@ -82,13 +82,13 @@ import type {
 	Placement,
 	ProgressEvent,
 	WorkerReport,
-} from "./transport.ts";
+} from "./host.ts";
 import {
 	isProgressEvent,
 	isQuestionEnvelope,
 	type AnswerEnvelope,
 	type QuestionEnvelope,
-} from "./transport.ts";
+} from "./host.ts";
 // typebox Value.Check/Errors — NOTE: the contract's deep specifiers
 // ("typebox/build/value/check/check.mjs") are blocked by typebox 1.3.7's
 // exports map (ERR_PACKAGE_PATH_NOT_EXPORTED, verified via node + jiti);
@@ -116,8 +116,26 @@ import { parseSessionUsage } from "./usage.ts";
  */
 
 
-/** Exchange root — all task dirs live directly under it. */
-const EXCHANGE_ROOT = "/tmp/exchange";
+/**
+ * Exchange root — all task dirs live directly under it.
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: none
+ * Output: the absolute exchange root path
+ * Guarantees:
+ *   - default /tmp/exchange (production behavior unchanged)
+ *   - $PI_DELEGATE_EXCHANGE_ROOT overrides it — test-fixture sandboxing:
+ *     test manifests are written under mkdtemp dirs, NEVER into the live
+ *     /tmp/exchange root (field lesson 2026-09-10: a PoC test manifest in
+ *     the live root woke a bystander orchestrator through the fail-open
+ *     legacy manifest scan)
+ * Raises: never
+ * EXTERNAL_DEPENDENCY: filesystem path + $PI_DELEGATE_EXCHANGE_ROOT (test
+ *   override; unset in production).
+ */
+export function exchangeRoot(): string {
+	return process.env.PI_DELEGATE_EXCHANGE_ROOT || "/tmp/exchange";
+}
 
 export interface ManifestWorker {
 	/** Canonical (herdr-confirmed) name. */
@@ -258,13 +276,13 @@ export function ensureExchangeDir(briefPathRaw: string): ExchangeDir {
 	const task = basename(dir);
 	const parent = dirname(dir);
 
-	if (resolve(parent) !== EXCHANGE_ROOT) {
+	if (resolve(parent) !== exchangeRoot()) {
 		throw new ExchangeDelegateError(
 			"E_BRIEF",
-			`Brief must live directly inside ${EXCHANGE_ROOT}/<task>/ — parent dir of "${dir}" is "${parent}"`,
+			`Brief must live directly inside ${exchangeRoot()}/<task>/ — parent dir of "${dir}" is "${parent}"`,
 		);
 	}
-	if (!task || task === basename(EXCHANGE_ROOT)) {
+	if (!task || task === basename(exchangeRoot())) {
 		throw new ExchangeDelegateError("E_BRIEF", `Missing task slug in brief path: "${brief}"`);
 	}
 
@@ -636,13 +654,15 @@ function baseValidate(
  *     corrupt manifests are skipped individually
  *   - order follows directory listing order (not sorted)
  * Raises: never
- * EXTERNAL_DEPENDENCY: /tmp/exchange — the hard-coded EXCHANGE_ROOT
- *   (filesystem path; must exist or the scan returns nothing).
+ * EXTERNAL_DEPENDENCY: the exchange root (exchangeRoot() — /tmp/exchange by
+ *   default, $PI_DELEGATE_EXCHANGE_ROOT override for sandboxed tests;
+ *   must exist or the scan returns nothing).
  */
 export function scanAllManifests(): ExchangeManifest[] {
+	const root = exchangeRoot();
 	let entries: string[];
 	try {
-		entries = readdirSync(EXCHANGE_ROOT, { withFileTypes: true })
+		entries = readdirSync(root, { withFileTypes: true })
 			.filter((e) => e.isDirectory())
 			.map((e) => e.name);
 	} catch {
@@ -650,10 +670,41 @@ export function scanAllManifests(): ExchangeManifest[] {
 	}
 	const manifests: ExchangeManifest[] = [];
 	for (const task of entries) {
-		const m = readManifest(resolve(EXCHANGE_ROOT, task));
-		if (m) manifests.push(m);
+		const m = readManifest(resolve(root, task));
+		if (!m) continue;
+		manifests.push(filterForeignBackendWorkers(m));
 	}
 	return manifests;
+}
+
+/** The backend this build binds (index.ts createConfiguredHost — "herdr" is
+ *  the only production adapter). Legacy manifests (no backend) fail OPEN:
+ *  every pre-workerhost entry is herdr by definition. */
+const ACTIVE_HOST = "herdr";
+
+/**
+ * Drop manifest worker entries whose placement declares a backend this
+ * session's host cannot see (field lesson 2026-09-10, workerhost migration
+ * step 4: a test fixture with backend:"fake" in the LIVE exchange root woke
+ * a bystander orchestrator — the legacy scan was fail-open on ANY entry).
+ * Legacy entries (no/blank backend) are kept unchanged. Tolerant: a garbage
+ * placement reads as legacy (no backend) → kept, never throws.
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: m — a parsed manifest
+ * Output: the same manifest with foreign-backend worker entries removed
+ * Guarantees:
+ *   - backend === ACTIVE_HOST or absent → entry kept (legacy fail-open)
+ *   - a different non-empty backend → entry skipped (never wakes this host)
+ *   - the manifest object is not mutated in place when nothing is dropped
+ * Raises: never
+ */
+function filterForeignBackendWorkers(m: ExchangeManifest): ExchangeManifest {
+	const kept = m.workers.filter((w) => {
+		const backend = (w as { placement?: { backend?: unknown } } | null)?.placement?.backend;
+		return !(typeof backend === "string" && backend.length > 0 && backend !== ACTIVE_HOST);
+	});
+	return kept.length === m.workers.length ? m : { ...m, workers: kept };
 }
 
 // ---------------------------------------------------------------------------
@@ -732,6 +783,60 @@ export function questionPathFor(dir: string, name: string): string {
 
 export function answerPathFor(dir: string, name: string): string {
 	return `${dir}/a-${name}.json`;
+}
+
+// ---------------------------------------------------------------------------
+// F6 — nudge-failed marker (mailbox answer posted, pane nudge failed)
+// ---------------------------------------------------------------------------
+
+/** Conventional nudge-failed marker path — next to the brief, worker-scoped. */
+export function nudgeFailedPathFor(dir: string, name: string): string {
+	return `${dir}/nudge-failed-${name}.json`;
+}
+
+/** Mailbox tool → watcher fallback marker (nudge-failed-<name>.json): written
+ *  by the delegate_mailbox answer/steer handler when the pane nudge fails after
+ *  retries; the watcher delivers the wake-up on the next tick instead of the
+ *  socket. Consumed (deleted) by a SUBSEQUENT successful nudge AND by a fresh
+ *  same-name spawn (both in spawn.ts) — so a stale marker can only ever fire
+ *  once for a new watcher session, and only as an advisory wake. */
+export interface NudgeFailedEnvelope {
+	name: string;
+	ts: string;
+	error: string;
+}
+
+/**
+ * Tolerantly read a nudge-failed marker; null when absent/invalid.
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: path to nudge-failed-<name>.json
+ * Output: the parsed envelope, or null when the file is absent, unreadable,
+ *   corrupt JSON, or has no non-empty string `ts` (the fingerprint source)
+ * Guarantees: never throws; a torn mid-write read degrades to null and the
+ *   detection simply re-fires on a later tick (the marker stays on disk)
+ * Raises: never
+ */
+export function readNudgeFailedMarker(path: string): NudgeFailedEnvelope | null {
+	let raw: string;
+	try {
+		raw = readFileSync(path, "utf8");
+	} catch {
+		return null; // absent/unreadable → no marker
+	}
+	try {
+		const parsed: unknown = JSON.parse(raw);
+		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+		const o = parsed as Record<string, unknown>;
+		if (typeof o.ts !== "string" || o.ts.length === 0) return null;
+		return {
+			name: typeof o.name === "string" ? o.name : "",
+			ts: o.ts,
+			error: typeof o.error === "string" ? o.error : "",
+		};
+	} catch {
+		return null; // corrupt JSON → no marker, never throw
+	}
 }
 
 // ---------------------------------------------------------------------------

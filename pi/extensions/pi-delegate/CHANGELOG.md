@@ -6,6 +6,130 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Version numbers align with the iteration numbering in DESIGN.md (v1.x sections).
 
+## [1.16.0] — 2026-09-10
+
+### Changed
+
+- **WorkerHost inversion (migration complete)**: the herdr boundary is now a
+  backend-neutral seam (`src/host.ts`, type name `Transport` kept) plus a
+  herdr adapter (`src/herdr/host.ts`) bound once in `index.ts` from the
+  config's `"host"` key (default `herdr`; unknown value → structured error).
+  The `src/transport.ts` re-export shim is deleted. Zero behavior change on
+  the herdr path; the in-memory fake (`src/host/fake.ts`) ships as the
+  second adapter (PoC promoted).
+- **Opaque `placementRef` threading**: `StartReq` is keyed by an
+  adapter-defined `placementRef` (herdr ids left the seam read model —
+  `AgentStatus` is `{name, status, placementRef?}`); spawn manifest
+  dedup/rollback matches on name+placementRef with a legacy-paneId fallback;
+  the retire closeability gate is ref-aware.
+- **Neutralized texts**: all 19 model/user-facing herdr-specific command
+  names in tool descriptions, event messages and error guidance replaced
+  with backend-neutral phrasing (retry/mailbox/escalation semantics
+  unchanged); herdr CLI recipes stay inside adapter error messages.
+- **Watcher log UX**: routine watcher bookkeeping (e.g. retire successes) no
+  longer surfaces in the pane — every line goes to the audit file
+  `~/.pi/agent/delegate-watch.log`; the pane shows only errors and anomalies.
+
+### Fixed
+
+- **Duplicate report-ready wake-ups (true defect, diag D1)**: the watcher's
+  dedup state reset treated a no-observation tick (transient report ENOENT)
+  as "condition stopped being true" and forgot fingerprinted seen-keys —
+  the same report fired twice with an UNCHANGED mtime. Fingerprinted kinds
+  keep their key until the worker vanishes or the fingerprint changes
+  (regression: W16.16).
+- **Foreign-fleet wake broadcast narrowed (diag B1)**: the ownership gate
+  consults the manifest-level `masterSessionPath` when a worker entry lacks
+  `orchestratorSessionPath` — a known foreign owner stays silent; fail-open
+  remains only for manifests with no owner field anywhere (W14.18–W14.23).
+- **Archive-at-retire**: a TTL auto-retire of an UNCOLLECTED worker no
+  longer orphans its report — retirePass archives the report + manifest
+  snapshot before teardown (idempotent; retire-check R7).
+- **herdr tab-id drift (implement-osb field report)**: herdr renamed the
+  tab-create result key `tab.id` → `tab.tab_id`; the parser missed the new
+  spelling and recorded the PANE id as `tabId`, so every autonomous tab close
+  failed `tab_not_found` while the agent stayed alive (the paneId fallback
+  also masked the failure as an idempotent retire). The parser now reads the
+  current spelling (legacy accepted), `AgentStatus` carried `tabId` during
+  the transition, and teardown re-resolves the live tab id from the herdr
+  registry when the recorded one carries the broken paneId-fallback signature.
+- **Worktree teardown idempotency (parity-pin find)**: a SECOND teardown of
+  an already-removed worktree failed E_PLACE with herdr
+  `workspace_not_found`; the seam contract (and the fake, and the tool
+  layer's already-gone handling) requires a no-op success. Not-found-shaped
+  removal errors are now idempotent in the herdr adapter.
+- **`/delegate-teardown` output**: manifest history entries (retired workers
+  are never deleted) are skipped with a count instead of being attempted —
+  no more wall of `tab_not_found` errors for long-closed workers; a
+  not-found close inside the command is a clean "already closed, no-op".
+- **Stale nudge-failed marker**: a same-name retry deletes any leftover
+  marker at spawn (a fresh watcher session would re-fire it once).
+- **Fixture hygiene / manifest scan backend gate** (field lesson
+  2026-09-10): a test manifest written into the live /tmp/exchange root
+  woke a bystander orchestrator through the fail-open legacy scan. The scan
+  now drops entries whose placement declares a non-empty backend other than
+  the active host; the exchange root is overridable via
+  `$PI_DELEGATE_EXCHANGE_ROOT` and all test fixtures sandbox under mkdtemp
+  dirs.
+- Root `package.json` version synced to the extension's (1.15.1 divergence).
+
+### Added
+
+- **F6 — two-tier delegation wake-up**: a session that is a worker of a parent
+  manifest AND the orchestrator of its own child manifests (a tier-1 lead)
+  now mounts a watcher scoped to ITS OWN children — tier-2 report-ready/
+  mailbox-question wakes the lead without meta-orchestrator nudges. The
+  pre-existing `createWatcher` leafWorker mute is scoped the same way.
+- **Mailbox nudge resilience**: the answer/steer pane nudge retries with
+  backoff (3 attempts); on repeated failure a watcher-visible
+  `nudge-failed-<name>.json` marker delivers the wake-up on the next tick
+  instead of the socket (kind `nudge-failed`, fingerprint = marker ts).
+- **Trunk-based development + CI**: PR-gated squash-only flow (AGENTS.md);
+  GitHub Actions — `ci.yml` (bun check suite + package.json version sync on
+  every PR) and `release.yml` (on main: rerun suite → semver tag → GitHub
+  Release with notes from the fresh CHANGELOG section).
+- **host-parity pin** (`test/host-parity-check.ts`): one place → manifest →
+  teardown flow asserted on BOTH adapters — fake always (CI), real herdr
+  behind the existing `herdr --version` skip guard.
+- Static pins re-targeted after the split: T1.1d (the seam imports node
+  builtins only), T1.1c positive pin (only index.ts imports the adapter).
+
+### Fixed
+
+- **herdr tab-id drift (implement-osb field report)**: herdr renamed the
+  tab-create result key `tab.id` → `tab.tab_id`; the parser missed the new
+  spelling and recorded the PANE id as `tabId`, so every autonomous tab close
+  failed `tab_not_found` while the agent stayed alive (the paneId fallback
+  also masked the failure as an idempotent retire). The parser now reads the
+  current spelling (legacy accepted), `AgentStatus` carries `tabId`, and
+  teardown re-resolves the live tab id from the herdr registry when the
+  recorded one carries the broken paneId-fallback signature.
+- **Retire pass idempotency**: a herdr "not found" during the autonomous
+  close (pane already gone) is treated as a successful retire — no more
+  `tab_not_found` error spam every tick; genuine teardown failures keep the
+  advisory retry.
+- **`/delegate-teardown` output**: manifest history entries (retired workers
+  are never deleted) are skipped with a count instead of being attempted —
+  the command no longer prints a wall of `tab_not_found` errors for
+  long-closed workers; a not-found close inside the command is a clean
+  "already closed, no-op" success (parity with the retire pass).
+- **Stale nudge-failed marker**: a same-name retry deletes any leftover
+  marker at spawn (a fresh watcher session would re-fire it once).
+- `nudgeFailedPathFor`/`readNudgeFailedMarker` moved to `exchange.ts`
+  (module boundary — exchange-dir conventions live there).
+- Root `package.json` version synced to the extension's (1.15.1 divergence).
+- Legacy fail-open ownership for worker-orchestrators is pinned by tests
+  (W16.14/W16.15) — a deliberate policy, now a conscious one.
+
+### Changed
+
+- README rebuilt bilingual (EN/RU) with header cross-links; the field case
+  study and client identifiers removed from the public surface (NDA scrub).
+- **Watcher log UX**: routine watcher bookkeeping (e.g. routine retire
+  successes) no longer surfaces in the pane — every line goes to the audit
+  file `~/.pi/agent/delegate-watch.log`; the pane shows only errors and
+  anomalies (close failures, "pane was already gone").
+
 ## [1.15.0] — 2026-09-09
 
 ### Added

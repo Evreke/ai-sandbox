@@ -41,7 +41,10 @@ import {
 	resolveSpawnDefaults,
 	resolveTierTable,
 } from "../src/usage.ts";
-import { CONTEXT_WINDOWS, DEFAULT_CONTEXT_WINDOW } from "../src/transport.ts";
+import {
+	CONTEXT_WINDOWS,
+	DEFAULT_CONTEXT_WINDOW,
+} from "../src/host.ts";
 
 let failures = 0;
 

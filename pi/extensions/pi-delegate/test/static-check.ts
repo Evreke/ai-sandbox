@@ -19,7 +19,12 @@
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { WORKER_NAME_RE } from "../src/transport.ts";
+import {
+	WORKER_NAME_RE,
+} from "../src/host.ts";
+import {
+	placementFromTabResult,
+} from "../src/herdr/host.ts";
 import { validateReport } from "../src/exchange.ts";
 
 const ROOT = resolve(dirname(process.argv[1] ?? "."), "..");
@@ -48,19 +53,63 @@ function listTsFiles(dir: string): string[] {
 }
 
 const restricted = listTsFiles(resolve(ROOT, "src"));
-// Match actual import statements (from "...transport/herdr(.ts)"), not doc-comment mentions.
-const IMPORT_HERDR_RE = /(import[\s\S]*?from\s*["']|\bimport\s*["'])([^"']*transport\/herdr)["']/;
-const offenders = restricted.filter((f) => IMPORT_HERDR_RE.test(readFileSync(f, "utf8")));
+// Match actual import statements (from "...transport/herdr(.ts)" / "...herdr/host(.ts)"),
+// not doc-comment mentions. Path updated for the workerhost seam split (PoC):
+// the herdr implementation moved to src/herdr/host.ts; the legacy
+// transport/herdr path stays in the matcher so a revert cannot pass vacuously.
+// NOTE: trailing [^"']* before the closing quote — extensioned imports
+// ("./herdr/host.ts") must match too. The pre-split regex required the path to
+// END at transport/herdr, so it matched NOTHING on extensioned imports and
+// passed vacuously (found by this PoC's efficacy proof — the positive pin
+// T1.1c below was what caught the offender).
+const IMPORT_HERDR_RE = /(import[\s\S]*?from\s*["']|\bimport\s*["'])([^"']*(transport\/herdr|herdr\/host))[^"']*["']/;
+const offenders = restricted
+	.filter((f) => IMPORT_HERDR_RE.test(readFileSync(f, "utf8")));
 check(
-	"T1.1 dependency rule: no src/ module ever imports transport/herdr.ts (herdr impl bound in index.ts only)",
+	"T1.1 dependency rule: no src/ module ever imports the herdr implementation (src/herdr/host.ts; only index.ts binds it)",
 	offenders.length === 0,
 	offenders.join(", "),
 );
 
-const indexImportsHerdr = readFileSync(resolve(ROOT, "index.ts"), "utf8").includes(
-	"./src/transport.ts",
+// Positive pin (workerhost split PoC, design §6 risk 1): the herdr adapter file
+// EXISTS and is imported ONLY by index.ts (the composition root / binding
+// point, workerhost migration steps 5–6) — a tool module importing the
+// adapter directly (or the file going missing) fails here. Direction note:
+// this pin is fail-CLOSED on the file (existence is asserted, unlike the
+// vacuous-pass risk of a no-offender regex after a rename).
+const herdrHostPath = resolve(ROOT, "src/herdr/host.ts");
+let herdrHostExists = false;
+try {
+	statSync(herdrHostPath);
+	herdrHostExists = true;
+} catch {
+	herdrHostExists = false;
+}
+const herdrHostImporters = [...restricted, resolve(ROOT, "index.ts")]
+	.filter((f) => f !== herdrHostPath)
+	.filter((f) => /from\s*["'][^"']*herdr\/host\.ts["']/.test(readFileSync(f, "utf8")) || /import\s*["'][^"']*herdr\/host\.ts["']/.test(readFileSync(f, "utf8")));
+check(
+	"T1.1c src/herdr/host.ts exists and is imported ONLY by index.ts (positive pin — the composition root is the sole adapter importer)",
+	herdrHostExists && herdrHostImporters.every((f) => f === resolve(ROOT, "index.ts")),
+	`exists=${herdrHostExists} importers=${herdrHostImporters.join(", ")}`,
 );
-check("T1.1b index.ts DOES import src/transport.ts (transport injection point)", indexImportsHerdr);
+
+const indexImportsHerdr = readFileSync(resolve(ROOT, "index.ts"), "utf8").includes(
+	"./src/herdr/host.ts",
+);
+check("T1.1b index.ts DOES import src/herdr/host.ts (adapter binding point, workerhost migration step 6)", indexImportsHerdr);
+
+// Bottom-of-graph pin (workerhost inversion, research risk #2): the seam
+// module imports node builtins ONLY — zero relative/src imports (error
+// guidance strings and helpers get DUPLICATED into it, never imported from
+// tool modules — a shared helper would drag the whole graph under the seam).
+const hostSrc = readFileSync(resolve(ROOT, "src/host.ts"), "utf8");
+const hostRelativeImports = hostSrc.match(/from\s*["']\.[^"']*["']/g) ?? [];
+check(
+	"T1.1d src/host.ts (the seam) imports node builtins only — no relative imports (bottom of the graph)",
+	hostRelativeImports.length === 0,
+	hostRelativeImports.join(", "),
+);
 
 // ---------------------------------------------------------------------------
 // 1.5 No hardcoded worker tier in src/ (v1.9.2)
@@ -267,6 +316,81 @@ check(
 check(
 	"T2.4 the mandate names the suffixed shape explicitly (<name>-r2) — a same-name retry must read as impossible",
 	/<name>-r2/.test(delegateSrc) && /name stays taken/.test(delegateSrc),
+);
+
+// ---------------------------------------------------------------------------
+// 7. herdr drift pins (2026-09-10 implement-osb field report): herdr renamed
+// tab-create result tab.id → tab.tab_id; the old probe list missed it and the
+// paneId fallback recorded pane ids as tabId — every tab close failed
+// tab_not_found while the agent stayed alive.
+// ---------------------------------------------------------------------------
+
+const CURRENT_TAB_SHAPE = {
+	id: "cli:tab:create",
+	result: {
+		root_pane: { pane_id: "wKD:p4", tab_id: "wKD:t4", workspace_id: "wKD" },
+		tab: { tab_id: "wKD:t4", label: "shape-probe", number: 4, pane_count: 1, workspace_id: "wKD" },
+		type: "tab_created",
+	},
+};
+const LEGACY_TAB_SHAPE = { result: { root_pane: { pane_id: "wKD:p4" }, tab: { id: "wKD:t4" } } };
+
+const tabPlacement = placementFromTabResult(CURRENT_TAB_SHAPE.result, "wKD", "raw");
+check("T3.1 current herdr shape: tabId parsed from tab.tab_id (NOT the paneId fallback)", tabPlacement.tabId === "wKD:t4" && tabPlacement.paneId === "wKD:p4", JSON.stringify(tabPlacement));
+const legacyTabPlacement = placementFromTabResult(LEGACY_TAB_SHAPE.result, "wKD", "raw");
+check("T3.2 legacy herdr shape (tab.id) still parses", legacyTabPlacement.tabId === "wKD:t4");
+check(
+	"T3.3 teardown reconciles the paneId-fallback signature: transport resolves the live tab id when recorded tabId === paneId",
+	(() => {
+		const transportSrc = readFileSync(resolve(ROOT, "src/herdr/host.ts"), "utf8");
+		return /resolveLiveTabId\(req\.name\)/.test(transportSrc) && /recordedTabId === req\.placement\.paneId/.test(transportSrc);
+	})(),
+);
+
+// ---------------------------------------------------------------------------
+// 8. Watcher log UX pin (2026-09-10): the production log sink must write an
+// audit file and surface to the pane ONLY errors/anomalies — routine retire
+// bookkeeping must never reach the user's UI again.
+// ---------------------------------------------------------------------------
+
+const observeSrcAll = readFileSync(resolve(ROOT, "src/observe.ts"), "utf8");
+check(
+	"T4.1 startWatcher's log sink audits to delegate-watch.log",
+	/log: \(m: string\) => \{[\s\S]{0,400}?delegate-watch\.log/.test(observeSrcAll),
+);
+check(
+	"T4.2 the sink filters: the pane shows only error/fail/already-gone/unavailable lines",
+	/log: \(m: string\) => \{[\s\S]{0,400}?already gone[\s\S]{0,200}?console\.error/.test(observeSrcAll),
+);
+check(
+	"T4.3 /delegate-teardown skips retired history instead of erroring tab_not_found on it",
+	/actionsble = views\.filter\(\(v\) => v\.retired !== true\)/.test(observeSrcAll) ||
+		/actionable = views\.filter\(\(v\) => v\.retired !== true\)/.test(observeSrcAll),
+);
+check(
+	"T4.4 the teardown command treats a not-found close as an idempotent no-op success",
+	/isAlreadyGone\(err\)[\s\S]{0,200}?already closed, no-op/.test(observeSrcAll),
+);
+check(
+	"T4.5 WorkerView carries the retired flag (manifest history marker)",
+	readFileSync(resolve(ROOT, "src/fleet.ts"), "utf8").includes("retired: typeof worker.retiredAt"),
+);
+
+// ---------------------------------------------------------------------------
+// 6. F6 review-fix pin — same-name spawn clears a stale nudge-failed marker
+// (review minor #1): the spawn flow deletes nudge-failed-<name>.json right
+// after appending the manifest entry, or a fresh watcher session would
+// re-fire the previous worker's marker once.
+// ---------------------------------------------------------------------------
+
+check(
+	"T2.5 the spawn flow removes a stale nudge-failed marker for the same name right after the manifest append",
+	/updateManifest\(manifestDir,[\s\S]{0,900}?rm\(nudgeFailedPathFor\(manifestDir, params\.name\), \{ force: true \}\)/.test(delegateSrc),
+);
+check(
+	"T2.6 nudge-failed path convention lives in exchange.ts (module boundary — exchange-dir artifacts are exchange.ts conventions)",
+	/\.\/exchange\.ts"/.test(readFileSync(resolve(ROOT, "src/spawn.ts"), "utf8")) &&
+		readFileSync(resolve(ROOT, "src/exchange.ts"), "utf8").includes("export function nudgeFailedPathFor"),
 );
 
 // ---------------------------------------------------------------------------

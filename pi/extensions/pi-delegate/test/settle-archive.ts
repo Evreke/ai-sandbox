@@ -13,10 +13,15 @@
 import { mkdtempSync, mkdirSync, existsSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DelegateErrorImpl, createHerdrTransport } from "../src/transport.ts";
+import {
+	DelegateErrorImpl,
+} from "../src/host.ts";
+import {
+	createHerdrTransport,
+} from "../src/herdr/host.ts";
 import { archiveReport, archiveRoot, listArchivedTasks, pruneArchive } from "../src/exchange.ts";
 import { resolvePiSessionCandidates } from "../src/usage.ts";
-import type { StartReq } from "../src/transport.ts";
+import type { StartReq } from "../src/host.ts";
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = "") {
@@ -383,7 +388,7 @@ try {
 	// -------------------------------------------------------------------------
 	const startReq: StartReq = {
 		name: "routing-rev",
-		paneId: "pane-stub",
+		placementRef: "pane-stub",
 		provider: "llm-platform",
 		model: "tensorzero::function_name::flash",
 		thinking: "high",
@@ -530,7 +535,12 @@ try {
 		pruneArchive() === 1 && !existsSync(oldDir) && existsSync(join(archiveRoot(), "v16-demo")),
 	);
 	// The TTL is injectable: 0 prunes everything (including "half-written",
-	// which needs no manifest.json — retention is mtime-based).
+	// which needs no manifest.json — retention is mtime-based). Backdate the
+	// dirs explicitly: a same-millisecond creation would make age === 0 and
+	// race the prune (CI flake 2026-09-10).
+	const everything = [join(archiveRoot(), "v16-demo"), join(archiveRoot(), "half-written")];
+	const justPast = new Date(Date.now() - 1000);
+	for (const dir of everything) utimesSync(dir, justPast, justPast);
 	check(
 		"A.7b injectable TTL prunes everything at 0",
 		pruneArchive(0) === 2 && !existsSync(join(archiveRoot(), "v16-demo")),
