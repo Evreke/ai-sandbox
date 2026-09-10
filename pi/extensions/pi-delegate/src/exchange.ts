@@ -229,7 +229,6 @@ export interface ExchangeDir {
 	/** Short task slug (directory basename under /tmp/exchange). */
 	task: string;
 	briefPath: string;
-	reportPath: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -300,12 +299,13 @@ export function ensureExchangeDir(briefPathRaw: string): ExchangeDir {
 		throw new ExchangeDelegateError("E_BRIEF", `Brief file is empty: ${brief}`);
 	}
 
-	// Conventional report path: brief-<name>.md → report-<name>.json (sibling).
-	const briefName = basename(brief);
-	const nameMatch = /^brief-(.+)\.md$/.exec(briefName);
-	const reportPath = nameMatch ? reportPathFor(dir, nameMatch[1]) : "";
-
-	return { dir, task, briefPath: brief, reportPath };
+	// D6 (report-mismatch critique): the former brief-stem → report-<stem>.json
+	// derivation was DELETED — no consumer ever read the ExchangeDir field it
+	// filled, and layer 1 validates the stem AGAINST the single name-derived
+	// report path, so a second derivation here was an actively misleading trap.
+	// The name-derived path construction lives in exactly one place in src/
+	// (pinned by B14.1 and static-check T3).
+	return { dir, task, briefPath: brief };
 }
 
 // ---------------------------------------------------------------------------
