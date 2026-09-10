@@ -72,8 +72,10 @@ function seed(dir: string, file: string, mtimeMs: number): string {
 	);
 	check("S3.1 a stray older than startedAt is excluded (stale fence)", !scanned.includes(strayOld), scanned.join(", "));
 	// The canonical entry stays first even without any stray.
-	const alone = scanReportCandidates(dir, STARTED_AT, "w");
-	check("S1.2 canonical-only dir → exactly the canonical candidate", alone.length === 1 && alone[0] === canonical, alone.join(", "));
+	const solo = taskDir("solo");
+	const soloCanonical = seed(solo, "report-w.json", STARTED_AT - 1000);
+	const alone = scanReportCandidates(solo, STARTED_AT, "w");
+	check("S1.2 canonical-only dir → exactly the canonical candidate", alone.length === 1 && alone[0] === soloCanonical, alone.join(", "));
 }
 
 // ---------------------------------------------------------------------------

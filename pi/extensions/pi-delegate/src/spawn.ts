@@ -106,6 +106,7 @@ import {
 	reportPathFor,
 	resolveReportSchema,
 	scanAllManifests,
+	scanReportCandidates,
 	updateManifest,
 	validateBriefReportContract,
 	validateReport,
@@ -1452,35 +1453,60 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			};
 
 			//
+			// BUG_FIX_CONTEXT (report-path mismatch incident, 2026-09): symptom — a
+			// worker obeying a misdirected brief wrote report-impl.md; collect scanned
+			// ONLY the two hardcoded .json name-derived paths, found nothing, and the
+			// spawn hung in silence. Why the old shape did not work — the candidate
+			// list could never contain another filename or extension. What was done —
+			// candidates come from scanReportCandidates (directory scan, canonical
+			// first, mtime-fenced strays); adoption still requires full schema
+			// validation with worker === canonical; found-but-unvalidatable files are
+			// named in the failure message as evidence, never adopted.
+			//
 			// FUNCTION_CONTRACT:
 			// Input: none (closure: reportPath, canonical name, requested name, briefSchema)
-			// Output: {verdict, usedPath, fallbackUsed} — verdict from
-			//   validateReportAgainstSchema (base ∩ brief fragment, DESIGN.md §11)
+			// Output: {verdict, usedPath, fallbackUsed, foundPaths} — verdict from
+			//   validateReportAgainstSchema (base ∩ brief fragment, DESIGN.md §11);
+			//   foundPaths = candidates detected but NOT adopted (evidence for the
+			//   failure message)
 			// Guarantees:
-			//   - canonical-name report first; when names differ and the canonical
-			//     path does not validate, the requested-name path is tried as fallback
+			//   - candidates are the canonical path first, then every report-*.json|md
+			//     newer than spawn time (scanReportCandidates — the non-canonical
+			//     mtime fence lives there)
+			//   - the first candidate that validates (worker === canonical) is
+			//     adopted; a sibling's report can never validate, so it can never be
+			//     adopted
+			//   - fallbackUsed is true for any adopted non-canonical path (the
+			//     uniquification case)
 			//   - the fragment applies on the first pass and every grace recheck alike
 			// Raises: never (all failures come back as {ok:false})
-			// Strict collect with the requested-name fallback: on collision herdr may
-			// have renamed the agent AFTER the brief was written, so the worker may
-			// have written report-<requested>.json instead of report-<canonical>.json.
+			// Strict collect over the scanned candidates: on collision herdr may
+			// have renamed the agent AFTER the brief was written, and a misdirected
+			// brief may have pointed the worker at another filename — the scan finds
+			// both shapes; validation decides adoptability.
 			const collectReport = (): {
 				verdict: { ok: true; report: WorkerReport } | { ok: false; error: string };
 				usedPath: string;
 				fallbackUsed: boolean;
+				foundPaths: string[];
 			} => {
 				// v1.2: base ∩ brief-fragment validation (DESIGN.md §11) — the declared
 				// schema applies on the first pass and on every grace recheck alike.
-				const verdict = validateReportAgainstSchema(reportPath, canonical, briefSchema);
-				if (verdict.ok || canonical === params.name) {
-					return { verdict, usedPath: reportPath, fallbackUsed: false };
+				const candidates = scanReportCandidates(manifestDir, startedAtDate.getTime(), canonical);
+				const foundPaths: string[] = [];
+				let primary: { verdict: { ok: true; report: WorkerReport } | { ok: false; error: string }; usedPath: string } | null = null;
+				for (const candidate of candidates) {
+					const v = validateReportAgainstSchema(candidate, canonical, briefSchema);
+					if (v.ok) {
+						return { verdict: v, usedPath: candidate, fallbackUsed: candidate !== reportPath, foundPaths };
+					}
+					foundPaths.push(candidate);
+					if (primary === null) primary = { verdict: v, usedPath: candidate };
 				}
-				const requestedReportPath = reportPathFor(manifestDir, params.name);
-				const alt = validateReportAgainstSchema(requestedReportPath, canonical, briefSchema);
-				if (alt.ok) {
-					return { verdict: alt, usedPath: requestedReportPath, fallbackUsed: true };
-				}
-				return { verdict, usedPath: reportPath, fallbackUsed: false };
+				// No candidate validated: the canonical verdict (or the first candidate's
+				// when even the canonical path never existed) is the primary failure.
+				const fallbackVerdict = primary ?? { verdict: { ok: false as const, error: `no report candidate found in ${manifestDir}` }, usedPath: reportPath };
+				return { verdict: fallbackVerdict.verdict, usedPath: fallbackVerdict.usedPath, fallbackUsed: false, foundPaths };
 			};
 
 			// BUG_FIX_CONTEXT: symptom — a passed smoke gate was lost to a generic
@@ -1590,13 +1616,12 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			// workers otherwise spin the whole budget against a finished worker.
 			const settleProof = async (): Promise<boolean> => {
 				if (!isProbe) {
-					// canonical-name path first, requested-name fallback (same order as
-					// collectReport): mtime ≥ spawn time proves THIS run wrote it — a
-					// stale report from an earlier same-name attempt is older.
-					const paths = canonical !== params.name
-						? [reportPath, reportPathFor(manifestDir, params.name)]
-						: [reportPath];
-					for (const p of paths) {
+					// Loose candidate scan (same discovery as collectReport): the
+					// canonical path first, then any report-*.json|md newer than spawn
+					// time. The mtime >= spawn-time fence is applied per candidate HERE —
+					// a stale report from an earlier same-name attempt can never
+					// false-settle.
+					for (const p of scanReportCandidates(manifestDir, startedAtDate.getTime(), canonical)) {
 						try {
 							if ((await stat(p)).mtimeMs >= startedAtDate.getTime()) return true;
 						} catch {
@@ -2002,6 +2027,13 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				: missing
 					? `no report file at ${collected.usedPath} after settle (status: ${settle.status})`
 					: `report at ${collected.usedPath} failed schema validation: ${collected.verdict.error}`;
+				// Found-but-unvalidatable evidence (report-path mismatch incident,
+				// 2026-09): a misdirected report must surface by NAME, never as
+				// silence — the orchestrator sees exactly what landed instead of only
+				// the watched path.
+				const foundNote = collected.foundPaths.length > 0
+					? `\nfiles that did land in ${manifestDir} but do not validate for ${canonical}: ${collected.foundPaths.join(", ")} — read them, salvage the work, then a diagnosed retry.`
+					: "";
 			// v1.2 (DESIGN.md §11): distinguish a brief-reportSchema violation — base
 			// schema passes but the declared fragment rejects. The fragment error is
 			// already quoted verbatim in `what`; add dedicated guidance.
@@ -2034,6 +2066,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 					"Treat as a failed spawn: do a diagnosed retry with root cause + fix shape (at most 2 repeats, then escalate). " +
 					"The retry MUST use a NEW worker name (e.g. <name>-r2) — the original name stays taken by the settled agent. " +
 					"Read the worker's pane before retrying to find the actual root cause." +
+					foundNote +
 					schemaNote +
 					`${uniquified ? ` ${uniquified}` : ""}` +
 					b.line,

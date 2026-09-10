@@ -540,6 +540,79 @@ export function reportPathFor(dir: string, name: string): string {
 	return `${dir}/report-${name}.json`;
 }
 
+/** Stray report candidates: report-<word>.json or report-<word>.md. */
+const REPORT_CANDIDATE_RE = /^report-[A-Za-z0-9_-]+\.(?:json|md)$/;
+
+/**
+ * Loose candidate discovery for collect/settle (design option e; report-path
+ * mismatch incident 2026-09). Replaces the hardcoded two-path candidate lists:
+ * a worker obeying a misdirected brief may have written its report under
+ * another name or extension, which no name-derived lookup could ever find.
+ * <p>
+ * BUG_FIX_CONTEXT: symptom — an orchestrator's brief pointed the worker at
+ * report-impl.md; collect, settle-proof and the grace recheck hardcoded the
+ * two .json name-derived paths, found nothing, and the spawn hung in silence.
+ * Why the old shape did not work — reportPathFor hardwires .json and the
+ * callers scanned exactly [reportPath, reportPathFor(requestedName)], so any
+ * other filename/extension was invisible. What was done — candidate discovery
+ * became a directory scan gated by startedAt mtime; ADOPTION still requires
+ * full schema validation with worker === canonical (siblings can never be
+ * adopted), and a .md candidate is surfaced as invalid evidence, never
+ * adopted.
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input:
+ *   - dir: the task's exchange dir
+ *   - startedAtMs: spawn time (Date.now() at the delegate call) — the mtime
+ *     fence
+ *   - canonicalName: the canonical worker name
+ * Output: absolute paths — the canonical report-<name>.json FIRST when it
+ *   exists (preserving today's collect semantics exactly), then every OTHER
+ *   report-*.json / report-*.md with mtimeMs >= startedAtMs, sorted by mtime
+ *   descending
+ * Guarantees:
+ *   - INVARIANT (the stale fence): the mtime >= startedAtMs rule applies to
+ *     every NON-canonical candidate — a stray report from an earlier
+ *     same-name attempt can never enter the candidate list. The canonical
+ *     entry keeps today's unconditional-first semantics (collect adopted it
+ *     without an mtime check before this fix); a caller that needs the fence
+ *     on the canonical path too (settle-proof) applies it per candidate
+ *   - never throws: an unreadable dir degrades to an empty list (the
+ *     canonical file cannot be probed); odd entries (directories with report
+ *     names) are skipped
+ * Raises: never
+ * EXTERNAL_DEPENDENCY: filesystem — reads the task dir listing + stat of
+ *   candidate files.
+ */
+export function scanReportCandidates(dir: string, startedAtMs: number, canonicalName: string): string[] {
+	const canonical = reportPathFor(dir, canonicalName);
+	const canonicalExists = (() => {
+		try {
+			return statSync(canonical).isFile();
+		} catch {
+			return false;
+		}
+	})();
+	let names: string[];
+	try {
+		names = readdirSync(dir);
+	} catch {
+		return []; // unreadable dir — canonical cannot be probed either
+	}
+	const strays: Array<{ path: string; mtimeMs: number }> = [];
+	for (const n of names) {
+		if (!REPORT_CANDIDATE_RE.test(n) || resolve(dir, n) === canonical) continue;
+		try {
+			const st = statSync(resolve(dir, n));
+			if (st.isFile() && st.mtimeMs >= startedAtMs) strays.push({ path: resolve(dir, n), mtimeMs: st.mtimeMs });
+		} catch {
+			// vanished mid-scan / unreadable — skip, never throw
+		}
+	}
+	strays.sort((a, b) => b.mtimeMs - a.mtimeMs);
+	return canonicalExists ? [canonical, ...strays.map((s) => s.path)] : strays.map((s) => s.path);
+}
+
 function isNonEmptyString(v: unknown): v is string {
 	return typeof v === "string" && v.length > 0;
 }
