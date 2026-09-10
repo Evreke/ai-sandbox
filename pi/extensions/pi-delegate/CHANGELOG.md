@@ -6,6 +6,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Version numbers align with the iteration numbering in DESIGN.md (v1.x sections).
 
+## [1.16.0] — 2026-09-10
+
+### Added
+
+- **F6 — two-tier delegation wake-up**: a session that is a worker of a parent
+  manifest AND the orchestrator of its own child manifests (a tier-1 lead)
+  now mounts a watcher scoped to ITS OWN children — tier-2 report-ready/
+  mailbox-question wakes the lead without meta-orchestrator nudges. The
+  pre-existing `createWatcher` leafWorker mute is scoped the same way.
+- **Mailbox nudge resilience**: the answer/steer pane nudge retries with
+  backoff (3 attempts); on repeated failure a watcher-visible
+  `nudge-failed-<name>.json` marker delivers the wake-up on the next tick
+  instead of the socket (kind `nudge-failed`, fingerprint = marker ts).
+- **Trunk-based development + CI**: PR-gated squash-only flow (AGENTS.md);
+  GitHub Actions — `ci.yml` (bun check suite + package.json version sync on
+  every PR) and `release.yml` (on main: rerun suite → semver tag → GitHub
+  Release with notes from the fresh CHANGELOG section).
+
+### Fixed
+
+- **Retire pass idempotency**: a herdr "not found" during the autonomous
+  close (pane already gone) is treated as a successful retire — no more
+  `tab_not_found` error spam every tick; genuine teardown failures keep the
+  advisory retry.
+- **Stale nudge-failed marker**: a same-name retry deletes any leftover
+  marker at spawn (a fresh watcher session would re-fire it once).
+- `nudgeFailedPathFor`/`readNudgeFailedMarker` moved to `exchange.ts`
+  (module boundary — exchange-dir conventions live there).
+- Root `package.json` version synced to the extension's (1.15.1 divergence).
+- Legacy fail-open ownership for worker-orchestrators is pinned by tests
+  (W16.14/W16.15) — a deliberate policy, now a conscious one.
+
+### Changed
+
+- README rebuilt bilingual (EN/RU) with header cross-links; the field case
+  study and client identifiers removed from the public surface (NDA scrub).
+
 ## [1.15.0] — 2026-09-09
 
 ### Added

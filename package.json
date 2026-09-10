@@ -1,6 +1,6 @@
 {
   "name": "ai-sandbox-pi",
-  "version": "1.15.1",
+  "version": "1.16.0",
   "private": true,
   "description": "pi bundle: pi-delegate extension + delegate orchestrator skill (single source of truth)",
   "keywords": ["pi-package"],
