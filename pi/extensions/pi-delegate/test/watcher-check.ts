@@ -957,6 +957,55 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 		"W14.17 delegate spawn records orchestratorSessionPath via the LIVE sessionManager getter",
 		/getSessionFile/.test(delegateSrc) && /\.\.\.\(orchestratorSessionPath \? \{ orchestratorSessionPath \}/.test(delegateSrc),
 	);
+
+	// (г) B1 masterSessionPath fallback (diag-watch-crossfleet C1): a manifest
+	// with NO worker-level orchestratorSessionPath but a manifest-level
+	// masterSessionPath (the fleet's KNOWN owner, written since 1.15.0) must
+	// stay SILENT for any other session — a foreign test fixture or a legacy
+	// foreign manifest in the shared /tmp/exchange root must not wake a
+	// bystander orchestrator. Fail-open only when NEITHER owner field exists
+	// anywhere on the manifest (true legacy, W14.12/W16.14 semantics intact).
+	const mdir = taskDir("master-owned");
+	const wMasterForeign = mkWorker(mdir, "w-master-foreign");
+	writeValidReport(mdir, "w-master-foreign");
+	const masterManifest = (dir: string, worker: ManifestWorker, master?: string): ExchangeManifest => ({
+		...manifestOf(dir, [worker]),
+		...(master !== undefined ? { masterSessionPath: master } : {}),
+	});
+	const masterSnap = (worker: ManifestWorker, master?: string): WatchSnapshot =>
+		workersFromManifests([masterManifest(dirname(worker.briefPath), worker, master)], [LIVE(worker.name)], {}, NOW);
+	check(
+		"W14.18 masterSessionPath threads onto the WatchWorker",
+		masterSnap(wMasterForeign, ORCH_A).workers[0]?.masterSessionPath === ORCH_A,
+	);
+	check(
+		"W14.19 masterSessionPath ≠ self → SILENT (known foreign owner; bystander not woken)",
+		detectWorkerEvents(masterSnap(wMasterForeign, ORCH_A).workers[0]!, { selfSessionFile: ORCH_B, nowMs: NOW }).length === 0,
+	);
+	check(
+		"W14.20 masterSessionPath === self → fires (the fleet's declared owner hears its worker)",
+		detectWorkerEvents(masterSnap(wMasterForeign, ORCH_A).workers[0]!, { selfSessionFile: ORCH_A, nowMs: NOW }).some((e) => e.kind === "report-ready"),
+	);
+	check(
+		"W14.21 masterSessionPath absent + no orchestratorSessionPath → fails OPEN (true legacy, W14.12 regression)",
+		detectWorkerEvents(masterSnap(wMasterForeign, undefined).workers[0]!, { selfSessionFile: ORCH_B, nowMs: NOW }).some((e) => e.kind === "report-ready"),
+	);
+	check(
+		"W14.22 degraded self (no sessionFile) + foreign masterSessionPath → fails OPEN (a lost report-ready is worse than a duplicate)",
+		detectWorkerEvents(masterSnap(wMasterForeign, ORCH_A).workers[0]!, { nowMs: NOW }).some((e) => e.kind === "report-ready"),
+	);
+	const wMasterGarbage = mkWorker(mdir, "w-master-garbage");
+	writeValidReport(mdir, "w-master-garbage");
+	const garbageMasterManifest = {
+		...manifestOf(mdir, [wMasterGarbage]),
+		masterSessionPath: 42, // runtime garbage — a manifest is untyped JSON
+	} as unknown as ExchangeManifest;
+	const garbageMasterView = workersFromManifests([garbageMasterManifest], [LIVE("w-master-garbage")], {}, NOW).workers[0]!;
+	check(
+		"W14.23 non-string masterSessionPath is ignored (fail-open, legacy behavior)",
+		garbageMasterView.masterSessionPath === undefined &&
+			detectWorkerEvents(garbageMasterView, { selfSessionFile: ORCH_B, nowMs: NOW }).some((e) => e.kind === "report-ready"),
+	);
 }
 
 // ---------------------------------------------------------------------------

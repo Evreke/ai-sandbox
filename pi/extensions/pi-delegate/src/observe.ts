@@ -666,6 +666,15 @@ export interface WatchWorker {
 	 *  (legacy manifest) → legacy behavior. Reader-only: spawn writes the
 	 *  field, the watcher never does. */
 	orchestratorSessionPath?: string;
+	/** Manifest-level fleet owner (F1 field, written since 1.15.0 by spawn —
+	 *  the first delegate call hoists its own session path here; set-once).
+	 *  B1 fallback ownership: when a worker entry carries NO worker-level
+	 *  orchestratorSessionPath, a masterSessionPath different from the
+	 *  watcher's own session still proves a KNOWN foreign owner →
+	 *  detectWorkerEvents emits NOTHING (a bystander session must not be woken
+	 *  by a foreign/legacy manifest in the shared exchange root). Absent →
+	 *  fail-open (true legacy, no owner field anywhere). Reader-only. */
+	masterSessionPath?: string;
 	/** §23 retire inputs/outputs, threaded from the manifest (reader-only for
 	 *  the clock fields — the retire pass writes them, the snapshot stays a
 	 *  view): brief path + resolved report-schema fragment (condition 1
@@ -842,6 +851,11 @@ export function workersFromManifests(
 					: {}),
 				...(typeof w.orchestratorSessionPath === "string" && w.orchestratorSessionPath.length > 0
 					? { orchestratorSessionPath: w.orchestratorSessionPath }
+					: {}),
+				// B1 fallback ownership — manifest-level field, threaded per manifest
+				// (the fleet owner is the same for every worker in this manifest).
+				...(typeof manifest.masterSessionPath === "string" && manifest.masterSessionPath.length > 0
+					? { masterSessionPath: manifest.masterSessionPath }
 					: {}),
 				// §23 retire threading — every field tolerant: a manifest is untyped
 				// JSON, garbage reads as absent (legacy behavior).
@@ -1048,6 +1062,19 @@ export function detectWorkerEvents(w: WatchWorker, opts: DetectOptions = {}): Wa
 		w.orchestratorSessionPath !== undefined &&
 		opts.selfSessionFile !== undefined &&
 		w.orchestratorSessionPath !== opts.selfSessionFile
+	) {
+		return [];
+	}
+	// B1 fallback ownership (diag-watch-crossfleet C1): a worker entry with NO
+	// orchestratorSessionPath on a manifest that carries masterSessionPath ≠ my
+	// session has a KNOWN owner and it is not me → silent. Fail-open only when
+	// NO owner field exists anywhere on the manifest (true legacy) or the
+	// self-id is degraded (a lost report-ready is worse than a duplicate).
+	if (
+		w.orchestratorSessionPath === undefined &&
+		w.masterSessionPath !== undefined &&
+		opts.selfSessionFile !== undefined &&
+		w.masterSessionPath !== opts.selfSessionFile
 	) {
 		return [];
 	}
