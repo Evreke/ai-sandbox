@@ -1,0 +1,43 @@
+{
+  "name": "@local/pi-delegate",
+  "version": "1.15.1",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "delegate",
+    "herdr",
+    "multi-agent"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "22"
+  },
+  "files": [
+    "index.ts",
+    "src",
+    "skills",
+    "README.md",
+    "CHANGELOG.md"
+  ]
+}
