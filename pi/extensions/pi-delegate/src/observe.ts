@@ -1351,6 +1351,18 @@ async function stampWorkerField(
 }
 
 /**
+ * A teardown that reports "not found" means the pane/workspace is ALREADY
+ * gone (herdr dropped it, another session closed it, the user closed the
+ * pane) — an IDEMPOTENT close, not a failure. Matched on the message text:
+ * herdr's error JSON carries code "tab_not_found"/"workspace_not_found" and
+ * the transport wraps it verbatim into the DelegateError message; there is
+ * no dedicated E_* code for it.
+ */
+function isAlreadyGone(err: unknown): boolean {
+	return /not[\s_-]?found/i.test(err instanceof Error ? err.message : String(err));
+}
+
+/**
  * One retire pass over a snapshot (§23): stamp/clear `retirableSince` on
  * state transitions (persisted — watcher restarts must not lose the clock),
  * close retirable workers via the Transport (the same teardown path the
@@ -1408,7 +1420,22 @@ export async function retirePass(
 				continue;
 			}
 			if (outcome.decision) {
-				await transport.teardown({ name: w.name, placement: w.placement, force: true });
+				let alreadyGone = false;
+				try {
+					await transport.teardown({ name: w.name, placement: w.placement, force: true });
+				} catch (err) {
+					// BUG_FIX_CONTEXT: symptom — the retire pass spammed "retire pass
+					// error … tab_not_found" every tick when the pane had ALREADY been
+					// closed elsewhere (herdr, user, another session): the failed close
+					// never stamped retiredAt, so the decision re-fired forever.
+					// Why not fixed in the transport: teardown is also the interactive
+					// /delegate-teardown path, where a genuinely misconfigured placement
+					// must stay a visible error; only the autonomous pass needs the
+					// idempotent semantics. What was done: "not found" from the close is
+					// treated as a successful retire (stamp retiredAt, log the variance).
+					if (!isAlreadyGone(err)) throw err;
+					alreadyGone = true;
+				}
 				await stampWorkerField(w, (x) => ({ ...x, retiredAt: new Date(nowMs).toISOString() }));
 				// CONSUME the ACK marker: a leftover release-<name>.json would ACK-close
 				// a fresh same-name retry (spawn appends into the SAME task dir, §23.3
@@ -1420,7 +1447,7 @@ export async function retirePass(
 					// marker cleanup is advisory — the retiredAt stamp already guards the history
 				}
 				log(
-					`retired worker ${w.name} (${outcome.decision.reason}) — pane closed, ` +
+					`retired worker ${w.name} (${outcome.decision.reason}${alreadyGone ? ", pane was already gone — idempotent close" : ""}) — ` +
 						"herdr name freed for a same-name retry",
 				);
 				decisions.push(outcome.decision);

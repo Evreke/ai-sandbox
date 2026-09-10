@@ -368,6 +368,9 @@ function workerView(w: ManifestWorker, statuses: AgentStatus[] | null = [DONE(w.
 interface FakeTransport extends Transport {
 	teardownCalls: Array<{ name: string; placement: Placement }>;
 	failTeardown?: boolean;
+	/** When set, teardown throws an Error with this message (simulates herdr
+	 *  error shapes surfaced verbatim through the transport wrapper). */
+	failTeardownMsg?: string;
 }
 
 function fakeTransport(): FakeTransport {
@@ -375,6 +378,7 @@ function fakeTransport(): FakeTransport {
 		teardownCalls: [],
 		failTeardown: false,
 		teardown: async (req: TeardownReq) => {
+			if (t.failTeardownMsg !== undefined) throw new Error(t.failTeardownMsg);
 			if (t.failTeardown) throw new Error("herdr down");
 			t.teardownCalls.push({ name: req.name, placement: req.placement });
 		},
@@ -444,6 +448,32 @@ function dOwnCheckLegacy(t: FakeTransport): boolean {
 	await retirePass(tFail, snapshotFor([wC], [DONE("r-throw")]), { nowMs: NOW, retireEnabled: true, retireTtlMs: 900_000 });
 	check("R5.7b next tick retries and succeeds", manifestFromDisk(dirC).workers[0]?.retiredAt !== undefined);
 
+	// Teardown says "not found" → the pane is ALREADY gone (closed by herdr,
+	// the user, or another session): IDEMPOTENT close — retiredAt stamped THIS
+	// tick, no error log, and every later tick is silent (no spam).
+	const dirGone = taskDir("pass-gone");
+	const wGone = mkWorker(dirGone, "r-gone", { retirableSince: new Date(NOW - 900_000).toISOString() });
+	writeManifestOnDisk(dirGone, [wGone]);
+	writeValidReport(dirGone, "r-gone");
+	const tGone = fakeTransport();
+	tGone.failTeardownMsg =
+		'herdr tab close wKD:p2 failed: herdr tab close failed {"error":{"code":"tab_not_found","message":"tab wKD:p2 not found"},"id":"cli:tab:close"}';
+	const logsGone: string[] = [];
+	const dGone = await retirePass(tGone, snapshotFor([wGone], [DONE("r-gone")]), { nowMs: NOW, retireEnabled: true, retireTtlMs: 900_000 }, (m) => logsGone.push(m));
+	check(
+		"R5.8 teardown 'not found' → idempotent retire: decision + retiredAt + no error log",
+		dGone.length === 1 &&
+			manifestFromDisk(dirGone).workers[0]?.retiredAt !== undefined &&
+			!logsGone.some((l) => /retire pass error/.test(l)),
+		JSON.stringify(logsGone),
+	);
+	const goneAfter = await retirePass(
+		tGone,
+		snapshotFor([{ ...wGone, retiredAt: manifestFromDisk(dirGone).workers[0]?.retiredAt }], [DONE("r-gone")]),
+		{ nowMs: NOW + 10_000, retireEnabled: true, retireTtlMs: 900_000 },
+	);
+	check("R5.8b already-retired → silent on every later tick (no spam)", goneAfter.length === 0 && tGone.teardownCalls.length === 0);
+
 	// ACK: the release marker closes IMMEDIATELY (no stamp, no TTL wait).
 	const dirD = taskDir("pass-ack");
 	const wD = mkWorker(dirD, "r-ack");
@@ -490,7 +520,7 @@ function dOwnCheckLegacy(t: FakeTransport): boolean {
 	writeValidReport(dirE, "r-foreign");
 	const tOwn = fakeTransport();
 	await retirePass(tOwn, snapshotFor([wForeign], [DONE("r-foreign")]), { nowMs: NOW + 900_000, retireEnabled: true, retireTtlMs: 900_000, selfSessionFile: "/tmp/sessions/orch-b.jsonl" });
-	check("R5.10 foreign-owned worker: NO stamp, NO close", tOwn.teardownCalls.length === 0 && manifestFromDisk(dirE).workers[0]?.retirableSince !== undefined);
+	check("R5.10 foreign-owned worker: NO stamp, NO close", tOwn.teardownCalls.length === 0 && manifestFromDisk(dirGone).workers[0]?.retirableSince !== undefined);
 	const dOwn = await retirePass(tOwn, snapshotFor([wForeign], [DONE("r-foreign")]), { nowMs: NOW + 900_000, retireEnabled: true, retireTtlMs: 900_000, selfSessionFile: ORCH_A });
 	check("R5.10b the OWNING session retires it", tOwn.teardownCalls.length === 1 && dOwn[0]?.reason === "ttl");
 	// Degraded self-id (no sessionFile) fails CLOSED for a declared owner.
