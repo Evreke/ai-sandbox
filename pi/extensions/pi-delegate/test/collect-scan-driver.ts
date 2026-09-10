@@ -16,6 +16,13 @@
  *   fallback — host uniquified the name (canonical ≠ requested); the worker
  *              wrote report-<requested>.json (worker field = canonical):
  *              collect adopts it with the fallback note.
+ *   respawn-stale — same-name RESPAWN (the manifest already holds a prior
+ *              entry for the name): the canonical report-w.json is STALE
+ *              (mtime predates the new startedAt). collect must NOT adopt it
+ *              (a stale report from an earlier same-name run is never the
+ *              new run's report) and the failure must name the file.
+ *   respawn-fresh — same setup, but the canonical report is FRESH (mtime
+ *              after the new startedAt): collect adopts it as before.
  */
 
 import { mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
@@ -70,6 +77,41 @@ if (CASE === "fallback") {
 	const p = reportPathFor(ROOT, NAME); // requested-name path (canonical is NAMEu)
 	writeFileSync(p, validReport(CANONICAL));
 	touch(p);
+}
+
+// CS4 scenarios: a prior manifest entry for the SAME name (a respawn) —
+// startedAt strictly in the past (the new run stamps its own startedAt inside
+// execute()), collectedAt set (the earlier run was already collected).
+if (CASE === "respawn-stale" || CASE === "respawn-fresh") {
+	const priorStartedAt = new Date(Date.now() - 3_600_000).toISOString();
+	const prior = {
+		task: "cs-respawn",
+		dir: ROOT,
+		workers: [
+			{
+				name: NAME,
+				placement: { kind: "tab", workspaceId: "ws-old", paneId: "old:p1", branch: "delegate/old", checkoutPath: join(repoDir, "old") },
+				briefPath,
+				reportPath: reportPathFor(ROOT, NAME),
+				provider: "p",
+				model: "m",
+				thinking: "low",
+				startedAt: priorStartedAt,
+				collectedAt: new Date(Date.now() - 1_800_000).toISOString(),
+			},
+		],
+	};
+	writeFileSync(join(ROOT, "manifest.json"), JSON.stringify(prior, null, "\t"));
+	const p = reportPathFor(ROOT, NAME);
+	writeFileSync(p, validReport(NAME));
+	if (CASE === "respawn-stale") {
+		// STALE: predates the new run's startedAt (which is Date.now() inside
+		// execute()) — the earlier run's report, not this run's.
+		const old = new Date(Date.now() - 60_000);
+		utimesSync(p, old, old);
+	} else {
+		touch(p); // fresh: postdates the new startedAt
+	}
 }
 
 let teardownCalls = 0;

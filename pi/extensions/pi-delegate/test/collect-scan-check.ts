@@ -20,6 +20,11 @@
  *        (worker field = canonical) with the fallback note — same behavior as
  *        before the fix, now through the directory scan.
  *
+ *   CS4  Same-name respawn (D4): the manifest already holds a prior entry for
+ *        the name — with the canonical report STALE (mtime predates the new
+ *        startedAt), collect must NOT adopt it (E_REPORT_MISSING naming the
+ *        file); with a FRESH canonical report it IS adopted as before.
+ *
  * Exit 0 only if all checks pass.
  */
 
@@ -111,6 +116,33 @@ function drive(scenario: string): DriverOut {
 		"CS3.2 the success notes the fallback path",
 		/report collected from/.test(r.text),
 		r.text.slice(0, 400),
+	);
+}
+
+// ---------------------------------------------------------------------------
+// CS4. Same-name respawn: the canonical path is fenced too (D4)
+// ---------------------------------------------------------------------------
+
+{
+	const stale = drive("respawn-stale");
+	check("CS4.1 respawn + stale canonical report → NOT a success", !stale.ok, stale.text.slice(0, 200));
+	check(
+		"CS4.2 the stale report is NOT silently adopted — the failure names it",
+		stale.text.includes("report-cs-") || /report-[A-Za-z0-9_-]+\.json/.test(stale.text),
+		stale.text.slice(0, 400),
+	);
+	check("CS4.3 the failure is a MISSING report for this run (not a silent adoption)", stale.code === "E_REPORT_MISSING", stale.code);
+	check(
+		"CS4.4 the failure says why: the report predates this spawn (earlier same-name run)",
+		/predates this spawn|stale/.test(stale.text),
+		stale.text.slice(0, 400),
+	);
+
+	const fresh = drive("respawn-fresh");
+	check(
+		"CS4.5 respawn + FRESH canonical report → still adopted (no behavior change)",
+		fresh.ok,
+		fresh.text.slice(0, 300),
 	);
 }
 
