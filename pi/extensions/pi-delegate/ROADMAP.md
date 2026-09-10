@@ -11,9 +11,8 @@ swappable (tmux / other). Approved design: interface + herdr adapter +
 in-memory fake (second adapter = real seam), opaque `placementRef` in
 Placement/manifests (`backend` field alongside legacy ids for version skew),
 neutral user-facing texts, binding via config (`host: "herdr"` default).
-Design doc: gap analysis + migration order in
-`/tmp/exchange/workerhost-refactor/design-host-interface.md` (re-derive into
-the repo at impl time). Conveyer: research ✅ → PoC (in flight) → impl →
+Design doc: `docs/design-host-interface.md` (re-derived from the gap analysis,
+committed with the epic). Conveyer: research ✅ → PoC (in flight) → impl →
 e2e ∥ QA → review.
 
 ## Milestone: provider/model selection for workers AND orchestrators
@@ -37,6 +36,27 @@ e2e ∥ QA → review.
   3. what happens on mismatch (warn in /delegate-fleet? refuse spawn?).
 - **Constraints:** tier table shape is config-frozen surface; herdr-host
   refactor (above) must not gate this — model selection is transport-neutral.
+
+## Milestone: Windows path support + pluggable mailbox store
+
+**Status: research/design done (docs/design-windows-mailbox.md); implementation open.**
+
+- **Problem:** pi-delegate is POSIX-bound — the mailbox/delegation does not work on
+  Windows (~40 coupling points: hard-coded /tmp/exchange, 13 template-literal path
+  assemblies, POSIX-shaped parsing regexes, unix-socket transport, SIGKILL escalation,
+  prompt-embedded file paths).
+- **Design highlights:** exchange root priority env > config > per-OS default
+  (%LOCALAPPDATA% on win32, /tmp/exchange unchanged on unix) + legacy-root dual-scan;
+  single path-builder (expaths.ts) with a static no-concat pin; explicit POSIX-only v1
+  list (herdr socket transport, SIGKILL escalation — Windows needs taskkill shape);
+  watcher is a poller — portable as-is.
+- **Mailbox store seam:** orchestrator-side `ExchangeStore` interface (FileStore now,
+  SqliteStore sketch in the doc); the agent-facing wire format STAYS the q-/a- files
+  (workers read paths from prompts — fs-by-protocol), a DB adapter MIRRORS to files.
+  Full protocol replacement would require an agent-side shim — rejected for now.
+- **Phases:** six, each independently shippable; most verifiable without a Windows host
+  (path-builder property tests, C:\\ fixtures, static pin) — manual QA checklist for a
+  real Windows machine in the doc.
 
 ## Open candidates (untriaged)
 
