@@ -155,7 +155,7 @@ try {
 		// finally-cleanup force-removes workspaces, which must never touch ours.
 		check(
 			"T2.2c tab placement: tabId is a REAL tab id (not the pane id)",
-			tabP.kind === "tab" && !!tabP.tabId && tabP.tabId !== tabP.paneId && /:t\d+$/.test(tabP.tabId ?? ""),
+			tabP.kind === "tab" && !!tabP.tabId && tabP.tabId !== tabP.paneId && /:t[0-9a-f]+$/i.test(tabP.tabId ?? ""), // tab numbering is HEX (wKD:tA is tab 10)
 			JSON.stringify(tabP),
 		);
 		logOp(`transport.teardown(tab ${tabP.tabId}) [drift pin]`);
