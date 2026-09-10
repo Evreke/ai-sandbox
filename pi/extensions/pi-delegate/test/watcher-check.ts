@@ -68,6 +68,7 @@ import {
 	countSessionToolCall,
 	createWatcher,
 	detectEvents,
+	detectWorkerEvents,
 	eventKey,
 	formatEventBatch,
 	isWorkerSession,
@@ -1167,6 +1168,37 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 			/isWorkerSession,\n\townsChildManifests,/.test(indexSrc),
 		indexSrc.includes("ownsChildManifests") ? "present" : "MISSING",
 	);
+
+	// (д) Legacy fail-open pin (F6 review minor #3): the F6 gate WIDENS the
+	// mounted-watcher population — a worker-orchestrator over a LEGACY parent
+	// manifest (workers without orchestratorSessionPath) now hears the
+	// parent's fleet, because the ownership gate cannot disprove ownership.
+	// Deliberate policy (a lost wake-up is worse than a duplicate) — pinned
+	// here so a future tightening is a conscious decision, not an accident.
+	{
+		const legacyDir = taskDir("f6-meta-legacy");
+		const legacyLead = mkWorker(legacyDir, "lead-impl");
+		legacyLead.sessionPath = LEAD; // matched as a worker, but by sessionPath only
+		delete (legacyLead as Partial<ManifestWorker>).orchestratorSessionPath; // legacy field absent
+		const legacyWorker = mkWorker(legacyDir, "lead-sibling");
+		legacyWorker.sessionPath = "/tmp/sessions/f6-legacy-sibling.jsonl";
+		delete (legacyWorker as Partial<ManifestWorker>).orchestratorSessionPath;
+		writeValidReport(legacyDir, "lead-sibling");
+		const legacyManifest = manifestOf(legacyDir, [legacyLead, legacyWorker]);
+		const legacyBatch = detectWorkerEvents(
+			{ ...legacyWorker, dir: legacyDir, collectedAt: undefined } as unknown as WatchWorker,
+			{ selfSessionFile: LEAD, nowMs: NOW },
+		);
+		check(
+			"W16.14 legacy manifest (no orchestratorSessionPath) fails OPEN for a worker-orchestrator's watcher",
+			legacyBatch.some((e) => e.kind === "report-ready" && e.worker === "lead-sibling"),
+			`${kindsOf(legacyBatch)}`,
+		);
+		check(
+			"W16.15 the legacy lead still counts as a worker session (gate still matches it)",
+			isWorkerSession({ sessionFile: LEAD, cwd: LEAD_CWD }, [legacyManifest]),
+		);
+	}
 }
 
 rmSync(FIX, { recursive: true, force: true });

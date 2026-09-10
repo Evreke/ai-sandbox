@@ -735,6 +735,60 @@ export function answerPathFor(dir: string, name: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// F6 — nudge-failed marker (mailbox answer posted, pane nudge failed)
+// ---------------------------------------------------------------------------
+
+/** Conventional nudge-failed marker path — next to the brief, worker-scoped. */
+export function nudgeFailedPathFor(dir: string, name: string): string {
+	return `${dir}/nudge-failed-${name}.json`;
+}
+
+/** Mailbox tool → watcher fallback marker (nudge-failed-<name>.json): written
+ *  by the delegate_mailbox answer/steer handler when the pane nudge fails after
+ *  retries; the watcher delivers the wake-up on the next tick instead of the
+ *  socket. Consumed (deleted) by a SUBSEQUENT successful nudge AND by a fresh
+ *  same-name spawn (both in spawn.ts) — so a stale marker can only ever fire
+ *  once for a new watcher session, and only as an advisory wake. */
+export interface NudgeFailedEnvelope {
+	name: string;
+	ts: string;
+	error: string;
+}
+
+/**
+ * Tolerantly read a nudge-failed marker; null when absent/invalid.
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: path to nudge-failed-<name>.json
+ * Output: the parsed envelope, or null when the file is absent, unreadable,
+ *   corrupt JSON, or has no non-empty string `ts` (the fingerprint source)
+ * Guarantees: never throws; a torn mid-write read degrades to null and the
+ *   detection simply re-fires on a later tick (the marker stays on disk)
+ * Raises: never
+ */
+export function readNudgeFailedMarker(path: string): NudgeFailedEnvelope | null {
+	let raw: string;
+	try {
+		raw = readFileSync(path, "utf8");
+	} catch {
+		return null; // absent/unreadable → no marker
+	}
+	try {
+		const parsed: unknown = JSON.parse(raw);
+		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+		const o = parsed as Record<string, unknown>;
+		if (typeof o.ts !== "string" || o.ts.length === 0) return null;
+		return {
+			name: typeof o.name === "string" ? o.name : "",
+			ts: o.ts,
+			error: typeof o.error === "string" ? o.error : "",
+		};
+	} catch {
+		return null; // corrupt JSON → no marker, never throw
+	}
+}
+
+// ---------------------------------------------------------------------------
 // §23 retire — release marker (orchestrator ACK, watcher-consumed)
 // ---------------------------------------------------------------------------
 

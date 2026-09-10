@@ -32,10 +32,13 @@
 
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { updateManifest, type ManifestWorker } from "../src/exchange.ts";
+import {
+	updateManifest,
+	nudgeFailedPathFor,
+	type ManifestWorker,
+} from "../src/exchange.ts";
 import {
 	detectWorkerEvents,
-	nudgeFailedPathFor,
 	type WatchWorker,
 } from "../src/observe.ts";
 import { registerMailboxTool } from "../src/spawn.ts";

@@ -270,6 +270,23 @@ check(
 );
 
 // ---------------------------------------------------------------------------
+// 6. F6 review-fix pin — same-name spawn clears a stale nudge-failed marker
+// (review minor #1): the spawn flow deletes nudge-failed-<name>.json right
+// after appending the manifest entry, or a fresh watcher session would
+// re-fire the previous worker's marker once.
+// ---------------------------------------------------------------------------
+
+check(
+	"T2.5 the spawn flow removes a stale nudge-failed marker for the same name right after the manifest append",
+	/updateManifest\(manifestDir,[\s\S]{0,900}?rm\(nudgeFailedPathFor\(manifestDir, params\.name\), \{ force: true \}\)/.test(delegateSrc),
+);
+check(
+	"T2.6 nudge-failed path convention lives in exchange.ts (module boundary — exchange-dir artifacts are exchange.ts conventions)",
+	/\.\/exchange\.ts"/.test(readFileSync(resolve(ROOT, "src/spawn.ts"), "utf8")) &&
+		readFileSync(resolve(ROOT, "src/exchange.ts"), "utf8").includes("export function nudgeFailedPathFor"),
+);
+
+// ---------------------------------------------------------------------------
 
 console.log(failures === 0 ? "\nALL STATIC CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

@@ -124,7 +124,8 @@ import {
 	resolveSpawnDefaults,
 	resolveTierTable,
 } from "./usage.ts";
-import { resolveCollectConfig, resolveWatchConfig, nudgeFailedPathFor } from "./observe.ts";
+import { resolveCollectConfig, resolveWatchConfig } from "./observe.ts";
+import { nudgeFailedPathFor } from "./exchange.ts";
 import { clampLines, notifyFleetIdle, renderDelegateLines } from "./fleet.ts";
 import {
 	CONTEXT_CRITICAL_PCT,
@@ -1044,6 +1045,16 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 						{ description: fleetDescription, masterSessionPath: orchestratorSessionPath },
 					),
 				);
+				// F6 review fix: a same-name retry is a NEW worker lifecycle — any
+				// stale nudge-failed-<name>.json from the previous worker of the same
+				// name is history. Without this cleanup a fresh watcher session would
+				// re-fire the old marker once (its seen-dedup is per-lifetime).
+				try {
+					await rm(nudgeFailedPathFor(manifestDir, params.name), { force: true });
+				} catch {
+					// advisory cleanup — the marker's own ts fingerprint keeps old
+					// events deduped within an existing watcher
+				}
 			} catch (err) {
 				manifestWarning = `Manifest update failed (${errText(err)}) — teardown/audit for this placement is degraded; record it manually.`;
 			}
