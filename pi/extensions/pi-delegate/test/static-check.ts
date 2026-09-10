@@ -48,13 +48,38 @@ function listTsFiles(dir: string): string[] {
 }
 
 const restricted = listTsFiles(resolve(ROOT, "src"));
-// Match actual import statements (from "...transport/herdr(.ts)"), not doc-comment mentions.
-const IMPORT_HERDR_RE = /(import[\s\S]*?from\s*["']|\bimport\s*["'])([^"']*transport\/herdr)["']/;
+// Match actual import statements (from "...transport/herdr(.ts)" / "...herdr/host(.ts)"),
+// not doc-comment mentions. Path updated for the workerhost seam split (PoC):
+// the herdr implementation moved to src/herdr/host.ts; the legacy
+// transport/herdr path stays in the matcher so a revert cannot pass vacuously.
+const IMPORT_HERDR_RE = /(import[\s\S]*?from\s*["']|\bimport\s*["'])([^"']*(transport\/herdr|herdr\/host))["']/;
 const offenders = restricted.filter((f) => IMPORT_HERDR_RE.test(readFileSync(f, "utf8")));
 check(
-	"T1.1 dependency rule: no src/ module ever imports transport/herdr.ts (herdr impl bound in index.ts only)",
+	"T1.1 dependency rule: no src/ module ever imports the herdr implementation (src/herdr/host.ts; impl bound in index.ts only)",
 	offenders.length === 0,
 	offenders.join(", "),
+);
+
+// Positive pin (workerhost split PoC, design §6 risk 1): the herdr adapter file
+// EXISTS and only the src/transport.ts re-export shim imports it — a tool
+// module importing the adapter directly (or the file going missing) fails here.
+// Direction note: this pin is fail-CLOSED on the file (existence is asserted,
+// unlike the vacuous-pass risk of a no-offender regex after a rename).
+const herdrHostPath = resolve(ROOT, "src/herdr/host.ts");
+let herdrHostExists = false;
+try {
+	statSync(herdrHostPath);
+	herdrHostExists = true;
+} catch {
+	herdrHostExists = false;
+}
+const herdrHostImporters = restricted
+	.filter((f) => f !== herdrHostPath)
+	.filter((f) => /from\s*["'][^"']*herdr\/host\.ts["']/.test(readFileSync(f, "utf8")) || /import\s*["'][^"']*herdr\/host\.ts["']/.test(readFileSync(f, "utf8")));
+check(
+	"T1.1c src/herdr/host.ts exists and is imported ONLY by the src/transport.ts shim (positive pin — impl reachable solely via the shim + index.ts binding)",
+	herdrHostExists && herdrHostImporters.every((f) => f === resolve(ROOT, "src/transport.ts")),
+	`exists=${herdrHostExists} importers=${herdrHostImporters.join(", ")}`,
 );
 
 const indexImportsHerdr = readFileSync(resolve(ROOT, "index.ts"), "utf8").includes(
@@ -293,7 +318,7 @@ check("T3.2 legacy herdr shape (tab.id) still parses", legacyTabPlacement.tabId 
 check(
 	"T3.3 teardown reconciles the paneId-fallback signature: transport resolves the live tab id when recorded tabId === paneId",
 	(() => {
-		const transportSrc = readFileSync(resolve(ROOT, "src/transport.ts"), "utf8");
+		const transportSrc = readFileSync(resolve(ROOT, "src/herdr/host.ts"), "utf8");
 		return /resolveLiveTabId\(req\.name\)/.test(transportSrc) && /recordedTabId === req\.placement\.paneId/.test(transportSrc);
 	})(),
 );

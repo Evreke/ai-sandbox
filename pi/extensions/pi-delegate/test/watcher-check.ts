@@ -103,9 +103,12 @@ const NOW = Date.parse("2026-09-06T12:00:00.000Z");
 // ---------------------------------------------------------------------------
 
 // Same matcher as static-check T1.1: real import statements, not doc comments.
-const IMPORT_HERDR_RE = /(import[\s\S]*?from\s*["']|\bimport\s*["'])([^"']*transport\/herdr)["']/;
+// Path updated for the workerhost seam split (PoC): the herdr implementation
+// moved to src/herdr/host.ts; the legacy transport/herdr path stays matched so
+// a revert cannot pass vacuously.
+const IMPORT_HERDR_RE = /(import[\s\S]*?from\s*["']|\bimport\s*["'])([^"']*(transport\/herdr|herdr\/host))["']/;
 const watchSrc = readFileSync(resolve(ROOT, "src/observe.ts"), "utf8");
-check("W1.1 observe.ts (watcher) does not import transport/herdr.ts (dependency rule)", !IMPORT_HERDR_RE.test(watchSrc));
+check("W1.1 observe.ts (watcher) does not import the herdr implementation (src/herdr/host.ts; dependency rule)", !IMPORT_HERDR_RE.test(watchSrc));
 check(
 	"W1.1b observe.ts takes the Transport seam from transport.ts",
 	/from\s+["']\.\/transport\.ts["']/.test(watchSrc),
@@ -114,7 +117,7 @@ const toolOffenders = readdirSync(resolve(ROOT, "src"), { withFileTypes: true })
 	.filter((e) => e.isFile() && e.name.endsWith(".ts"))
 	.map((e) => resolve(ROOT, "src", e.name))
 	.filter((f) => IMPORT_HERDR_RE.test(readFileSync(f, "utf8")));
-check("W1.1c no src/ module imports transport/herdr.ts (impl bound in index.ts only)", toolOffenders.length === 0, toolOffenders.join(", "));
+check("W1.1c no src/ module imports the herdr implementation (src/herdr/host.ts; impl bound in index.ts only)", toolOffenders.length === 0, toolOffenders.join(", "));
 
 const indexSrc = readFileSync(resolve(ROOT, "index.ts"), "utf8");
 check(
