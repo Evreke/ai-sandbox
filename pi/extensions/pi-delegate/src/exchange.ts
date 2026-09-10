@@ -817,11 +817,36 @@ export function parseBriefSchema(briefPath: string): Record<string, unknown> | n
 }
 
 /**
- * Report-filename mentions in brief prose: report-<word>.json / report-<word>.md.
- * The word part uses the worker-name alphabet; the file part is matched
- * case-sensitively (worker writes exactly what the brief says).
+ * Deterministic prose pre-pass for the brief report-mention scan (D2 of the
+ * report-mismatch critique): strip fenced code blocks (``` pairs — e.g. an
+ * example report JSON) and inline backtick spans (quoted filenames). A
+ * mention inside code or quotes is documentation, not a report destination.
+ * Pure string processing — no LLM, no nondeterminism. Unterminated constructs
+ * are left untouched (conservative: an unclosed fence never hides a real
+ * mention from the scan).
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: raw brief text
+ * Output: the text with every COMPLETE fenced code block and COMPLETE inline
+ *   backtick span replaced by a space
+ * Guarantees: deterministic; never throws
+ * Raises: never
  */
-const REPORT_MENTION_RE = /report-[A-Za-z0-9_-]+\.(?:json|md)/g;
+function stripQuotedReportContext(text: string): string {
+	return text.replace(/```[\s\S]*?```/g, " ").replace(/`[^`\n]*`/g, " ");
+}
+
+/**
+ * Report-filename mentions in brief prose: report-<word>.json / report-<word>.md.
+ * Matching is case-INSENSITIVE (D5: a case-variant must not slip past layer 1 —
+ * the filesystem is case-sensitive, so only an exact-case or case-variant-of-
+ * canonical mention can ever resolve to a watched file). The negative
+ * lookbehind excludes mentions embedded in paths and URLs (…/report-x.json):
+ * a brief REFERENCING a report by path or URL is not pointing its worker at
+ * it; bare prose mentions are. Combined with stripQuotedReportContext, the
+ * scan sees only bare prose outside code, quotes, paths and URLs.
+ */
+const REPORT_MENTION_RE = /(?<![\/\w.-])report-[A-Za-z0-9_-]+\.(?:json|md)/gi;
 
 /**
  * Spawn-time fail-fast validation of the brief's report contract (design
@@ -850,6 +875,11 @@ const REPORT_MENTION_RE = /report-[A-Za-z0-9_-]+\.(?:json|md)/g;
  *     sibling worker's report-<other>.json where <other> is a DIFFERENT
  *     valid worker name (fan-out briefs legitimately reference sibling
  *     reports; a .md mention is never a valid sibling — reports are JSON)
+ *   - context narrowing (D2/D5, deterministic): mentions inside fenced code
+ *     blocks or inline backtick spans, embedded in a path/URL (preceded by
+ *     /, a word char, a dot or a dash), and CASE-VARIANTS OF THE CANONICAL
+ *     basename (report-<name>.JSON) are NOT violations; a case-variant of
+ *     any NON-canonical report name IS one
  *   - reads the brief at most once
  *   - never throws: a missing/unreadable brief is { ok: false } with a
  *     readable error
@@ -887,11 +917,19 @@ export function validateBriefReportContract(
 
 	// (2) Prose scan: every report-* mention must resolve to the canonical
 	// report, sibling .json mentions of OTHER valid worker names excepted.
+	// The scan runs on the stripped copy (D2): fenced code blocks and inline
+	// backtick spans are documentation, not destinations.
 	const offenders = new Set<string>();
-	for (const m of text.matchAll(REPORT_MENTION_RE)) {
+	for (const m of stripQuotedReportContext(text).matchAll(REPORT_MENTION_RE)) {
 		const mention = m[0];
-		if (mention === canonical) continue;
-		const other = /^report-([A-Za-z0-9_-]+)\.json$/.exec(mention);
+		// D5: a case-variant of the canonical basename IS the canonical report
+		// (a case-sensitive filesystem would hide the case-variant file from
+		// every scan — but the mention still MEANS the canonical report; the
+		// prompt pins the exact spelling). A case-variant of anything else is a
+		// violation (the sibling check below is case-sensitive via
+		// WORKER_NAME_RE's lowercase alphabet).
+		if (mention.toLowerCase() === canonical.toLowerCase()) continue;
+		const other = /^report-([A-Za-z0-9_-]+)\.json$/i.exec(mention);
 		if (other && other[1] !== requestedName && WORKER_NAME_RE.test(other[1])) continue; // sibling worker's report
 		offenders.add(mention);
 	}
