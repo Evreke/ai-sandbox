@@ -23,7 +23,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readManifest, scanAllManifests, updateManifest } from "../src/exchange.ts";
+import { readManifest, scanAllManifests, updateManifest, type ManifestWorker } from "../src/exchange.ts";
 import { registerDelegateTool } from "../src/spawn.ts";
 import { FakeWorkerHost } from "../src/host/fake.ts";
 import type { Transport } from "../src/host.ts";
@@ -284,7 +284,7 @@ if (toolEntry) {
 {
 	const droot = join(EXCHANGE_SANDBOX, `scan-gate-${process.pid}`);
 	mkdirSync(droot, { recursive: true });
-	const legacyEntry = {
+	const legacyEntry: ManifestWorker = {
 		name: "legacy-worker",
 		placement: { kind: "tab", workspaceId: "ws-l", paneId: "pane-l", checkoutPath: repoDir },
 		briefPath: "",
@@ -294,7 +294,7 @@ if (toolEntry) {
 		thinking: "low",
 		startedAt: new Date().toISOString(),
 	};
-	const fakeEntry = {
+	const fakeEntry: ManifestWorker = {
 		...legacyEntry,
 		name: "fake-worker",
 		placement: { kind: "tab", workspaceId: "ws-f", paneId: "pane-f", checkoutPath: repoDir, backend: "fake", placementRef: "fake:1" },

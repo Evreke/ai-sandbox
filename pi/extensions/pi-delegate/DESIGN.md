@@ -1120,8 +1120,13 @@ layer. The seam interface keeps its historical type name `Transport`
   E_* taxonomy (+ `GUIDANCE`), report/mailbox/progress contracts, `briefPrompt`,
   budget constants, and `sessionHasReply`. Imports node builtins ONLY — bottom
   of the graph (pinned fail-closed by static-check T1.1d). Backend ids
-  (paneId/tabId/workspaceId) appear NOWHERE in the seam types: placement and
-  agents are keyed by an opaque, adapter-defined `placementRef`.
+  (workspaceId/paneId/tabId) are absent from the OPERATION types: `StartReq`/
+  `TeardownReq` key on the opaque, adapter-defined `placementRef`, and the read
+  model `AgentStatus` carries only `{name, status, placementRef?}`. The legacy
+  id fields survive ONLY as deprecated-compat: `Placement` keeps `workspaceId`
+  and `paneId` (no `tabId`), and manifest records may carry them alongside
+  `backend` + `placementRef` — the ALONGSIDE rule (§24.2 invariant 4) keeps
+  them for the 1.15.x version-skew cohort; do not delete them.
 - **`src/herdr/host.ts`** — the herdr adapter: CLI plumbing (`runHerdr` with
   SIGKILL escalation), the NDJSON socket client, the mutation queue, result
   mappers, and the adapter-private id codec (`herdr:pane:<paneId>` refs).

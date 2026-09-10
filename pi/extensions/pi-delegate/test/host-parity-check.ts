@@ -22,10 +22,10 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { readManifest, updateManifest } from "../src/exchange.ts";
+import { readManifest, updateManifest, type ManifestWorker } from "../src/exchange.ts";
 import { FakeWorkerHost } from "../src/host/fake.ts";
 import { createHerdrTransport } from "../src/herdr/host.ts";
-import type { ManifestWorker, Placement, Transport } from "../src/host.ts";
+import type { Placement, Transport } from "../src/host.ts";
 
 const execFileP = promisify(execFile);
 
@@ -179,11 +179,14 @@ check(
 check("P3.fake teardown ×2: both calls resolve (second = idempotent no-op)", fakeFlow.secondTeardownOk && fakeFlow.teardownCalls === 2, `calls=${fakeFlow.teardownCalls}`);
 check("P4.fake ref-based dedup: only THIS flow's entry removed, same-name other-ref survives", fakeFlow.dedupSurvivor === "parity-other");
 
-// Read-model parity: the fake's statuses leak no backend ids.
+// Read-model parity: the fake's statuses leak no backend ids. The pin reads
+// via `in` deliberately — AgentStatus is the seam read model and does not
+// DECLARE the legacy id fields; the check must stay a runtime probe, not a
+// typed property access (QA D3: TS2339 on the untyped reads).
 const fakeStatus = await fakeHost.getStatus("parity-fake");
 check(
 	"P5.fake read model carries no backend ids (only name/status/placementRef)",
-	fakeStatus === null || (fakeStatus.paneId === undefined && fakeStatus.tabId === undefined && fakeStatus.workspaceId === undefined),
+	fakeStatus === null || (!("paneId" in fakeStatus) && !("tabId" in fakeStatus) && !("workspaceId" in fakeStatus)),
 	JSON.stringify(fakeStatus),
 );
 
