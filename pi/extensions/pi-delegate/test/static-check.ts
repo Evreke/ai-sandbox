@@ -299,6 +299,35 @@ check(
 );
 
 // ---------------------------------------------------------------------------
+// 8. Watcher log UX pin (2026-09-10): the production log sink must write an
+// audit file and surface to the pane ONLY errors/anomalies — routine retire
+// bookkeeping must never reach the user's UI again.
+// ---------------------------------------------------------------------------
+
+const observeSrcAll = readFileSync(resolve(ROOT, "src/observe.ts"), "utf8");
+check(
+	"T4.1 startWatcher's log sink audits to delegate-watch.log",
+	/log: \(m: string\) => \{[\s\S]{0,400}?delegate-watch\.log/.test(observeSrcAll),
+);
+check(
+	"T4.2 the sink filters: the pane shows only error/fail/already-gone/unavailable lines",
+	/log: \(m: string\) => \{[\s\S]{0,400}?already gone[\s\S]{0,200}?console\.error/.test(observeSrcAll),
+);
+check(
+	"T4.3 /delegate-teardown skips retired history instead of erroring tab_not_found on it",
+	/actionsble = views\.filter\(\(v\) => v\.retired !== true\)/.test(observeSrcAll) ||
+		/actionable = views\.filter\(\(v\) => v\.retired !== true\)/.test(observeSrcAll),
+);
+check(
+	"T4.4 the teardown command treats a not-found close as an idempotent no-op success",
+	/isAlreadyGone\(err\)[\s\S]{0,200}?already closed, no-op/.test(observeSrcAll),
+);
+check(
+	"T4.5 WorkerView carries the retired flag (manifest history marker)",
+	readFileSync(resolve(ROOT, "src/fleet.ts"), "utf8").includes("retired: typeof worker.retiredAt"),
+);
+
+// ---------------------------------------------------------------------------
 // 6. F6 review-fix pin — same-name spawn clears a stale nudge-failed marker
 // (review minor #1): the spawn flow deletes nudge-failed-<name>.json right
 // after appending the manifest entry, or a fresh watcher session would

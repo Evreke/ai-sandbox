@@ -40,6 +40,11 @@ Version numbers align with the iteration numbering in DESIGN.md (v1.x sections).
   close (pane already gone) is treated as a successful retire — no more
   `tab_not_found` error spam every tick; genuine teardown failures keep the
   advisory retry.
+- **`/delegate-teardown` output**: manifest history entries (retired workers
+  are never deleted) are skipped with a count instead of being attempted —
+  the command no longer prints a wall of `tab_not_found` errors for
+  long-closed workers; a not-found close inside the command is a clean
+  "already closed, no-op" success (parity with the retire pass).
 - **Stale nudge-failed marker**: a same-name retry deletes any leftover
   marker at spawn (a fresh watcher session would re-fire it once).
 - `nudgeFailedPathFor`/`readNudgeFailedMarker` moved to `exchange.ts`
@@ -52,6 +57,10 @@ Version numbers align with the iteration numbering in DESIGN.md (v1.x sections).
 
 - README rebuilt bilingual (EN/RU) with header cross-links; the field case
   study and client identifiers removed from the public surface (NDA scrub).
+- **Watcher log UX**: routine watcher bookkeeping (e.g. routine retire
+  successes) no longer surfaces in the pane — every line goes to the audit
+  file `~/.pi/agent/delegate-watch.log`; the pane shows only errors and
+  anomalies (close failures, "pane was already gone").
 
 ## [1.15.0] — 2026-09-09
 

@@ -1667,6 +1667,21 @@ export function startWatcher(
 		intervalMs: cfg.intervalMs,
 		self: { sessionFile, cwd: ctx.cwd },
 		send: makeSender(pi),
+		// Watcher log sink (UX fix, 2026-09-10): the default console.error sink
+		// surfaced INTERNAL bookkeeping (routine retire successes) into the user's
+		// pane. Every line now goes to the audit file (append-only, best-effort);
+		// the pane shows ONLY lines that need a human: errors and anomalies
+		// ("already gone" — the pane vanished before the TTL close, the agent may
+		// still be alive detached; see resolveLiveTabId's drift guard).
+		log: (m: string) => {
+			void appendFile(
+				join(homedir(), ".pi", "agent", "delegate-watch.log"),
+				`${new Date().toISOString()} ${m}\n`,
+			).catch(() => undefined); // audit is advisory — never throw past the tick
+			if (/\berror\b|\bfail|already gone|unavailable/i.test(m)) {
+				console.error(`[pi-delegate watch] ${m}`);
+			}
+		},
 		// v1.12.1: the worker-stale threshold threads from watch.staleAfterMs
 		// (deps.detect can still override per-mount, e.g. in tests).
 		// §23: the retire TTL threads the same way.
@@ -1730,12 +1745,29 @@ export function registerCommands(pi: import("@earendil-works/pi-coding-agent").E
 				return;
 			}
 
-			const list = views
+			// Manifest history vs actionable workers (UX fix, 2026-09-10): manifest
+			// worker entries are NEVER deleted, so the scan returns every worker
+			// ever spawned — the wall of “✗ tab_not_found” for long-closed workers
+			// looked like a catastrophe while meaning “nothing to close”. Retired
+			// entries are HISTORY: skipped with a count, never attempted.
+			const retiredViews = views.filter((v) => v.retired === true);
+			const actionable = views.filter((v) => v.retired !== true);
+			if (actionable.length === 0) {
+				ctx.ui.notify(
+					`Nothing to tear down — all ${views.length} manifest entries are retired history.`,
+					"info",
+				);
+				disposeFleetUI();
+				return;
+			}
+
+			const list = actionable
 				.map((v) => `${v.name} (${v.kind}${v.branch ? `, branch ${v.branch}` : ""})`)
 				.join(", ");
+			const retiredNote = retiredViews.length > 0 ? ` (plus ${retiredViews.length} retired history entries skipped)` : "";
 			const confirmed = await ctx.ui.confirm(
 				"Tear down delegate workers?",
-				`${views.length} worker(s): ${list}`,
+				`${actionable.length} worker(s): ${list}${retiredNote}`,
 			);
 			if (!confirmed) {
 				ctx.ui.notify("Teardown cancelled — workers left running.", "info");
@@ -1743,7 +1775,7 @@ export function registerCommands(pi: import("@earendil-works/pi-coding-agent").E
 			}
 
 			const outcomes: string[] = [];
-			for (const v of views) {
+			for (const v of actionable) {
 				// Pre-log the planned mutating op BEFORE executing it (audit trail).
 				await logTo(
 					v.dir,
@@ -1756,6 +1788,14 @@ export function registerCommands(pi: import("@earendil-works/pi-coding-agent").E
 					await logTo(v.dir, `done: teardown worker=${v.name} ok`);
 					outcomes.push(`✓ ${v.name} (${v.kind}) torn down`);
 				} catch (err) {
+					// Idempotent close (parity with the retire pass): a "not found"
+					// teardown means the pane/workspace is ALREADY gone — a success for
+					// bookkeeping, not an error. Only genuine failures stay ✗.
+					if (isAlreadyGone(err)) {
+						await logTo(v.dir, `done: teardown worker=${v.name} no-op (already gone)`);
+						outcomes.push(`✓ ${v.name} (${v.kind}) — already closed, no-op`);
+						continue;
+					}
 					await logTo(v.dir, `error: teardown worker=${v.name} failed: ${errText(err)}`);
 					const de = asDelegateError(err);
 					const advice = de?.guidance

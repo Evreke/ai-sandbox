@@ -1622,6 +1622,10 @@ export interface WorkerView {
 	reportPath: string;
 	/** True when the report file currently exists on disk. */
 	reportExists: boolean;
+	/** True when the manifest records `retiredAt` — the worker is HISTORY
+	 *  (pane already closed, by retire/teardown/manual): the teardown command
+	 *  must not attempt (and fail tab_not_found) on it. */
+	retired?: boolean;
 	/** ISO 8601 start time from the manifest. */
 	startedAt: string;
 	/** Ms since startedAt (0 when unparseable). */
@@ -1678,6 +1682,7 @@ export async function buildWorkerView(transport: Transport): Promise<WorkerView[
 				// EXTERNAL_DEPENDENCY: report file existence check on disk at
 				// worker.reportPath (under /tmp/exchange/<task>/).
 				reportExists: await fileExists(worker.reportPath),
+				retired: typeof worker.retiredAt === "string" && worker.retiredAt.length > 0,
 				startedAt: worker.startedAt,
 				elapsedMs: Number.isFinite(startedMs) ? Math.max(0, Date.now() - startedMs) : 0,
 			});
