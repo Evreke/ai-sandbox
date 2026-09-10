@@ -83,6 +83,7 @@
 // archiveReport now lives in ./exchange.ts, watch/collect config in
 // ./observe.ts, ui render helpers in ./fleet.ts, the transport surface in
 // ./transport.ts (facades remain at the old paths until W5).
+import { statSync } from "node:fs";
 import { appendFile, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
@@ -1479,6 +1480,12 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			//   - fallbackUsed is true for any adopted non-canonical path (the
 			//     uniquification case)
 			//   - the fragment applies on the first pass and every grace recheck alike
+			//   - D4 fence: on a same-name RESPAWN (a prior manifest entry for the
+			//     canonical name with a different startedAt) the canonical candidate
+			//     must also satisfy mtimeMs >= startedAt — when it does not, it is
+			//     fenced out and reported as staleCanonical (the terminal failure is
+			//     E_REPORT_MISSING naming the file, never a silent adoption); on a
+			//     genuine first spawn acceptance stays unconditional
 			// Raises: never (all failures come back as {ok:false})
 			// Strict collect over the scanned candidates: on collision herdr may
 			// have renamed the agent AFTER the brief was written, and a misdirected
@@ -1489,24 +1496,64 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				usedPath: string;
 				fallbackUsed: boolean;
 				foundPaths: string[];
+				/** True when the canonical candidate was fenced out as stale and IS the
+				 *  primary failure (no other candidate validated). */
+				staleCanonical: boolean;
 			} => {
 				// v1.2: base ∩ brief-fragment validation (DESIGN.md §11) — the declared
 				// schema applies on the first pass and on every grace recheck alike.
-				const candidates = scanReportCandidates(manifestDir, startedAtDate.getTime(), canonical);
+				//
+				// BUG_FIX_CONTEXT (D4, report-mismatch critique): symptom — a same-name
+			// respawn adopted a STALE report: scanReportCandidates exempts the
+			// canonical path from the mtime fence, and the earlier run's report sits
+			// exactly there with a worker field that matches (same name). Why the
+			// old shape did not work — the stale fence was asymmetric: strays were
+			// fenced, the canonical path (where a same-name stale report actually
+			// lands) was not, and the orphaned pane could even refresh the mtime
+			// past the new startedAt. What was done — when readManifest already
+			// holds a PRIOR entry for the canonical name (different startedAt ⇒ a
+			// respawn; this run's own entry carries THIS run's startedAt), the
+			// canonical candidate is required to satisfy mtimeMs >= startedAt too;
+			// a genuine first spawn keeps today's unconditional acceptance.
+				const startedAtMs = startedAtDate.getTime();
+				const isRespawn = (readManifest(manifestDir)?.workers ?? []).some(
+					(w) => w.name === canonical && w.startedAt !== startedAtDate.toISOString(),
+				);
+				let staleCanonical = false;
+				let staleCanonicalError = "";
+				const candidates = scanReportCandidates(manifestDir, startedAtMs, canonical).filter((p) => {
+					if (!isRespawn || p !== reportPath) return true;
+					let mtimeMs: number | null = null;
+					try {
+						mtimeMs = statSync(p).mtimeMs;
+					} catch {
+						// unreadable mid-scan → freshness unprovable → do not adopt
+					}
+					if (mtimeMs !== null && mtimeMs >= startedAtMs) return true;
+					staleCanonical = true;
+					staleCanonicalError =
+						`report at ${p} predates this spawn (mtime ${mtimeMs === null ? "unknown" : String(mtimeMs)} < startedAt ${startedAtDate.toISOString()}) — a stale report from an earlier same-name run is never adopted`;
+					return false;
+				});
 				const foundPaths: string[] = [];
 				let primary: { verdict: { ok: true; report: WorkerReport } | { ok: false; error: string }; usedPath: string } | null = null;
 				for (const candidate of candidates) {
 					const v = validateReportAgainstSchema(candidate, canonical, briefSchema);
 					if (v.ok) {
-						return { verdict: v, usedPath: candidate, fallbackUsed: candidate !== reportPath, foundPaths };
+						return { verdict: v, usedPath: candidate, fallbackUsed: candidate !== reportPath, foundPaths, staleCanonical: false };
 					}
 					foundPaths.push(candidate);
 					if (primary === null) primary = { verdict: v, usedPath: candidate };
 				}
 				// No candidate validated: the canonical verdict (or the first candidate's
-				// when even the canonical path never existed) is the primary failure.
+				// when even the canonical path never existed) is the primary failure —
+				// unless the canonical candidate was FENCED OUT as stale (D4): then the
+				// staleness IS the primary failure, named by path.
+				if (primary === null && staleCanonical) {
+					return { verdict: { ok: false as const, error: staleCanonicalError }, usedPath: reportPath, fallbackUsed: false, foundPaths, staleCanonical: true };
+				}
 				const fallbackVerdict = primary ?? { verdict: { ok: false as const, error: `no report candidate found in ${manifestDir}` }, usedPath: reportPath };
-				return { verdict: fallbackVerdict.verdict, usedPath: fallbackVerdict.usedPath, fallbackUsed: false, foundPaths };
+				return { verdict: fallbackVerdict.verdict, usedPath: fallbackVerdict.usedPath, fallbackUsed: false, foundPaths, staleCanonical: false };
 			};
 
 			// BUG_FIX_CONTEXT: symptom — a passed smoke gate was lost to a generic
@@ -2011,7 +2058,9 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				return successResult(collected.verdict.report, collected.usedPath, settle.status, note);
 			}
 
-			const missing = !(await reportExists(collected.usedPath));
+			// D4: a fenced-out stale canonical report counts as MISSING for this run
+			// (the file exists on disk, but it belongs to an earlier same-name run).
+			const missing = collected.staleCanonical || !(await reportExists(collected.usedPath));
 			// Honest-settle v1.6 (DESIGN.md §19.1): neverStarted → the prompt was
 			// never consumed and the worker never started — a distinct terminal code
 			// instead of E_REPORT_MISSING. Field is pre-approved on SettleResult;
@@ -2024,9 +2073,11 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				: "E_REPORT_INVALID";
 			const what = neverStarted && missing
 				? "prompt never consumed — worker never started"
-				: missing
-					? `no report file at ${collected.usedPath} after settle (status: ${settle.status})`
-					: `report at ${collected.usedPath} failed schema validation: ${collected.verdict.error}`;
+				: collected.staleCanonical
+					? `no report for THIS run — ${collected.verdict.error}`
+					: missing
+						? `no report file at ${collected.usedPath} after settle (status: ${settle.status})`
+						: `report at ${collected.usedPath} failed schema validation: ${collected.verdict.error}`;
 				// Found-but-unvalidatable evidence (report-path mismatch incident,
 				// 2026-09): a misdirected report must surface by NAME, never as
 				// silence — the orchestrator sees exactly what landed instead of only
