@@ -724,6 +724,7 @@ workers' session JSONL (usage gauges + a tail-window tool-call scan).
 | `context-critical` | `contextPct ≥ CONTEXT_CRITICAL_PCT` (90) vs `resolveContextWindow(model)` | pct + "steer it to wrap up now / plan a fresh-name retry" |
 | `worker-dead` | herdr knows the agent is gone (no live status) AND no report on disk | "exited without producing anything — read the pane, then diagnosed retry" |
 | `worker-stale` (v1.12.1, §22) | manifest `collectedAt` older than `watch.staleAfterMs` AND the worker still live in herdr | "collected N min ago and still mounted — tear it down (/delegate-teardown) or keep" |
+| `report-mismatch` (report-path mismatch incident, 2026-09) | worker LIVE, not a probe, not yet collected, watched report ABSENT, ≥1 assistant turn in the session JSONL, and `now - startedAt ≥ watch.mismatchGraceMs` (default 2 min, floor 10 s) | lists every `report-*` file newer than startedAt in the task dir + "read the pane, salvage the work, collect manually or do a diagnosed retry" |
 
 **Dedup.** Key = `dir#worker#kind`; an event fires **at most once** per key
 until the condition stops being true, at which point the key is forgotten and
@@ -735,8 +736,9 @@ key — `report-ready`/`report-invalid` the report mtime, `mailbox-question` the
 envelope `ts`, `grill-deck` the invocation count, `worker-stale` the `collectedAt`
 stamp (§22) — because a *rewritten* report, a *re-asked* question, a *second* deck and a
 *re-collected* worker are new facts, and suppressing them would silently drop the only
-signal the orchestrator has. `context-critical` and `worker-dead` stay key-only: they
-must fire exactly once. One `sendUserMessage` per **batch** (per tick), never per event.
+signal the orchestrator has. `context-critical`, `worker-dead` and `report-mismatch` stay key-only: they
+must fire exactly once (report-mismatch fires once per worker lifetime — a later landing
+report still fires the ordinary fingerprinted report-ready on top). One `sendUserMessage` per **batch** (per tick), never per event.
 
 **Suppressions** (each pinned by a test): `worker-dead` never fires while herdr
 is unreachable (statuses unknown ≠ dead), inside the 60 s placement grace
@@ -766,7 +768,7 @@ criterion.
 **Config** (`~/.pi/agent/pi-delegate.config.json`, tolerant, never throws):
 
 ```json
-{ "watch": { "intervalMs": 10000, "settleGateMs": 15000, "staleAfterMs": 1800000, "releaseOn": "started" } }
+{ "watch": { "intervalMs": 10000, "settleGateMs": 15000, "staleAfterMs": 1800000, "mismatchGraceMs": 120000, "releaseOn": "started" } }
 ```
 
 `intervalMs` (default 10 000, floor 1 000) is the poll period; `settleGateMs`
@@ -775,7 +777,10 @@ proves "the worker started" and hands over. Explicit `waitMs` still wins
 (uncapped opt-in), the legacy `timeoutMs` cap of 120 s stays, probe keeps its
 120 s smoke window. `staleAfterMs` (v1.12.1, default 1 800 000 = 30 min, floor
 60 000) is the `worker-stale` threshold (§22); the overlay's stale age tail
-(§22.3) shares the 30-min default.
+(§22.3) shares the 30-min default. `mismatchGraceMs` (report-path mismatch
+incident, 2026-09, default 120 000 = 2 min, floor 10 000) is the
+`report-mismatch` grace: a live worker that has spoken but produced no report
+at the watched path fires the mismatch event once this long after startedAt.
 
 **Result texts.** `E_TIMEOUT` and the detached result now carry the discipline
 in one line: *end your turn — the watcher wakes you*. `delegate_status` polling

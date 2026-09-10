@@ -1088,9 +1088,9 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 	// convention as W14.17 — startWatcher needs a live pi to runtime-test).
 	const watchSrcStale = watchSrc;
 	check(
-		"W15.15 startWatcher threads watch.staleAfterMs (and §23 retireTtlMs) into detect opts",
+		"W15.15 startWatcher threads watch.staleAfterMs (and §23 retireTtlMs, report-mismatch mismatchGraceMs) into detect opts",
 		/staleAfterMs: cfg\.staleAfterMs/.test(watchSrcStale) &&
-			/detect: \{ staleAfterMs: cfg\.staleAfterMs, retireTtlMs: cfg\.retireTtlMs \}/.test(watchSrcStale),
+			/detect: \{ staleAfterMs: cfg\.staleAfterMs, retireTtlMs: cfg\.retireTtlMs, mismatchGraceMs: cfg\.mismatchGraceMs \}/.test(watchSrcStale),
 	);
 }
 

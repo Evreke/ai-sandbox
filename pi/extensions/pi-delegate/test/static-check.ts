@@ -394,6 +394,33 @@ check(
 );
 
 // ---------------------------------------------------------------------------
+// T3. Single-derivation invariant (report-path mismatch incident, 2026-09):
+// reportPathFor is the ONLY place in src/ that constructs a report- filename
+// (the prompt prose mention in host.ts is text, not a path derivation). A
+// second derivation (like the deleted brief-stem one in ensureExchangeDir)
+// would let report paths disagree silently again — grep-level guard.
+// ---------------------------------------------------------------------------
+
+{
+	const offenders: string[] = [];
+	for (const f of listTsFiles(resolve(ROOT, "src"))) {
+		const lines = readFileSync(f, "utf8").split("\n");
+		for (const [i, line] of lines.entries()) {
+			if (/report-\$\{/.test(line)) offenders.push(`${f}:${i + 1}`);
+		}
+	}
+	const exchangeLines = offenders.filter((o) => o.includes(`${resolve(ROOT, "src")}/exchange.ts`));
+	const hostLines = offenders.filter((o) => o.includes(`${resolve(ROOT, "src")}/host.ts`));
+	check(
+		"T3.1 reportPathFor (exchange.ts) is the only report- filename construction in src/ outside the prompt prose",
+		offenders.length === exchangeLines.length + hostLines.length &&
+			exchangeLines.length === 1 && // reportPathFor's single return
+			hostLines.length === 1, // briefPrompt's prose mention (text, not a derivation)
+		offenders.join(", "),
+	);
+}
+
+// ---------------------------------------------------------------------------
 
 console.log(failures === 0 ? "\nALL STATIC CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

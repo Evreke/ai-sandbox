@@ -861,8 +861,11 @@ export function validateBriefReportContract(
 	requestedName: string,
 	manifestDir: string,
 ): { ok: true } | { ok: false; error: string } {
-	const canonical = `report-${requestedName}.json`;
+	// Single-derivation invariant: the canonical report path comes from
+	// reportPathFor — the ONLY place in src/ that constructs a report-
+	// filename; the comparison basename is derived from it, never re-built.
 	const canonicalPath = reportPathFor(manifestDir, requestedName);
+	const canonical = basename(canonicalPath);
 	let text: string;
 	try {
 		text = readFileSync(briefPath, "utf8");

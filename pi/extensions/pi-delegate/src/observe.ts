@@ -97,6 +97,7 @@ import {
 	readQuestion,
 	releasePathFor,
 	scanAllManifests,
+	scanReportCandidates,
 	updateManifest,
 	validateReport,
 	validateReportAgainstSchema,
@@ -425,6 +426,15 @@ export const WATCH_MIN_STALE_AFTER_MS = 60_000;
  *  0 is legal (close on the first retirable tick). Inactive unless the
  *  master switch watch.retire is explicitly true — auto-teardown is OPT-IN. */
 export const RETIRE_DEFAULT_TTL_MS = 900_000;
+/** report-mismatch grace (report-path mismatch incident, 2026-09): how long a
+ *  LIVE worker that has SPOKEN but produced no report at the watched path
+ *  stays un-woken before the mismatch event fires. Conservative: long enough
+ *  that every genuinely slow worker (thinking, tooling) clears it without a
+ *  wake, short enough that a finished-but-misdirected worker cannot hang the
+ *  orchestrator for long. */
+export const WATCH_DEFAULT_MISMATCH_GRACE_MS = 120_000;
+/** Floor for mismatchGraceMs — a typo like 5 must not wake per tick. */
+export const WATCH_MIN_MISMATCH_GRACE_MS = 10_000;
 /** §23 master switch default: FALSE — the watcher never closes panes unless
  *  the operator opted in via watch.retire:true (user decision, mandatory). */
 export const RETIRE_DEFAULT_ENABLED = false;
@@ -445,6 +455,10 @@ export interface WatchConfig {
 	/** §23 master switch (default FALSE): when false, the retire pass is a
 	 *  no-op — panes NEVER close, no retirableSince is ever stamped. */
 	retire: boolean;
+	/** report-mismatch grace (default 2 min, floor 10 s): a live worker that
+	 *  has spoken but produced no report at the watched path fires the
+	 *  mismatch event once this long after startedAt. */
+	mismatchGraceMs: number;
 }
 
 /** Shared tolerant config read (v1.12.1): null when absent/corrupt/not an
@@ -490,6 +504,7 @@ export function resolveWatchConfig(): WatchConfig {
 		releaseOn: "settle",
 		retireTtlMs: RETIRE_DEFAULT_TTL_MS,
 		retire: RETIRE_DEFAULT_ENABLED,
+		mismatchGraceMs: WATCH_DEFAULT_MISMATCH_GRACE_MS,
 	};
 	try {
 		const e = readDelegateConfig()?.watch;
@@ -525,6 +540,7 @@ export function resolveWatchConfig(): WatchConfig {
 			releaseOn: w.releaseOn === "started" ? "started" : "settle",
 			retireTtlMs,
 			retire,
+			mismatchGraceMs: num(w.mismatchGraceMs, fallback.mismatchGraceMs, WATCH_MIN_MISMATCH_GRACE_MS),
 		};
 	} catch {
 		return fallback; // defensive — readDelegateConfig already absorbs throws
@@ -612,7 +628,8 @@ export type WatchEventKind =
 	| "grill-deck"
 	| "context-critical"
 	| "worker-dead"
-	| "worker-stale";
+	| "worker-stale"
+	| "report-mismatch";
 
 export interface WatchEvent {
 	worker: string;
@@ -1023,6 +1040,10 @@ export interface DetectOptions {
 	/** worker-stale threshold (§22): injectable for tests; production threads
 	 *  watch.staleAfterMs via startWatcher. Default WATCH_DEFAULT_STALE_AFTER_MS. */
 	staleAfterMs?: number;
+	/** report-mismatch grace (report-path mismatch incident, 2026-09):
+	 *  injectable for tests; production threads watch.mismatchGraceMs via
+	 *  startWatcher. Default WATCH_DEFAULT_MISMATCH_GRACE_MS (2 min, floor 10 s). */
+	mismatchGraceMs?: number;
 	/** §23 retire TTL (ms since the worker became retirable): injectable for
 	 *  tests; production threads watch.retireTtlMs via startWatcher. Consumed
 	 *  by the retire pass (createWatcher tick), not by detectWorkerEvents. */
@@ -1204,6 +1225,47 @@ export function detectWorkerEvents(w: WatchWorker, opts: DetectOptions = {}): Wa
 				"worker-dead",
 				`has no live host status and no report at ${w.reportPath} — it exited without producing ` +
 					"anything. Treat as a failed spawn: read the pane, then a diagnosed retry.",
+			),
+		);
+	}
+
+	// 5b. report-mismatch (report-path mismatch incident, 2026-09) — a LIVE
+	//     worker that has SPOKEN (≥1 assistant turn in its session JSONL) but
+	//     produced NO report at the watched path past the mismatch grace.
+	//     BUG_FIX_CONTEXT: symptom — an orchestrator's brief pointed the worker
+	//     at report-impl.md; the worker obeyed, finished real work and went
+	//     IDLE, and the watcher stayed silent forever because the only
+	//     missing-report salvage (worker-dead) requires !live and the watcher
+	//     stats exactly one path. Why the old shape did not work — a live idle
+	//     finished worker is precisely the state no salvage covered. What was
+	//     done — this branch fires ONCE per worker lifetime (key-only dedup,
+	//     same semantics as worker-dead) and lists every report-* file newer
+	//     than startedAt in the task dir, so the orchestrator sees exactly what
+	//     landed instead of the watched path. A later landing report still
+	//     fires the ordinary fingerprinted report-ready on top.
+	//     Invariant: for every non-probe live worker that has produced output,
+	//     exactly one of report-ready, report-invalid or report-mismatch is
+	//     eventually firable — an indefinitely silent finished worker is
+	//     unreachable.
+	if (
+		w.live &&
+		!w.probe &&
+		w.collectedAt === undefined &&
+		reportMtime === null &&
+		w.sessionPath !== undefined &&
+		parseSessionUsage(w.sessionPath).turns > 0 &&
+		w.startedAtMs !== undefined &&
+		nowMs - w.startedAtMs >= (opts.mismatchGraceMs ?? WATCH_DEFAULT_MISMATCH_GRACE_MS)
+	) {
+		const strays = scanReportCandidates(w.dir, w.startedAtMs, w.name).filter((p) => p !== w.reportPath);
+		events.push(
+			mk(
+				"report-mismatch",
+				`worker is live and has spoken but no report landed at ${w.reportPath} (past the mismatch grace) — ` +
+					(strays.length > 0
+						? `report files newer than start in ${w.dir}: ${strays.join(", ")} (siblings' reports belong to their own workers) — `
+						: `no report-* file newer than start in ${w.dir} either — `) +
+						"read the pane, salvage the work, collect manually or do a diagnosed retry",
 			),
 		);
 	}
@@ -1782,7 +1844,7 @@ export function startWatcher(
 		// v1.12.1: the worker-stale threshold threads from watch.staleAfterMs
 		// (deps.detect can still override per-mount, e.g. in tests).
 		// §23: the retire TTL threads the same way.
-		detect: { staleAfterMs: cfg.staleAfterMs, retireTtlMs: cfg.retireTtlMs },
+		detect: { staleAfterMs: cfg.staleAfterMs, retireTtlMs: cfg.retireTtlMs, mismatchGraceMs: cfg.mismatchGraceMs },
 	});
 	const stop = (): void => {
 		handle.stop();
