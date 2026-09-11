@@ -2,6 +2,11 @@
 
 Status: **APPROVED 2026-09-05** · Owner: root tech lead (pi orchestrator) · Date: 2026-09-05
 
+> **Document status** (2026-09-11): the module map (§4.1) and the architecture sections
+> are verified against the actual file tree and `pi/extensions/pi-delegate/package.json`
+> v1.16.1. Sections §5–§24 are the historical design log — file paths inside them predate
+> layout v2; §4.1 is the current map.
+
 ---
 
 ## 1. Problem
@@ -40,34 +45,73 @@ overlay (#5).
 
 ### 4.1 Module layout
 
+Verified against the file tree on 2026-09-11 (v1.16.1). Canonical term for the backend
+seam is **WorkerHost**; the TypeScript interface keeps its historical frozen type name
+`Transport` — same thing, an alias, not a second concept.
+
 ```
 pi-delegate/
 ├── DESIGN.md                 # this document
-├── index.ts                  # entry: registers tools + commands; wires transport
+├── index.ts                  # composition root: reads the config "host" key (default
+│                             #   herdr), binds ONE WorkerHost adapter and injects it;
+│                             #   the ONLY module allowed to import a backend adapter
 ├── src/
-│   ├── transport/
-│   │   ├── types.ts          # Transport interface, WorkerHandle, WorkerStatus (the seam)
-│   │   └── herdr.ts          # HerdrTransport: child_process → herdr CLI, JSON parsing
-│   ├── exchange.ts           # exchange dir conventions + manifest (deep module)
-│   ├── state.ts              # worker registry persisted via pi.appendEntry (survives restarts)
-│   ├── usage.ts              # session-JSONL usage parsing + budget math
-│   ├── watch.ts              # event-driven background watcher: wakes the orchestrator (§21)
-│   ├── archive.ts            # report archive (§19.3)
-│   ├── tools/
-│   │   ├── delegate.ts       # delegate tool
-│   │   ├── status.ts         # delegate_status tool
-│   │   └── mailbox.ts        # delegate_mailbox tool (§12)
-│   ├── ui/
-│   │   ├── fleet-ui.ts       # ambient fleet widget + footer chip + render hooks (§19.4)
-│   │   └── fleet.ts          # /delegate-fleet overlay (§15)
-│   └── commands.ts           # /delegate-teardown command
-└── test/                     # QA harness (live spawn tests, design-conformance checks)
+│   ├── spawn.ts              # what the orchestrator DOES: delegate + mailbox tools,
+│   │                         #   the spawn pipeline (place → manifest → start → brief
+│   │                         #   → settle → collect), budget governor, LLM-facing
+│   │                         #   prompt contract. Must never observe (no watcher) and
+│   │                         #   never read other sessions' fleets
+│   ├── observe.ts            # what the orchestrator KNOWS: delegate_status (read-only),
+│   │                         #   the event-driven watcher, the §23 retire engine,
+│   │                         #   watch/collect config resolution, /delegate-fleet +
+│   │                         #   /delegate-teardown commands. Must never spawn or
+│   │                         #   mutate a worker outside the retire/teardown contracts
+│   ├── fleet.ts              # all pixels: ownership classification, text primitives,
+│   │                         #   ambient widget, tool-result rendering, the fleet
+│   │                         #   overlay, worker-view aggregation. Read-only by
+│   │                         #   contract; owns line-width clamping
+│   ├── exchange.ts           # everything durable on disk: exchange-dir conventions,
+│   │                         #   manifests, reports, schemas, mailbox files, archive.
+│   │                         #   Owns append-before-start (file side), atomic
+│   │                         #   serialized manifest writes, answer-consumed mtime
+│   ├── host.ts               # the WorkerHost seam: the Transport interface (frozen
+│   │                         #   type name), req/result types, the E_* taxonomy +
+│   │                         #   guidance, report/mailbox contracts, briefPrompt,
+│   │                         #   budget constants. Imports node builtins ONLY —
+│   │                         #   bottom of the graph, never imports another src/ module
+│   ├── host/fake.ts          # in-memory WorkerHost adapter (tests): statusScript-driven
+│   │                         #   settle, `fake:<n>` refs. Imports only the seam + exchange
+│   ├── herdr/host.ts         # the herdr adapter: CLI plumbing (runHerdr + SIGKILL
+│   │                         #   escalation), NDJSON socket client, the mutation queue,
+│   │                         #   result mappers, adapter-private id codec. Imported
+│   │                         #   ONLY by index.ts
+│   ├── usage.ts              # the gauge layer: the ONLY session-JSONL parser (one-parser
+│   │                         #   law); budget/context math (§20), tolerant config
+│   │                         #   resolvers. Stateless and read-only
+│   ├── lifecycle.ts          # the worker lifecycle: state as a discriminated union,
+│   │                         #   the TOTAL transition reducer, embodiment identity
+│   │                         #   (name + run ordinal + placementRef), validate-then-patch
+│   │                         #   manifest stamps. Every stamp write is a reducer
+│   │                         #   transition — illegal ones are structured refusals
+│   └── expaths.ts            # portable (Windows + POSIX) path builders for the exchange
+│                             #   layer; node:path only, never imports another src/ module
+└── test/                     # QA harness (regression checks per field incident; see
+                              #   docs/THREATS.md for the threat catalog)
 ```
 
-Dependency rule (enforced by test/static-check.ts): `tools/`, `ui/` and `commands.ts` never
-import `transport/herdr.ts` directly. The transport is injected in `index.ts`.
+Each module is the single owner of the invariants named in its MODULE_CONTRACT header and
+must not reach into a neighbor's: `spawn.ts` never observes, `observe.ts` never spawns,
+only `index.ts` imports an adapter, only `usage.ts` parses session JSONL, only
+`exchange.ts`/`expaths.ts` build exchange paths.
 
-### 4.2 Transport interface (the seam)
+Dependency rule (enforced by test/static-check.ts): no src/ module imports a backend
+adapter (`src/herdr/host.ts`, `src/host/fake.ts`) — the adapter is bound and injected once
+in `index.ts`.
+
+### 4.2 WorkerHost interface (the seam — historical type name `Transport`)
+
+The seam lives in `src/host.ts` (§4.1); "Transport" is the frozen type name, the canonical
+term is WorkerHost:
 
 ```ts
 interface Transport {
@@ -1175,3 +1219,29 @@ layer. The seam interface keeps its historical type name `Transport`
 round-trip → teardown ×2 (idempotent) → ref-based dedup — against the fake
 (always, CI) and real herdr (skip-guarded on `herdr --version`), asserting
 identical seam-level outcomes on both legs.
+
+---
+
+# In-flight: migration stage 3 (branch `feature/migration-stage3`, audit steps 8–10)
+
+Work in progress, described here so the map above does not silently go stale
+again. Each item changes structure, not the external tool contract; after the
+stage-3 merge this section is folded into the corresponding sections above.
+
+- **Step 8 — the completion criterion is the report file.** The settle wait
+  binds to the canonical report path (run ownership proven by embodiment
+  identity, not by clock comparison); the backend status becomes an advisory
+  gauge; the settle result becomes a discriminated union at the seam and its
+  semantics lift out of the adapter. Effect: the "build never reports working"
+  and "done aged to idle" scenarios (§19.1b–§19.1c) become reproducible on the
+  fake adapter, without live herdr.
+- **Step 9 — the backend name comes from one point.** The manifest scan takes
+  the active backend as a parameter; the `ACTIVE_HOST` constant is deleted, the
+  herdr token disappears from command guidance, and the adapter is published as
+  a separate export subpath. Source-text pins for the import rule are replaced
+  by a package-boundary check.
+- **Step 10 — laws and composition restored.** Session-tail parsing moves from
+  the observation layer into the gauge layer (the single-parser law of
+  `usage.ts` holds again); watcher mounting is extracted into a composition
+  module with injectable dependencies; the remaining first-wave source-text
+  pins are replaced by a behavioral mount test.
