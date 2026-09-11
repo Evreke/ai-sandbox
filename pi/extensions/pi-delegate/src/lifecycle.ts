@@ -45,6 +45,16 @@
  *     (embodiment?: { run, placementRef }); legacy entries without it are
  *     handled by the backward adapter, never rejected
  *
+ * Migration stage 3 (audit step 8) adds the REPORT-OWNERSHIP WITNESS to this
+ * module: ReportWitness + witnessEmbodimentReport + reportWitnessProvesRun —
+ * the completion-criterion witness of ONE embodiment. The spawn flow
+ * snapshots the canonical report file's pre-run state (existed + content
+ * digest) and the settle wait proves completion by observing the file
+ * against that witness (appeared / rewritten since THIS run started).
+ * Ownership is decided by the embodiment's content-addressed witness, NEVER
+ * by comparing file mtimes against the wall clock (clock skew and sub-
+ * millisecond ordering made both false-settle and false-miss possible).
+ *
  * Error modes: never throws — refusals are {ok:false, error} results.
  */
 

@@ -913,8 +913,9 @@ export class HerdrTransport implements Transport {
 	 *   - name: canonical agent name; timeoutMs: total wait budget
 	 *   - signal: abort detaches the WAIT (never the worker)
 	 *   - onPoll: per-slice liveness callback (caller throttles; never throws)
-	 *   - proofSettled: caller-owned out-of-band completion proof (report mtime
-	 *     ≥ spawn / session reply) polled in the START-UP phase
+	 *   - proofSettled: caller-owned out-of-band completion proof (the canonical
+	 *     report file observed against THIS embodiment's witness — lifecycle.ts,
+	 *     content not mtime / session reply) polled in the START-UP phase
 	 *   - releaseOnStarted: v1.14 early release once the agent is observed working
 	 * Output: SettleResult — the discriminated settle union (migration stage 3,
 	 *   audit step 8 — the settle semantics live in the SEAM, the adapter only
@@ -940,7 +941,8 @@ export class HerdrTransport implements Transport {
 		timeoutMs: number;
 		signal?: AbortSignal;
 		onPoll?: (info: { status: AgentStatusName; started: boolean; elapsedMs: number }) => void;
-		/** v1.9: out-of-band settled-proof (report mtime ≥ spawn / session reply). */
+		/** v1.9: out-of-band settled-proof (the report file observed against the
+		 *  caller's embodiment witness — content, not mtime / session reply). */
 		proofSettled?: () => Promise<boolean>;
 		/** v1.14 (watch.releaseOn=started): release as soon as the agent is
 		 *  observed working — the orchestrator hands off to the watcher (§21)
@@ -1017,8 +1019,9 @@ export class HerdrTransport implements Transport {
 			// their watchers spinning the FULL budget at status=idle/unknown, then
 			// false-reported neverStarted. Prove life out-of-band instead:
 			//   1. caller-owned completion proof (v1.9, §19.1c) — the report file for
-			//      THIS run (mtime after spawn) is the completion criterion (tool
-			//      contract); the proof is authoritative and exact per worker.
+			//      THIS run observed against the embodiment witness (content, not
+			//      mtime; migration stage 3, audit step 8) is the completion criterion
+			//      (tool contract); the proof is authoritative and exact per worker.
 			//   2. session-reply proof (v1.8, §19.1b) — an assistant message in the
 			//      worker's session JSONL proves the prompt was consumed.
 			// Only reached while started is still false, so a healthy wait never

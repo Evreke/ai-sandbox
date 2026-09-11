@@ -15,7 +15,13 @@
  * returns the next) driven by the INJECTABLE clock/delay port (ClockPort,
  * systemClock, createVirtualClock) — the grace recheck loop is testable on
  * virtual clocks (test/grace-loop-check.ts); the execute closure keeps its
- * shape and delegates the seam to the machine. W4 refactor: verbatim concatenation of the
+ * shape and delegates the seam to the machine. Migration stage 3 (audit step
+ * 8): the settle completion criterion is the canonical report file observed
+ * against THIS embodiment's witness (lifecycle.ts ReportWitness — content-
+ * addressed, never file-mtime/wall-clock), and the settle outcome is the
+ * seam's discriminated union (host.ts SettleResult "kind" variants) — the
+ * backend status is an advisory sensor, never the criterion. W4 refactor:
+ * verbatim concatenation of the
  * old src/tools/mailbox.ts (leaf, first) and src/tools/delegate.ts. The
  * ~1140-line execute() closure is kept AS-IS by design (user decision): its
  * closure-scoped mutables (sessionPath, manifestWarning, reportPath,
@@ -1284,9 +1290,19 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				}
 			};
 			const reportWitnesses = new Map<string, ReportWitness>();
-			for (const p of new Set([reportPath, reportPathFor(manifestDir, params.name)])) {
-				reportWitnesses.set(p, witnessEmbodimentReport(await readReportOrNull(p)));
-			}
+			// BUG_FIX_CONTEXT (migration stage 3, audit step 8): symptom — a stale
+			// report of an earlier same-name run could false-settle THIS run (the old
+			// proof compared file mtime against the spawn wall-clock time; clock skew
+			// and sub-millisecond ordering made both false-settle and false-miss
+			// possible). Why the WIP snapshot alone did not work: the witness map is
+			// built HERE, before startAgent, when only the REQUESTED-name path is
+			// known — a uniquified canonical name gets its report path later, and
+			// settleProof would find no witness for it and silently skip the file
+			// proof. What was done: witnesses are keyed by path; the canonical path
+			// gets its own snapshot right after the manifest rename (still BEFORE
+			// submitPrompt — the prompt is not yet delivered, so the snapshot is a
+			// true pre-run state of THIS embodiment).
+			reportWitnesses.set(reportPath, witnessEmbodimentReport(await readReportOrNull(reportPath)));
 			let manifestWarning = "";
 			try {
 				// v1.5 (DESIGN.md §17): record the resolved-schema provenance as a plain
@@ -1474,6 +1490,14 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 						),
 					}));
 					reportPath = canonicalReportPath;
+					if (canonical !== params.name && !reportWitnesses.has(reportPath)) {
+						// Canonical path was unknown at the pre-start snapshot (above);
+						// take the embodiment witness now — the agent has started but the
+						// brief prompt is not yet delivered, so this is still a pre-run
+						// state (a stale report from an earlier run is captured as
+						// existed+digest and can never false-settle THIS run).
+						reportWitnesses.set(reportPath, witnessEmbodimentReport(await readReportOrNull(reportPath)));
+					}
 				} catch (err) {
 					manifestWarning =
 						`Manifest rename to canonical name failed (${errText(err)}) — audit/teardown still references "${params.name}".`;
