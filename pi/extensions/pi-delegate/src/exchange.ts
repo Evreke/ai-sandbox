@@ -31,6 +31,12 @@
  *     backed). ALL manifest consumers (spawn, observe, fleet, index, the
  *     fake host adapter) go through the port — the raw functions remain
  *     exported as the file implementation's building blocks and for tests.
+ *
+ * Manifest format (migration stage 2, audit step 6): ManifestWorker gained
+ * the ONE optional extension field `embodiment` (run ordinal + placementRef
+ * — the embodiment identity; semantics live in src/lifecycle.ts, the single
+ * lifecycle owner). Legacy entries without it are read by the backward
+ * adapter; external consumers of the manifest are unchanged.
  *   - F1 fleet accounting: TaskUsageSnapshot, describeFleet,
  *     applyFleetTaskFields, aggregateTaskUsage
  *   - reports/schemas: validateReport, validateReportAgainstSchema,
@@ -190,6 +196,18 @@ export interface ManifestWorker {
 	 *  deleted — history stays — and a retired entry silences every watcher
 	 *  event kind (the close is the expected cause of any herdr absence). */
 	retiredAt?: string;
+	/** Migration stage 2 (audit step 6) — the ONLY manifest format extension:
+	 *  identity of THIS embodiment of the worker name (run ordinal + opaque
+	 *  placementRef; the name lives in the entry's own `name` field). Written
+	 *  by spawn at append time; a same-name retry in the same task dir gets
+	 *  the next run ordinal, so two embodiments of one name are
+	 *  distinguishable (the "invisible live worker" bug class). Absent on
+	 *  legacy entries — the lifecycle backward adapter (src/lifecycle.ts,
+	 *  stateFromManifestWorker) reads their state from the stamps:
+	 *  collectedAt → collected, retire stamps → closed/report-delivered,
+	 *  no stamps → placed-or-started. External consumers of the manifest
+	 *  (the merge result) are unchanged — the field is optional and additive. */
+	embodiment?: { run: number; placementRef: string };
 }
 
 /** F1: cached fleet usage roll-up (aggregateTaskUsage {persist:true}). The

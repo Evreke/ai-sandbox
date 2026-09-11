@@ -45,7 +45,10 @@
  *   - collectedAt-dedup (write side): after a VALID strict collect,
  *     collectedAt is stamped in the manifest — the watcher `seen` dedup is
  *     session memory only (observe.ts), so a fresh session would re-wake on
- *     old reports without the stamp.
+ *     old reports without the stamp. Migration stage 2: the stamp is a
+ *     lifecycle REDUCER transition (lifecycle.stampCollected), scoped by
+ *     embodiment placement ref — a same-name retry never re-stamps its
+ *     predecessor's entry.
  *   - no-direct-herdr-for-reportless-verdicts (probe flow): probes NEVER
  *     write a report file — pane readback "OUTPUT: OK" is the final smoke
  *     verdict; probe salvage recovers it across aborts.
@@ -128,6 +131,7 @@ import {
 	resolveTierTable,
 } from "./usage.ts";
 import { resolveCollectConfig, resolveWatchConfig } from "./observe.ts";
+import { nextEmbodiment, stampCollected } from "./lifecycle.ts";
 import { nudgeFailedPathFor } from "./exchange.ts";
 import { clampLines, notifyFleetIdle, renderDelegateLines } from "./fleet.ts";
 import {
@@ -1063,6 +1067,15 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				// the filter, so assert with a comment instead of falsifying data.
 				// v1.11.x ownership: record the spawning session's path (live getter,
 				// see liveSessionFile) so the watcher wakes ONLY this session.
+				// Migration stage 2 (audit step 6): the entry carries its EMBODIMENT
+				// identity — run ordinal (prior same-name entries + 1) + this
+				// placement's ref — so two embodiments of one name in one task dir
+				// are distinguishable by construction.
+				const embodiment = nextEmbodiment(
+					params.name,
+					placement.placementRef ?? placement.paneId,
+					manifestStore.read(manifestDir)?.workers ?? [],
+				);
 				const orchestratorSessionPath = liveSessionFile(ctx);
 				const manifestEntry: ManifestWorker = {
 					name: params.name,
@@ -1074,6 +1087,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 					thinking: thinking as string,
 					startedAt: startedAtDate.toISOString(),
 					schemaProvenance,
+					embodiment: { run: embodiment.run, placementRef: embodiment.placementRef },
 					...(orchestratorSessionPath ? { orchestratorSessionPath } : {}),
 				};
 				// F1 fleet accounting: the FIRST delegate call of a task fixes the
@@ -1433,13 +1447,27 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				// never fails the collect.
 				let collectedNote = "";
 				try {
+					// Migration stage 2 (audit step 6): the collectedAt stamp is now a
+					// REDUCER TRANSITION (lifecycle.stampCollected) — an illegal stamp
+					// (a closed entry) is refused instead of silently rewriting closed
+					// history. Scope: entries with an embodiment identity only stamp for
+					// THIS run's placement (a same-name retry must not re-stamp its
+					// predecessor — BUG_FIX_CONTEXT: symptom — a same-name retry's
+					// collect re-stamped the predecessor entry by name-only matching,
+					// silencing watcher events for an embodiment whose report was never
+					// delivered); legacy entries (no identity) keep the old name-only
+					// behavior (fail-open, unchanged).
+					const collectedAt = new Date().toISOString();
 					await manifestStore.update(manifestDir, (m) => ({
 						...m,
-						workers: m.workers.map((w) =>
-							w.name === canonical || w.name === params.name
-								? { ...w, collectedAt: new Date().toISOString() }
-								: w,
-						),
+						workers: m.workers.map((w) => {
+							if (w.name !== canonical && w.name !== params.name) return w;
+							if (w.embodiment && w.embodiment.placementRef !== (placement.placementRef ?? placement.paneId)) {
+								return w; // a different embodiment of the same name — not ours to stamp
+							}
+							const stamped = stampCollected(w, collectedAt);
+							return stamped.ok ? stamped.entry : w;
+						}),
 					}));
 					// F1: a collect is a manifest WRITER — stamp the recomputed usage
 					// snapshot into the task section (durability copy; the session

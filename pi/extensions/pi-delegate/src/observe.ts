@@ -69,6 +69,11 @@
  *   fresh-session-assumption and abort-detaches-never-kills do NOT land
  *   here — their true owners are the transport waitSettle contract (W3) and
  *   the spawn flow (W4).)
+ * Migration stage 2 (audit step 6): the retire stamps (retirableSince /
+ * retiredAt) are lifecycle REDUCER transitions (lifecycle.ts stamp
+ * adapters) — an illegal stamp is refused and logged, never a silent
+ * corrupt. The observer-stamp relocation to a satellite file (audit step
+ * 6/10) is consciously DEFERRED — see the stage-2 report leftovers.
  * Error modes: none thrown to callers — observation degrades (unknown
  * statuses, empty event batches, logged-and-retried retire stamps); the E_*
  * error taxonomy lives in transport.ts.
@@ -114,6 +119,7 @@ import {
 	type WorkerView,
 } from "./fleet.ts";
 import { contextPct, formatTokens, parseSessionUsage, resolveContextWindow, WATCH_DEFAULT_STALE_AFTER_MS } from "./usage.ts";
+import { stampRetireClockClear, stampRetireClockStart, stampRetired } from "./lifecycle.ts";
 import {
 	BUDGET_CONFIG_PATH,
 	CONTEXT_CRITICAL_PCT,
@@ -1432,6 +1438,42 @@ async function stampWorkerField(
 }
 
 /**
+ * Migration stage 2 (audit step 6): every retire stamp is now a REDUCER
+ * transition (lifecycle.ts owns the state machine) — the stamp helper
+ * validates against the entry's derived state and, on refusal, keeps the
+ * entry unchanged and logs (the pass is advisory; a refused stamp is
+ * retried/advised next tick, never a silent corrupt).
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input:
+ *   - w: the watched worker
+ *   - stamp: the lifecycle stamp adapter (pure validate-then-patch)
+ *   - what: short label for the refusal log line
+ * Output: resolves when the (possibly refused) stamp attempt settled
+ * Guarantees:
+ *   - an illegal stamp NEVER corrupts the entry (refusal → entry unchanged)
+ *   - refusals are logged, not thrown — the retire pass stays advisory
+ * Raises: never (manifest write failures propagate as before)
+ */
+async function stampWorkerViaLifecycle(
+	w: WatchWorker,
+	stamp: (x: ExchangeManifest["workers"][number]) =>
+		| { ok: true; entry: ExchangeManifest["workers"][number] }
+		| { ok: false; error: string },
+	what: string,
+	log: (m: string) => void,
+): Promise<void> {
+	await stampWorkerField(w, (x) => {
+		const r = stamp(x);
+		if (!r.ok) {
+		log(`retire stamp refused (${what}) for worker ${w.name}: ${r.error}`);
+		return x; // advisory — keep the entry, the pass re-evaluates next tick
+		}
+		return r.entry;
+	});
+}
+
+/**
  * Migration stage 1 (extensibility-defect 1): the regex helper is GONE — the
  * seam's teardown result carries the structured `alreadyGone` field and the
  * callers read the FIELD, never the message text. History note (kept for the
@@ -1496,14 +1538,21 @@ export async function retirePass(
 			const outcome = evaluateRetire(w, { nowMs, ttlMs: opts.retireTtlMs });
 			if (outcome.retirable && !outcome.decision && w.retirableSince === undefined) {
 				// Became retirable THIS tick — start the TTL clock, persisted.
-				await stampWorkerField(w, (x) => ({ ...x, retirableSince: new Date(nowMs).toISOString() }));
+				// Migration stage 2: the stamp goes through the lifecycle reducer.
+				await stampWorkerViaLifecycle(
+					w,
+					(x) => stampRetireClockStart(x, new Date(nowMs).toISOString()),
+					"retire clock start",
+					log,
+				);
 				continue;
 			}
 			if (!outcome.retirable && w.retirableSince !== undefined) {
 				// The state broke (new question, report rewritten bad, back to
 				// working…) — clear the clock; the next retirable transition
-				// restarts the TTL from that moment.
-				await stampWorkerField(w, (x) => ({ ...x, retirableSince: undefined }));
+				// restarts the TTL from that moment. Migration stage 2: reducer-
+				// validated (a clock clear is refused when no clock runs).
+				await stampWorkerViaLifecycle(w, (x) => stampRetireClockClear(x), "retire clock clear", log);
 				continue;
 			}
 			if (outcome.decision) {
@@ -1529,7 +1578,15 @@ export async function retirePass(
 					// re-thrown (advisory retry next tick).
 					throw err;
 				}
-				await stampWorkerField(w, (x) => ({ ...x, retiredAt: new Date(nowMs).toISOString() }));
+				// Migration stage 2: the retiredAt stamp is a reducer transition
+				// (closed, explicit watcher force) — an already-closed entry can
+				// never be re-stamped into rewritten history.
+				await stampWorkerViaLifecycle(
+					w,
+					(x) => stampRetired(x, new Date(nowMs).toISOString()),
+					"retired close stamp",
+					log,
+				);
 				// Archive at retire (diag-retire-msg Q3 item 1): a TTL close of an
 				// UNCOLLECTED report must not orphan it — without this, the report
 				// survives in /tmp only as a silent artifact and every evidence path
