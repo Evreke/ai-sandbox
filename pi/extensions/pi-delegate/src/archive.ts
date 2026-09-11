@@ -13,11 +13,9 @@
  * archived-task listing live here too.
  *
  * Dependencies: pi's getAgentDir(), node builtins, and the ONE shared
- * atomic writer (atomicWriteFileSync) — extracted from src/exchange.ts in
- * Wave 3a (audit: the archive's only coupling to the remainder). The
- * writer temporarily lives HERE until the manifest-store module lands in
- * the next commit, then moves there and this module imports it — ONE
- * implementation only, never two.
+ * atomic writer (atomicWriteFileSync) imported from ./manifest-store.ts
+ * (extracted in Wave 3a; the writer's single home — the archive's only
+ * coupling to the remainder of the exchange layer).
  *
  * Critical invariants: archive is best-effort by contract — any failure →
  * null/0/[] — never throws past its callers.
@@ -25,28 +23,9 @@
 
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import * as fs from "node:fs";
-import { renameSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-
-/**
- * Atomic file write (tmp + rename) — the ONE shared writer protocol of the
- * exchange layer (moved verbatim from src/exchange.ts in Wave 3a).
- * <p>
- * FUNCTION_CONTRACT:
- * Input: path — the target file path; content — the full file content
- * Output: none (the file at `path` holds `content`)
- * Guarantees:
- *   - atomic: content lands via tmp file + rename (atomic on the same
- *     filesystem); a concurrent reader never sees a half-written file
- * Raises:
- *   - propagates filesystem errors (callers decide tolerance)
- */
-export function atomicWriteFileSync(path: string, content: string): void {
-	const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
-	writeFileSync(tmp, content, "utf8");
-	renameSync(tmp, path); // rename is atomic on the same filesystem
-}
+import { atomicWriteFileSync } from "./manifest-store.ts";
 
 /** Absolute archive root.
  * <p>
