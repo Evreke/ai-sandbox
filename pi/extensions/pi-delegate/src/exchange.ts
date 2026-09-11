@@ -110,7 +110,7 @@ import {
 // "typebox/value" is the exported entry for the same build/value modules.
 import { Check, Errors } from "typebox/value";
 import { mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
-import { basename, dirname, homedir, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { parseSessionUsage } from "./usage.ts";
 import {
