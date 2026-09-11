@@ -82,6 +82,7 @@ import {
 	formatEventBatch,
 	isWorkerSession,
 	makeSender,
+	markDeliveredBeforeThrow,
 	ownsChildManifests,
 	resolveWatchConfig,
 	startWatcher,
@@ -2279,6 +2280,91 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 			);
 			h.stop();
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// W19. Accept-then-log (Wave 2, audit B4): a delivery sink that queued the
+// wake with pi and THREW afterwards counts as DELIVERED — dedup keys stay,
+// the durable record commits, no re-fire next tick (a rollback would deliver
+// an already-queued wake twice). A sink that throws BEFORE queuing keeps the
+// rollback + re-fire behavior (W9.13 pins that path end to end).
+// ---------------------------------------------------------------------------
+
+{
+	const dir = taskDir("accept-then-log");
+	const w = mkWorker(dir, "w-accept");
+	writeValidReport(dir, "w-accept");
+	const snap = snapshotFor([w], [LIVE("w-accept")]);
+	const transport = { listStatuses: async () => [LIVE("w-accept")] } as unknown as Transport;
+
+	// (a) queue-then-throw: the sink hands the message over, then a LATER
+	// step fails — the error carries the markDeliveredBeforeThrow tag.
+	{
+		const sent: string[] = [];
+		const commits: number[] = [];
+		const h = createWatcher({
+			transport,
+			intervalMs: 3_600_000,
+			send: (t: string) => {
+				sent.push(t); // pi accepted/queued the wake…
+				throw markDeliveredBeforeThrow(new Error("post-acceptance audit step failed")); // …then a later step threw
+			},
+			snapshot: async () => snap,
+			self: { sessionFile: TEST_SELF },
+			detect: { legacyFailOpen: true },
+			commitDelivery: async () => {
+				commits.push(1);
+			},
+			log: () => {},
+		});
+		const b1 = await h.tick();
+		check("W19.1 queue-then-throw returns the batch (delivery proceeds)", b1.length === 1, kindsOf(b1));
+		check("W19.2 queue-then-throw counts as DELIVERED — the durable record commits", commits.length === 1, String(commits.length));
+		check("W19.3 queue-then-throw does NOT re-fire on the next tick", (await h.tick()).length === 0 && sent.length === 1, JSON.stringify(sent));
+		h.stop();
+	}
+
+	// (b) pre-delivery throw: pi never accepted — rollback + re-fire preserved.
+	{
+		const preSent: string[] = [];
+		const commits: number[] = [];
+		const h = createWatcher({
+			transport,
+			intervalMs: 3_600_000,
+			send: (): never => {
+				throw new Error("pi refused before accepting"); // UNTAGGED — genuine pre-delivery failure
+			},
+			snapshot: async () => snap,
+			self: { sessionFile: TEST_SELF },
+			detect: { legacyFailOpen: true },
+			commitDelivery: async () => {
+				commits.push(1);
+			},
+			log: () => {},
+		});
+		const b1 = await h.tick();
+		check("W19.4 pre-delivery throw delivers nothing and commits nothing", b1.length === 1 && preSent.length === 0 && commits.length === 0, `${kindsOf(b1)} commits=${commits.length}`);
+		check("W19.5 pre-delivery throw re-fires on the next tick (rollback preserved)", (await h.tick()).length === 1, kindsOf(b1));
+		h.stop();
+	}
+
+	// (c) makeSender itself: the acceptance point — a throw from
+	// pi.sendUserMessage propagates (pre-delivery, the rollback path); an
+	// accepting call returns delivered (no post-acceptance step exists in the
+	// production sink, and none may flip the outcome).
+	{
+		let threw = false;
+		try {
+			makeSender({
+				sendUserMessage: () => {
+					throw new Error("assertActive refusal");
+				},
+			} as never)("wake");
+			} catch {
+				threw = true;
+			}
+		check("W19.6 makeSender: a pi-side throw propagates as a PRE-delivery failure (rollback path)", threw);
 	}
 }
 

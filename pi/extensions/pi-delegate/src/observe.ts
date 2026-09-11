@@ -2045,33 +2045,45 @@ export function createWatcher(deps: WatcherDeps): WatcherHandle {
 		// pre-stage-B code ignored the returned value — a silent no-op sender
 		// was indistinguishable from success, and a future async failure would
 		// have gone unnoticed).
-		let outcome: SendOutcome | void;
+		// Wave 2 (audit B4, accept-then-log): the outcome is CLASSIFIED — a
+		// sink error tagged deliveredBeforeThrow (markDeliveredBeforeThrow)
+		// means the wake was already queued by pi when a LATER sink step threw;
+		// the batch counts as DELIVERED (keys stay, durable record commits, no
+		// re-fire). Only a genuine PRE-delivery failure rolls the keys back.
+		let delivered: boolean;
 		try {
-			outcome = await deps.send(formatEventBatch(events));
+			const outcome = await deps.send(formatEventBatch(events));
+			delivered = outcome === undefined || outcome.delivered === true;
 		} catch (err) {
-			// BUG_FIX_CONTEXT: symptom — one failed send during a transient
-			// delivery outage permanently silenced that wake-up (the `seen` key was
-			// already recorded). Why the old behavior did not work: keys were added
-			// before delivery, with no rollback path. What was done: on send failure
-			// the batch's keys are deleted from `seen`, so the event re-fires on the
-			// next tick while its condition still holds.
-			// Delivery failed: roll the batch's keys back out of `seen`, or a single
-			// transient send error would permanently swallow the wake-up. Nothing is
-			// written to the durable store (a commit would claim a delivery that
-			// did not happen). Still advisory, never a queue: nothing is buffered,
-			// and an event whose condition already reset is simply gone.
-			for (const e of events) seen.delete(eventKey(e));
-			log(`delivery failed (${errText(err)}) — batch rolled back, durable store untouched, re-fires while still true (advisory)`);
-			return events;
+			if (isDeliveredBeforeThrow(err)) {
+				// BUG_FIX_CONTEXT: symptom — a wake pi had already queued could be
+				// re-fired on the next tick (the old tick treated ANY sink throw as
+				// "not delivered" and rolled the batch's dedup keys back), so an
+				// accepted-then-thrown delivery arrived twice. Why the old solution
+				// did not work: the rollback path had no notion of WHERE in the
+				// sink the throw happened. What was done: sinks tag post-acceptance
+				// throws with markDeliveredBeforeThrow; the tick counts those as
+				// delivered. Genuine pre-delivery failures (pi threw before
+				// accepting) keep the rollback + re-fire behavior (W9.13 pins it).
+				delivered = true;
+				log(`delivery sink threw AFTER queuing the wake (${errText(err)}) — counted as delivered (accept-then-log), no re-fire`);
+			} else {
+				// BUG_FIX_CONTEXT: symptom — one failed send during a transient
+				// delivery outage permanently silenced that wake-up (the `seen` key was
+				// already recorded). Why the old behavior did not work: keys were added
+				// before delivery, with no rollback path. What was done: on send failure
+				// the batch's keys are deleted from `seen`, so the event re-fires on the
+				// next tick while its condition still holds.
+				// Delivery failed: roll the batch's keys back out of `seen`, or a single
+				// transient send error would permanently swallow the wake-up. Nothing is
+				// written to the durable store (a commit would claim a delivery that
+				// did not happen). Still advisory, never a queue: nothing is buffered,
+				// and an event whose condition already reset is simply gone.
+				for (const e of events) seen.delete(eventKey(e));
+				log(`delivery failed (${errText(err)}) — batch rolled back, durable store untouched, re-fires while still true (advisory)`);
+				return events;
+			}
 		}
-		// Watcher stage B send semantics: a legacy injectable sink returning
-		// void is treated as a real send; an explicit silent outcome (no
-		// usable pi.sendUserMessage) is NOT a delivery — nothing is committed
-		// to disk, and the memory keys are NOT rolled back either (a rollback
-		// would re-fire the batch every tick forever: endless noise from a
-		// session that can never deliver — the existing "headless watcher is
-		// silent but unbroken" contract).
-		const delivered = outcome === undefined || outcome.delivered === true;
 		if (!delivered) {
 			log("delivery sink is silent (no usable pi.sendUserMessage) — wake-up suppressed in memory, nothing committed to the durable store");
 			return events;
@@ -2202,6 +2214,39 @@ export interface SendOutcome {
 	mode: "sent" | "silent";
 }
 
+/** Error-marker key for the accept-then-log contract (Wave 2, audit B4):
+ *  a delivery sink that had ALREADY handed the wake to pi when a LATER step
+ *  threw tags the error with this property (markDeliveredBeforeThrow) — the
+ *  tick then counts the batch as DELIVERED (keys stay, durable record
+ *  commits, no re-fire) instead of rolling it back. */
+const DELIVERED_BEFORE_THROW = "deliveredBeforeThrow";
+
+/**
+ * Tag an error as "the wake was already queued by pi when a later sink step
+ * threw" (accept-then-log, Wave 2 audit B4).
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: the error a sink wants to report AFTER it has queued the send
+ * Output: the (Error-coerced) error, tagged with the deliveredBeforeThrow
+ *   marker the tick's send-outcome classification reads
+ * Guarantees:
+ *   - non-Error values are wrapped into an Error (the message is preserved)
+ *   - the tick counts a batch whose send threw a tagged error as DELIVERED:
+ *     dedup keys stay, the durable record commits, no re-fire next tick —
+ *     a rollback would re-fire a wake pi already queued (the B4 bug class)
+ * Raises: never
+ */
+export function markDeliveredBeforeThrow(err: unknown): Error {
+	const e = err instanceof Error ? err : new Error(String(err));
+	(e as Error & Record<string, unknown>)[DELIVERED_BEFORE_THROW] = true;
+	return e;
+}
+
+/** The read side of the marker (see markDeliveredBeforeThrow). */
+function isDeliveredBeforeThrow(err: unknown): boolean {
+	return (err as Record<string, unknown> | null | undefined)?.[DELIVERED_BEFORE_THROW] === true;
+}
+
 /**
  * Delivery sink builder (§21). Guarded by design: a build without
  * `sendUserMessage` (headless/old pi) returns a SILENT outcome (mode
@@ -2215,6 +2260,19 @@ export function makeSender(
 ): (text: string) => SendOutcome {
 	return (text: string): SendOutcome => {
 		if (typeof pi.sendUserMessage !== "function") return { delivered: false, mode: "silent" };
+		// Wave 2 (audit B4, accept-then-log): THIS call is the ACCEPTANCE POINT.
+		// A throw from it is a genuine PRE-delivery failure (pi never accepted —
+		// in practice only assertActive-style refusals; the runtime binding is
+		// fire-and-forget and reports async errors itself) — it propagates so
+		// the tick classifies the batch as not-delivered, rolls the dedup keys
+		// back and re-fires while the condition holds (preserved behavior).
+		// Everything AFTER this point in a sink is POST-acceptance: once pi has
+		// queued the wake, the delivery is a FACT — a later step's failure must
+		// never flip the outcome back to not-delivered (the tick would roll the
+		// keys back and re-fire an already-queued wake). A richer custom sink
+		// with post-acceptance steps therefore catches its own later failures
+		// and either returns the delivered outcome or rethrows the error tagged
+		// with markDeliveredBeforeThrow(err) — the tick reads that marker.
 		pi.sendUserMessage(text, { deliverAs: "followUp" });
 		return { delivered: true, mode: "sent" };
 	};
