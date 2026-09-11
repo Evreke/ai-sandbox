@@ -22,10 +22,37 @@ You stay the orchestrator: you describe the task, review briefs, verify reports,
 single merge gate. The extension owns the mechanics — one tool call replaces the entire
 spawn-and-baby-sit ritual.
 
+### Prerequisites
+
+- **herdr on PATH — a hard requirement.** The extension drives a backend host through the
+  `WorkerHost` seam; today the only production backend is herdr. Without the `herdr` CLI
+  the tools do not work.
+- **A resolvable tier/provider/model/thinking** — a named tier in
+  `~/.pi/agent/pi-delegate.config.json` or explicit per-call params. There is no built-in
+  tier; unresolved → `E_TIER`.
+- **A brief before the call** — a non-empty file at an absolute path inside the exchange
+  layout (`<exchangeRoot>/<task>/brief-<name>.md`). Missing, empty or outside the layout →
+  `E_BRIEF`.
+- **The exchange tree conventions** — manifests, reports, mailbox and progress files live
+  next to the brief in the task dir; see [DESIGN.md](./DESIGN.md).
+
+Success is defined by the artifact, not by the agent's mood: a `delegate` call succeeds when
+a **validated JSON report** is on disk — never when the agent status says done/idle.
+
 ### What you get
 
-- **Non-blocking spawn.** A `delegate` call proves the worker started (~15 s) and releases.
-  A fan-out of five workers is five parallel calls — not five evenings of panel-watching.
+- **Blocking by default.** A `delegate` call blocks the orchestrator session until the
+  worker settles, the settle gate expires (default `watch.settleGateMs` — 15 s, just enough
+  to prove the worker started), or you abort. Long blocking is explicit opt-in (`waitMs`).
+- **Abort (Esc) cancels the wait, not the worker.** The call detaches; the worker keeps
+  running. Recover via `delegate_status`, the mailbox, or the background watcher — the
+  report file stays the completion criterion.
+- **Optional early release.** With `releaseOn: "started"` (config or per-call) the call
+  returns as soon as the worker is proven started and working — control passes to the
+  background watcher. That is "the spawn is proven", not "the task is collected": the
+  validated report still ends the job.
+- **Parallel fan-out = parallel tool calls.** Each call carries its own brief and
+  collect discipline; parallelism never removes the per-call preparation.
 - **Event-driven watcher.** You are woken only when attention is needed: report ready or
   invalid, mailbox question, worker blocked on an interactive deck, context critical (≥90%),
   worker died without a report, collected-but-still-mounted worker. No `sleep 1500`.
@@ -46,10 +73,13 @@ spawn-and-baby-sit ritual.
 
 ### How it automates the routine
 
-You write one word — **delegate** — plus the task description. The rest is emergent:
+Preparing a fan-out is real orchestration work, and the tool contract reflects it. "One
+word — delegate — and it all happens" is the human UX aspiration this project steers
+toward, not the machine contract of the tool today. What a call actually requires:
 
 1. the orchestrator decomposes the task and writes briefs per role;
-2. workers spawn in parallel (worktree-isolated, model-tiered: cheap `flash` for execution,
+2. workers spawn via parallel tool calls, each with its own brief and collect discipline
+   (worktree-isolated, model-tiered: cheap `flash` for execution,
    `frontier` for review and synthesis);
 3. you do something else — the watcher queues every signal and wakes you at the right moment;
 4. clarifications go through the mailbox; a smoke-test probe can verify the environment
@@ -57,6 +87,18 @@ You write one word — **delegate** — plus the task description. The rest is e
 5. strict reports come back, workers are torn down, the fleet cleans up after itself.
 
 Judgment stays with the model (decomposition, verification, merge); mechanics belong to code.
+
+### Operational notes
+
+- **The exchange root is not a durable store.** The default location is `/tmp/exchange`:
+  it is cleared on reboot, and on a multi-user host it is a shared path (other users can
+  read the manifests; task-slug collisions are possible). The `PI_DELEGATE_EXCHANGE_ROOT`
+  environment variable overrides it.
+- Collected reports are copied to `~/.pi/agent/delegate-archive/<task>/` (best-effort,
+  30-day TTL) — that archive is the durable copy.
+- Watcher wake-ups are scoped to the owning session via ownership metadata; manifests
+  without owner fields (legacy) currently fail open — a bystander session may be woken for
+  a foreign fleet. The planned direction is fail-closed; no timeline is committed.
 
 ### Install
 
@@ -79,11 +121,38 @@ Full mechanics: [DESIGN.md](./DESIGN.md).
 единственный мерж-гейт. Расширение владеет механикой — один вызов инструмента заменяет
 весь ритуал «заспавнить и нянчить».
 
+### Требования
+
+- **herdr на PATH — жёсткое требование.** Расширение управляет backend-хостом через шов
+  `WorkerHost`; единственный production-бэкенд сегодня — herdr. Без CLI `herdr`
+  инструменты не работают.
+- **Разрешимый tier/provider/model/thinking** — именованный тир в
+  `~/.pi/agent/pi-delegate.config.json` или явные параметры вызова. Встроенного тира нет;
+  не разрешилось → `E_TIER`.
+- **Бриф до вызова** — непустой файл по абсолютному пути внутри exchange layout
+  (`<exchangeRoot>/<task>/brief-<имя>.md`). Нет файла, пустой или вне layout → `E_BRIEF`.
+- **Соглашения exchange-дерева** — manifest, отчёты, почтовые и progress-файлы лежат рядом
+  с брифом в каталоге задачи; см. [DESIGN.md](./DESIGN.md).
+
+Успех определяется артефактом, а не настроением агента: вызов `delegate` успешен, когда на
+диске лежит **валидный JSON-отчёт**, — никогда не тогда, когда статус агента говорит
+done/idle.
+
 ### Что это даёт
 
-- **Неблокирующий спавн.** Вызов `delegate` доказывает, что воркер стартовал (~15 с), и
-  отпускает. Фан-аут из пяти воркеров — пять параллельных вызовов, а не пять вечеров
-  наблюдения за панелями.
+- **Блокирующий вызов по умолчанию.** Вызов `delegate` блокирует сессию оркестратора, пока
+  воркер не осядет, не истечёт settle-гейт (по умолчанию `watch.settleGateMs` — 15 с,
+  ровно чтобы доказать, что воркер стартовал), или вы не прервёте ожидание. Долгая
+  блокировка — явный opt-in через `waitMs`.
+- **Abort (Esc) отменяет ожидание, а не воркера.** Вызов отсоединяется (detach); воркер
+  продолжает работать. Вернуться к нему можно через `delegate_status`, почтовый ящик или
+  фоновый вотчер — критерий завершения по-прежнему файл отчёта.
+- **Опциональное раннее отпускание.** С `releaseOn: "started"` (в конфиге или в вызове)
+  вызов возвращается, как только доказано, что воркер стартовал и работает, — управление
+  переходит фоновому вотчеру. Это «спавн доказан», а не «задача собрана»: валидный отчёт
+  всё ещё является завершением работы.
+- **Параллельный фан-аут = параллельные tool calls.** Каждый вызов несёт свой бриф и свою
+  collect-дисциплину; параллельность не отменяет подготовку каждого вызова.
 - **Event-driven вотчер.** Будит только когда нужен ход: отчёт готов или бит, вопрос через
   почтовый ящик, воркер завис на интерактивном grill-deck, контекст критический (≥90%),
   воркер умер без отчёта, собранный воркер всё ещё висит. Никаких `sleep 1500`.
@@ -104,16 +173,32 @@ Full mechanics: [DESIGN.md](./DESIGN.md).
 
 ### Как автоматизирует рутину
 
-Вы пишете одно слово — **delegate** — и описание задачи. Дальше эмерджентность:
+Подготовка фан-аута — настоящая оркестрационная работа, и контракт инструмента это
+отражает. «Одно слово — delegate — и всё случилось» — это человеческое UX-желание, к
+которому проект движется, а не machine contract инструмента сегодня. Что вызов требует
+на самом деле:
 
 1. оркестратор раскладывает задачу и пишет брифы по ролям;
-2. воркеры спавнятся параллельно (изоляция worktree, тиры моделей: дешёвый `flash` для
-   исполнения, `frontier` для ревью и синтеза);
+2. воркеры спавнятся параллельными tool calls, каждый со своим брифом и collect-дисциплиной
+   (изоляция worktree, тиры моделей: дешёвый `flash` для исполнения,
+   `frontier` для ревью и синтеза);
 3. вы занимаетесь своим — вотчер копит сигналы и будит в нужный момент;
 4. уточнения идут через почтовый ящик; перед большим фан-аутом smoke-проба проверит среду;
 5. возвращаются строгие отчёты, воркеры закрываются, флот убирает за собой сам.
 
 Суждение остаётся за моделью (декомпозиция, проверка, мерж), механика — за кодом.
+
+### Эксплуатационные заметки
+
+- **Exchange-корень — не durable store.** Путь по умолчанию — `/tmp/exchange`: он
+  очищается при ребуте, а на multi-user хосте это общий путь (другие пользователи могут
+  читать манифесты; возможны коллизии task slug). Переменная окружения
+  `PI_DELEGATE_EXCHANGE_ROOT` переопределяет его.
+- Собранные отчёты копируются в `~/.pi/agent/delegate-archive/<task>/` (best-effort,
+  TTL 30 дней) — архив и есть долговременная копия.
+- Пробуждения вотчера ограничены сессией-владельцем через метки владения; манифесты без
+  полей владельца (legacy) пока fail-open — чужая сессия может получить wake по чужому
+  флоту. Планируемое направление — fail-closed; сроки не обещаны.
 
 ### Установка
 
