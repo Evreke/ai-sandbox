@@ -21,6 +21,7 @@ import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { connect as netConnect, type Socket } from "node:net";
+import { isDirUnder } from "../expaths.ts";
 import {
 	type AgentStatus,
 	type AgentStatusName,
@@ -346,9 +347,11 @@ function isSubOrchestratorCwd(): boolean {
 	// worktree placement root (~/.herdr/worktrees, homedir-resolved). A
 	// session cwd'd there (or under it) is a sub-orchestrator (root/sub authority).
 	const cwd = process.cwd();
-	// Directory-boundary compare: the resolved WORKTREE_DIR (~/.herdr/worktrees)
-	// and anything under it is sub.
-	return cwd === WORKTREE_DIR || cwd.startsWith(`${WORKTREE_DIR}/`);
+	// Directory-boundary compare (Windows-path fix): was a raw
+	// startsWith(`${WORKTREE_DIR}/`) — a backslash-shaped cwd on Windows never
+	// matched. expaths.isDirUnder compares segment-wise on normalized keys
+	// (case/separator-folded on win32; byte-identical on posix).
+	return isDirUnder(cwd, WORKTREE_DIR);
 }
 
 // ============================================================================

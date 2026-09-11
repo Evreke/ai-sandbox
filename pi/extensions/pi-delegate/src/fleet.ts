@@ -61,7 +61,9 @@
 
 import { stat } from "node:fs/promises";
 import type { ExtensionCommandContext, ExtensionContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
-import { manifestStore } from "./exchange.ts";
+import { answerPathFor, exchangeRoot, manifestStore, questionPathFor } from "./exchange.ts";
+import { taskSlug } from "./expaths.ts";
+import { taskSlug } from "./expaths.ts";
 import { contextPct, parseSessionUsage, resolveContextWindow, WATCH_DEFAULT_STALE_AFTER_MS } from "./usage.ts";
 import {
 	CONTEXT_WARN_PCT,
@@ -723,9 +725,9 @@ async function mtimeOf(path: string): Promise<number> {
 async function mailState(dir: string, name: string): Promise<"Q?" | "A→" | "--"> {
 	// EXTERNAL_DEPENDENCY: mailbox files on disk — q-<name>.json / a-<name>.json
 	// in the exchange dir (mtime comparison decides which side is newer).
-	const q = await mtimeOf(`${dir}/q-${name}.json`);
+	const q = await mtimeOf(questionPathFor(dir, name));
 	if (q === 0) return "--";
-	const a = await mtimeOf(`${dir}/a-${name}.json`);
+	const a = await mtimeOf(answerPathFor(dir, name));
 	return a > q ? "A→" : "Q?";
 }
 
@@ -995,8 +997,10 @@ export const MEGA_GROUP_LIMIT = 6;
 export const FLEET_STALE_AFTER_MS = WATCH_DEFAULT_STALE_AFTER_MS;
 
 function slugOf(dir: string): string {
-	const parts = dir.split("/").filter((p) => p.length > 0);
-	return parts[parts.length - 1] ?? dir;
+	// Windows-path fix: was dir.split("/") — a drive-letter dir came back
+	// whole as the slug (fleet grouping keys mangled). basename is
+	// separator-agnostic; POSIX slugs are unchanged.
+	return taskSlug(dir);
 }
 
 /**
@@ -1387,7 +1391,7 @@ export function renderFleet(input: FleetRenderInput): string[] {
 	lines.push(row(""));
 
 	if (input.rows.length === 0) {
-		lines.push(row(` ${th.fg("dim", "no delegate workers known (no manifests under /tmp/exchange)")}`));
+		lines.push(row(` ${th.fg("dim", `no delegate workers known (no manifests under ${exchangeRoot()})`)}`));
 	}
 
 	let cell = 0;
