@@ -108,7 +108,7 @@ const transport = (opts: { teardownShouldThrow: boolean; startShouldThrow: boole
 
 // --- drive the real tool -----------------------------------------------------
 
-let captured: { execute: (...a: unknown[]) => Promise<{ content: Array<{ text: string }>; details: Record<string, unknown> }> };
+let captured!: { execute: (...a: unknown[]) => Promise<{ content: Array<{ text: string }>; details: Record<string, unknown> }> };
 const fakePi = {
 	registerTool: (t: never) => {
 		captured = t as never;

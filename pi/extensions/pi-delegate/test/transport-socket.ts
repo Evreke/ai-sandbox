@@ -331,7 +331,7 @@ try {
 		const { stdout } = await execFileP("herdr", ["agent", "list"], { encoding: "utf8", timeout: 10_000 });
 		const cliResult = parseHerdrResult(stdout).result as { agents?: Array<{ name?: string }> } | Array<{ name?: string }>;
 		const cliList = Array.isArray(cliResult) ? cliResult : (cliResult?.agents ?? []);
-		const cliNames = new Set(cliList.map((a) => a.name).filter(Boolean));
+		const cliNames = new Set(cliList.map((a) => a.name).filter((n): n is string => typeof n === "string"));
 		const socketNames = new Set(socketStatuses.map((s) => s.name));
 		// Live shared fleet: agents can start/exit between the two snapshots —
 		// tolerate a small symmetric difference, require substantial overlap.

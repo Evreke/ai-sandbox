@@ -1458,7 +1458,7 @@ export class HerdrTransport implements Transport {
 			const entry = list.find(
 				(a) => isRecord(a) && String((a as Record<string, unknown>).name ?? (a as Record<string, unknown>).agent_name ?? "") === name,
 			);
-			return entry ? asString(pick(entry, "tab_id", "tabId")) : null;
+			return entry ? (asString(pick(entry, "tab_id", "tabId")) ?? null) : null;
 		} catch {
 			return null; // registry unreachable — fall through to the recorded id
 		}

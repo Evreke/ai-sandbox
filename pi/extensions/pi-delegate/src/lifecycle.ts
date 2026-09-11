@@ -189,11 +189,16 @@ export function embodimentOf(w: ManifestWorker): EmbodimentIdentity {
 		(typeof w.placement?.placementRef === "string" && w.placement.placementRef) ||
 		(typeof w.placement?.paneId === "string" && w.placement.paneId) ||
 		"";
-	const legacy = !w.embodiment;
+	// Reducer invariant: the embodiment field is optional on the manifest type,
+	// so presence is narrowed here directly (the `legacy` boolean cannot narrow
+	// for TypeScript — same branch structure, identical semantics).
+	if (!w.embodiment) {
+		return { name: w.name, run: 0, placementRef: ref };
+	}
 	return {
 		name: w.name,
-		run: legacy ? 0 : w.embodiment.run,
-		placementRef: legacy ? ref : w.embodiment.placementRef,
+		run: w.embodiment.run,
+		placementRef: w.embodiment.placementRef,
 	};
 }
 
@@ -400,15 +405,22 @@ export function transitionLifecycle(
 			return refuse("an answered worker resumes work (or fails early)");
 		case "report-received":
 			if (event.type === "report-delivered") return { ok: true, next: { phase: "report-delivered", at } };
-			if (event.type === "collected") return { ok: true, next: { phase: "collected", at } };
+			// Reducer invariant: the `collected` event is totally handled by the
+			// pre-switch block above (COLLECTABLE ⊇ every non-closed phase), so it
+			// can never reach the phase switch — the comparison here was DEAD CODE
+			// (deleted; the collect stamp path lives in the pre-switch block).
 			return refuse("a received report is delivered or collected");
 		case "report-delivered":
-			if (event.type === "collected") return { ok: true, next: { phase: "collected", at } };
+			// Dead-code deletion, same reducer invariant as above: a `collected`
+			// event never reaches the switch (handled totally pre-switch).
 			return refuse("a delivered report is collected");
 		case "collected":
 			// Re-collect (a later same-name stamp refreshing the timestamp) is an
-			// idempotent re-entry — the collected phase persists.
-			if (event.type === "collected") return { ok: true, next: { phase: "collected", at } };
+			// idempotent re-entry — the collected phase persists. That guarantee is
+			// delivered by the pre-switch `collected` block ("collected" ∈
+			// COLLECTABLE → ok, phase stays "collected"); the comparison here was
+			// dead code (reducer invariant: `collected` events never reach the
+			// switch) and is deleted.
 			return refuse("a collected worker is only closed");
 	}
 }

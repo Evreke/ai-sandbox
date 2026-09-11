@@ -209,7 +209,7 @@ try {
 		backendName: () => "herdr",
 	};
 
-	let captured: { execute: (...a: unknown[]) => Promise<{ details: Record<string, unknown> }> };
+	let captured!: { execute: (...a: unknown[]) => Promise<{ details: Record<string, unknown> }> };
 	const fakePi = { registerTool: (tl: never) => (captured = tl as never) };
 	registerDelegateTool(fakePi as never, hybrid);
 

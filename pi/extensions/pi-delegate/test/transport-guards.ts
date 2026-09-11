@@ -114,7 +114,7 @@ try {
 		let code = "";
 		let timedOut = false;
 		try {
-			await t.submitPrompt({ name: "w1", text: "hi" });
+			await t.submitPrompt({ name: "w1", text: "hi", timeoutMs: 30_000 });
 		} catch (err) {
 			code = String((err as { code?: string }).code ?? "");
 			timedOut = Date.now() - t0 < 2000; // rejected near the 500ms deadline, not hung
@@ -135,11 +135,11 @@ try {
 		const t = new HerdrTransport({ queueOpDeadlineMs: 10_000 });
 		process.env.TG_TAG = "A";
 		process.env.TG_DELAY_MS = "200";
-		const a = t.submitPrompt({ name: "w1", text: "a" });
+		const a = t.submitPrompt({ name: "w1", text: "a", timeoutMs: 30_000 });
 		await new Promise((r) => setTimeout(r, 30));
 		process.env.TG_TAG = "B";
 		process.env.TG_DELAY_MS = "20";
-		const b = t.submitPrompt({ name: "w1", text: "b" });
+		const b = t.submitPrompt({ name: "w1", text: "b", timeoutMs: 30_000 });
 		await Promise.all([a, b]);
 		const lines = readFileSync(SER_LOG, "utf8").trim().split("\n");
 		const aEnd = lines.find((l) => l.startsWith("end A"));

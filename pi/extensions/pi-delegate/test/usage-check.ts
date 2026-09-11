@@ -276,7 +276,7 @@ function homeWithConfig(configJson: string): string {
 // 3. contextPct / overContext — null-safe, ≥ boundary, 999 cap
 // ---------------------------------------------------------------------------
 
-const zero = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, turns: 0 };
+const zero = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, turns: 0, lastTotalTokens: null };
 
 // 3a. null lastTotalTokens → pct null → overContext false (post-compaction)
 check("3a null lastTotalTokens → pct null", contextPct({ ...zero, lastTotalTokens: null }, 100000) === null);
@@ -308,7 +308,7 @@ check(
 check(
 	"3e 240000/250100 → 96%",
 	contextPct({ ...zero, lastTotalTokens: 240_000 }, DEFAULT_CONTEXT_WINDOW) === 96,
-	contextPct({ ...zero, lastTotalTokens: 240_000 }, DEFAULT_CONTEXT_WINDOW),
+	`pct=${contextPct({ ...zero, lastTotalTokens: 240_000 }, DEFAULT_CONTEXT_WINDOW)}`,
 );
 
 // ---------------------------------------------------------------------------

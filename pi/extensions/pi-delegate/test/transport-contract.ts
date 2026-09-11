@@ -153,7 +153,11 @@ try {
 	// the agent stayed alive; see placementFromTabResult BUG_FIX_CONTEXT).
 	{
 		logOp("transport.place(tab) [drift pin]");
-		const tabP = await t.place({ mode: "tab", label: "qa-probe-tab-shape" });
+		const tabP = await t.place({ mode: "tab", repoPath: repoDir, branch: "", label: "qa-probe-tab-shape" });
+		// tabId is adapter-internal (herdr records it ALONGSIDE the legacy fields,
+		// but the seam Placement does not carry it) — same cast the adapter's own
+		// teardown path uses (src/herdr/host.ts).
+		const tabId = (tabP as Placement & { tabId?: string }).tabId ?? tabP.paneId;
 		// NOT pushed into `created`: it lives in THIS session's workspace — the
 		// finally-cleanup force-removes workspaces, which must never touch ours.
 		check(
@@ -164,17 +168,17 @@ try {
 			// renamed tab.id → tab.tab_id once, and a stricter-than-reality test
 			// would break on the next legitimate herdr change (it did: tA = tab 10).
 			"T2.2c tab placement: tabId is a REAL tab id (not the pane id)",
-			tabP.kind === "tab" && typeof tabP.tabId === "string" && tabP.tabId.length > 0 && tabP.tabId !== tabP.paneId,
+			tabP.kind === "tab" && typeof tabId === "string" && tabId.length > 0 && tabId !== tabP.paneId,
 			JSON.stringify(tabP),
 		);
-		logOp(`transport.teardown(tab ${tabP.tabId}) [drift pin]`);
+		logOp(`transport.teardown(tab ${tabId}) [drift pin]`);
 		await t.teardown({ name: "qa-probe-tab-shape", placement: tabP, force: true }).catch(
 			// forceCleanup would remove the WORKSPACE — for a tab the fallback is
 			// a direct tab close (and if that fails too, a leftover empty tab is
 			// harmless: no agent was ever started in it).
 			async () => {
-				logOp(`herdr tab close ${tabP.tabId}  (cleanup fallback)`);
-				await execFileP("herdr", ["tab", "close", tabP.tabId], { encoding: "utf8", timeout: 30_000 });
+				logOp(`herdr tab close ${tabId}  (cleanup fallback)`);
+				await execFileP("herdr", ["tab", "close", tabId], { encoding: "utf8", timeout: 30_000 });
 			},
 		);
 		check("T2.2d tab teardown with the parsed tabId succeeds", true);
