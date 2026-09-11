@@ -45,14 +45,18 @@ import { manifestStore, type ExchangeManifest } from "./manifest-store.ts";
 import {
 	mergeRetireStamps,
 	readWatchStampLayers,
+	readWatchStampLayersCached,
 	type RetireStamps,
+	type StampLayerCacheEntry,
 } from "./watch-store.ts";
 import { validateReport } from "./report-schema.ts";
 import {
 	contextPct,
 	countSessionToolCall,
+	countSessionToolCallCached,
 	parseSessionUsage,
 	resolveContextWindow,
+	type SessionToolCallCacheEntry,
 	WATCH_DEFAULT_STALE_AFTER_MS,
 } from "./usage.ts";
 import { WATCH_DEAD_GRACE_MS, WATCH_LOOKBACK_MS } from "./watch-config.ts";
@@ -262,6 +266,10 @@ export function workersFromManifests(
 	statuses: AgentStatus[] | null,
 	self: SelfIdentity = {},
 	nowMs: number = Date.now(),
+	// Wave 4 item 5: optional caller-held stamp-layer cache (watcher.ts
+	// closure) — layer files re-read only when their (name, mtime) snapshot
+	// moved; undefined → uncached read (tests, standalone callers).
+	stampLayerCache?: Map<string, StampLayerCacheEntry>,
 ): WatchSnapshot {
 	const liveNames = new Set(
 		(statuses ?? []).filter((s) => s && s.status !== "unknown").map((s) => s.name),
@@ -278,8 +286,9 @@ export function workersFromManifests(
 		// Migration stage 3 (audit steps 6/10): the watcher's stamps (retirableSince
 		// / retiredAt) live in per-watcher satellite files — merge the manifest
 		// layer with every satellite layer here (readers merge layers; earliest
-		// stamp wins). One tolerant read per manifest dir per scan.
-		const stampLayers = readWatchStampLayers(manifest.dir);
+		// stamp wins). One tolerant read per manifest dir per scan; since Wave 4
+		// item 5 optionally mtime-cached by the caller-held cache.
+		const stampLayers = readWatchStampLayersCached(manifest.dir, stampLayerCache);
 		for (const w of manifest.workers) {
 			if (typeof w?.name !== "string" || w.name.length === 0) continue;
 			const startedAtMs = Date.parse(w.startedAt ?? "");
@@ -366,8 +375,10 @@ export async function collectSnapshot(
 	transport: Transport,
 	self: SelfIdentity = {},
 	nowMs: number = Date.now(),
+	// Wave 4 item 5: optional caller-held stamp-layer cache (watcher.ts closure).
+	stampLayerCache?: Map<string, StampLayerCacheEntry>,
 ): Promise<WatchSnapshot> {
-	return workersFromManifests(manifestStore.scan(transport.backendName()), await readStatusesTolerant(transport), self, nowMs);
+	return workersFromManifests(manifestStore.scan(transport.backendName()), await readStatusesTolerant(transport), self, nowMs, stampLayerCache);
 }
 
 // ---------------------------------------------------------------------------
@@ -425,6 +436,12 @@ export interface DetectOptions {
 	 *  tests; production threads watch.retireTtlMs via startWatcher. Consumed
 	 *  by the retire pass (createWatcher tick), not by detectWorkerEvents. */
 	retireTtlMs?: number;
+	/** Wave 4 item 5 (reliability finding 10): caller-held (watcher.ts
+	 *  closure) cache for the grill-deck session-tail scan — the up-to-1 MB
+	 *  JSONL tail is re-parsed only when the session file's fingerprint
+	 *  (mtime + size) moved. Undefined → the uncached parse runs (tests,
+	 *  standalone callers). */
+	sessionToolCallCache?: Map<string, SessionToolCallCacheEntry>;
 }
 
 function truncate(s: string, max = 220): string {
@@ -611,7 +628,7 @@ export function detectWorkerEvents(w: WatchWorker, opts: DetectOptions = {}): Wa
 
 	// 3. grill-deck — the worker blocked itself on an INTERACTIVE deck; only a
 	//    human at that pane can answer, so say exactly that.
-	const decks = countSessionToolCall(w.sessionPath, GRILL_DECK_TOOL);
+	const decks = countSessionToolCallCached(w.sessionPath, GRILL_DECK_TOOL, opts.sessionToolCallCache);
 	if (decks > 0) {
 		events.push(
 			mk(

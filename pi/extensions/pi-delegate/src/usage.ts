@@ -476,3 +476,70 @@ export function sessionToolCallNames(sessionPath?: string): string[] {
 export function countSessionToolCall(sessionPath: string | undefined, toolName: string): number {
 	return sessionToolCallNames(sessionPath).filter((n) => n === toolName).length;
 }
+
+// ---------------------------------------------------------------------------
+// Wave 4 item 5 (reliability finding 10) — the watcher tick's session-tail
+// scan, gated behind the session file's fingerprint (mtime + size): skip the
+// up-to-1 MB tail PARSE when the file has not changed since the last tick
+// that parsed it. The cache is a CALLER-HELD closure (watcher.ts, per-mount
+// session state — Law 3: no module-global registries); this module only
+// defines the entry shape and the cached read. Semantics unchanged: an
+// unchanged file yields the same names, hence the same events/fingerprints.
+// ---------------------------------------------------------------------------
+
+/** Cache entry for the session-tail tool-call scan. */
+export interface SessionToolCallCacheEntry {
+	mtimeMs: number;
+	size: number;
+	names: string[];
+	/** How many tail PARSES this entry performed (diagnostic — the Wave 4
+	 *  regression asserts one parse across ticks with an unchanged
+	 *  fingerprint; a changed file costs a new parse). */
+	parseCount: number;
+}
+
+/** Cached variant of sessionToolCallNames: re-parses the session tail only
+ *  when the file's fingerprint (mtime + size) moved since the last parse.
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: sessionPath (may be undefined); cache — caller-held Map (watcher.ts
+ *   closure); WITHOUT a cache the uncached sessionToolCallNames runs
+ * Output: toolCall names in the session tail (same contract as
+ *   sessionToolCallNames)
+ * Guarantees:
+ *   - an unchanged fingerprint → the cached names are returned and NO parse
+ *     happens (entry.parseCount stays);
+ *   - a moved/absent fingerprint → exactly one new parse, recorded;
+ *   - unreadable file → [] (cached too — same fingerprint semantics)
+ * Raises: never
+ */
+export function sessionToolCallNamesCached(
+	sessionPath: string | undefined,
+	cache?: Map<string, SessionToolCallCacheEntry>,
+): string[] {
+	if (!sessionPath) return [];
+	if (!cache) return sessionToolCallNames(sessionPath);
+	let mtimeMs = -1;
+	let size = -1;
+	try {
+		const st = statSync(sessionPath);
+		mtimeMs = st.mtimeMs;
+		size = st.size;
+	} catch {
+		// absent/unreadable — fingerprint (−1, −1), parsed once as empty
+	}
+	const cached = cache.get(sessionPath);
+	if (cached && cached.mtimeMs === mtimeMs && cached.size === size) return cached.names;
+	const names = sessionToolCallNames(sessionPath);
+	cache.set(sessionPath, { mtimeMs, size, names, parseCount: (cached?.parseCount ?? 0) + 1 });
+	return names;
+}
+
+/** Cached variant of countSessionToolCall (see sessionToolCallNamesCached). */
+export function countSessionToolCallCached(
+	sessionPath: string | undefined,
+	toolName: string,
+	cache?: Map<string, SessionToolCallCacheEntry>,
+): number {
+	return sessionToolCallNamesCached(sessionPath, cache).filter((n) => n === toolName).length;
+}

@@ -44,10 +44,14 @@ import {
 	deliveryRecordKey,
 	deliveredStorePathFor,
 	readDeliveredStore,
-	watcherKeyFor,
 	type DeliveryRecord,
+	watcherKeyFor,
+	type StampLayerCacheEntry,
 } from "./watch-store.ts";
 import { WATCH_DEFAULT_INTERVAL_MS, resolveWatchConfig } from "./watch-config.ts";
+// Wave 4 item 5 (reliability finding 10): per-mount caches for the tick's
+// satellite reads — the caller-held closures Law 3 wants (no module globals).
+import { type SessionToolCallCacheEntry } from "./usage.ts";
 import type { Transport } from "./host.ts";
 
 // ---------------------------------------------------------------------------
@@ -188,6 +192,14 @@ export function createWatcher(deps: WatcherDeps): WatcherHandle {
 	// mtime moved (or the cache was invalidated by this mount's own write).
 	// A negative mtime means "no file yet" and is cached too.
 	const storeCache = new Map<string, { mtimeMs: number; records: Record<string, DeliveryRecord> }>();
+	// Wave 4 item 5 (reliability finding 10): mtime-keyed caches that keep the
+	// tick cheap on large fleets — satellite stamp layers re-read only when a
+	// watch-*.json (name, mtime) snapshot moved; the grill-deck session-tail
+	// parse runs only when the session file's fingerprint (mtime + size)
+	// moved. Same (path, mtime) pattern as storeCache above; per-mount closure
+	// state (Law 3 — no module-global registries).
+	const stampLayerCache = new Map<string, StampLayerCacheEntry>();
+	const sessionToolCallCache = new Map<string, SessionToolCallCacheEntry>();
 	// Garbage-collection candidates: (dir, worker) pairs THIS mount has
 	// committed records for. A worker that disappears from the snapshots is
 	// really gone (manifest writes are atomic) → its records are collected.
@@ -200,6 +212,7 @@ export function createWatcher(deps: WatcherDeps): WatcherHandle {
 	// ever touches the no-owner edge — the verdict helper enforces that.
 	const detectOpts: DetectOptions = {
 		...(deps.detect ?? {}),
+		sessionToolCallCache,
 		selfSessionFile: deps.self?.sessionFile ?? deps.detect?.selfSessionFile,
 		onSkip:
 			deps.detect?.onSkip ??
@@ -254,7 +267,7 @@ export function createWatcher(deps: WatcherDeps): WatcherHandle {
 		let leafWorker = false;
 		let snapOrNull: WatchSnapshot | null = null;
 		try {
-			snapOrNull = deps.snapshot ? await deps.snapshot() : await collectSnapshot(deps.transport, deps.self ?? {});
+			snapOrNull = deps.snapshot ? await deps.snapshot() : await collectSnapshot(deps.transport, deps.self ?? {}, Date.now(), stampLayerCache);
 			const snap = snapOrNull;
 			// §23 retire pass — BEFORE event delivery and fully guarded: a stamp/
 			// teardown failure is logged and retried next tick; it can never affect

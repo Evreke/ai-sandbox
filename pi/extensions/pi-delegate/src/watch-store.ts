@@ -31,7 +31,7 @@
  */
 
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
-import { mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { atomicWriteFileSync, EXCHANGE_SCHEMA_VERSION, isSupportedSchemaVersion } from "./manifest-store.ts";
 
@@ -131,6 +131,73 @@ export function readWatchStampLayers(dir: string): WatchStampLayer[] {
 			// corrupt/partial layer → skip (advisory read, never throw)
 		}
 	}
+	return layers;
+}
+
+// ---------------------------------------------------------------------------
+// Wave 4 item 5 (reliability finding 10): the watcher tick re-read the stamp
+// layers of every task dir synchronously every 10 s. The cached variant
+// skips the re-READ (file opens + JSON.parse) when the layer files'
+// (name, mtime) snapshot is unchanged. The cache is a CALLER-HELD closure
+// (watcher.ts, per-mount session state — Law 3); this module only defines
+// the entry shape and the cached read. Tolerant semantics unchanged: an
+// unreadable dir yields no layers, and the caller decides the cache key.
+// ---------------------------------------------------------------------------
+
+/** Cache entry for the stamp-layer read of ONE task dir. */
+export interface StampLayerCacheEntry {
+	/** The (file name, mtime) snapshot taken when the layers were last read. */
+	mtimes: Array<{ file: string; mtimeMs: number }>;
+	layers: WatchStampLayer[];
+	/** How many full re-reads this entry performed (diagnostic — the Wave 4
+	 *  regression asserts one read across ticks with unchanged layers). */
+	readCount: number;
+}
+
+/** Cached variant of readWatchStampLayers for ONE dir: re-reads (open +
+ *  parse) only when a watch-*.json file was added/removed/rewritten since
+ *  the last read (name + mtime snapshot compare — the delivered-store cache
+ *  pattern). WITHOUT a cache the uncached read runs.
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: dir — task dir; cache — caller-held Map keyed by dir (may be
+ *   undefined → uncached read)
+ * Output: the same layers readWatchStampLayers would return
+ * Guarantees:
+ *   - unchanged (name, mtime) snapshot → cached layers, no re-read (entry
+ *     .readCount unchanged); a changed snapshot → exactly one new read;
+ *   - tolerant like the uncached read; never throws
+ * Raises: never
+ */
+export function readWatchStampLayersCached(
+	dir: string,
+	cache?: Map<string, StampLayerCacheEntry>,
+): WatchStampLayer[] {
+	if (!cache) return readWatchStampLayers(dir);
+	let files: string[] = [];
+	try {
+		files = readdirSync(dir).filter((f) => /^watch-([0-9a-f]{8}|anon)\.json$/.test(f)).sort();
+	} catch {
+		files = []; // no dir / unreadable — same tolerant result as the uncached read
+	}
+	const snapshot: Array<{ file: string; mtimeMs: number }> = [];
+	for (const f of files) {
+		try {
+			snapshot.push({ file: f, mtimeMs: statSync(join(dir, f)).mtimeMs });
+		} catch {
+			// a file vanished between readdir and stat — skip it
+		}
+	}
+	const cached = cache.get(dir);
+	if (
+		cached &&
+		cached.mtimes.length === snapshot.length &&
+		cached.mtimes.every((s, i) => s.file === snapshot[i].file && s.mtimeMs === snapshot[i].mtimeMs)
+	) {
+		return cached.layers;
+	}
+	const layers = readWatchStampLayers(dir);
+	cache.set(dir, { mtimes: snapshot, layers, readCount: (cached?.readCount ?? 0) + 1 });
 	return layers;
 }
 
