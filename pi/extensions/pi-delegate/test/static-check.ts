@@ -150,6 +150,72 @@ check(
 );
 
 // ---------------------------------------------------------------------------
+// 1.7 Law 1 pins (constitution): the platform is the API — no hardcoded
+// agent-dir joins, no union-of-literals tool enums.
+// ---------------------------------------------------------------------------
+
+/** Strip line comments (slash-slash) and block comments (slash-star ... star-
+ *  slash) from TypeScript source so
+ *  only CODE constructs are scanned (display-only guidance inside comments is
+ *  allowed to mention ~/.pi/agent paths). String literals survive stripping —
+ *  they are scanned by the shape rules below, which distinguish code joins
+ *  from prose (a prose path is inside a sentence, never a join argument). */
+function stripComments(src: string): string {
+	return src
+		.replace(/\/\*[\s\S]*?\*\//g, "")
+		.replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+}
+
+// Law 1 (directory constants): never join os.homedir() with literal .pi/.pi/agent
+// segments — pi exports getAgentDir()/CONFIG_DIR_NAME for this. The pin scans
+// CODE (comments stripped) and flags exactly the audit's offender shapes:
+//   - a homedir() call followed by a ".pi" join segment (homedir(), ".pi", ...)
+//   - a join(...) argument carrying a ".pi" or ".pi/agent" literal segment
+//   - a module constant assigned a relative ".pi/..." path literal
+//   - a template-literal path assembly containing .pi/agent
+// Display-only strings inside sentences ("see ~/.pi/agent/...") never match:
+// they are neither join arguments nor assignments nor template assemblies.
+const agentDirOffenders: string[] = [];
+for (const f of listTsFiles(resolve(ROOT, "src"))) {
+	const code = stripComments(readFileSync(f, "utf8"));
+	const lines = code.split("\n");
+	lines.forEach((line, i) => {
+		const offenderShape =
+			/homedir\(\)\s*,\s*["']\.pi["']/.test(line) ||
+			/join\(\s*["'][^"']*\.pi\/agent[^"']*["']/.test(line) ||
+			/join\([^\n]*["']\.pi["']/.test(line) ||
+			/=\s*["']\.pi\//.test(line) ||
+			/`[^`]*\.pi\/agent[^`]*`/.test(line);
+		if (offenderShape) agentDirOffenders.push(`${f}:${i + 1}: ${line.trim().slice(0, 120)}`);
+	});
+}
+check(
+	"T1.7 src/ builds no agent-dir path by joining homedir() with literal .pi/.pi/agent segments (Law 1: pi's getAgentDir()/CONFIG_DIR_NAME instead)",
+	agentDirOffenders.length === 0,
+	agentDirOffenders.join(" | "),
+);
+
+// Law 1 (tool enums): no tool parameter schema uses Type.Union of Type.Literal
+// members — that shape breaks Google models; StringEnum from @earendil-works/
+// pi-ai is the only allowed spelling. Scans the two tool-schema files
+// (comments stripped; prose mentions of the rule in comments are invisible).
+const enumUnionOffenders: string[] = [];
+for (const f of [resolve(ROOT, "src/spawn.ts"), resolve(ROOT, "src/observe.ts")]) {
+	const code = stripComments(readFileSync(f, "utf8"));
+	const lines = code.split("\n");
+	lines.forEach((line, i) => {
+		if (/Type\.Union\s*\(\s*\[[^\n]*Type\.Literal/.test(line)) {
+			enumUnionOffenders.push(`${f}:${i + 1}: ${line.trim().slice(0, 120)}`);
+		}
+	});
+}
+check(
+	"T1.7b no tool parameter schema in src/spawn.ts / src/observe.ts uses Type.Union of Type.Literal members (Law 1: StringEnum instead)",
+	enumUnionOffenders.length === 0,
+	enumUnionOffenders.join(" | "),
+);
+
+// ---------------------------------------------------------------------------
 // 2. delegate_status tool read-only (section slice: observe.ts SECTION 1/3)
 // ---------------------------------------------------------------------------
 
@@ -504,7 +570,9 @@ check("T3.2 legacy herdr shape (tab.id) still parses", legacyTabPlacement.tabId 
 	const confirmPrompts: string[] = [];
 	await commands["delegate-teardown"]?.handler(
 		[],
-		{ ui: { notify: (m: string) => notifications.push(m), confirm: async (_t: string, body: string) => { confirmPrompts.push(body); return true; } } },
+		// hasUI: true — the command's headless guard (pi docs Mode Behavior) must
+		// not refuse the drive; this fake ctx models an interactive session.
+		{ hasUI: true, ui: { notify: (m: string) => notifications.push(m), confirm: async (_t: string, body: string) => { confirmPrompts.push(body); return true; } } },
 	);
 	const allNotifications = notifications.join("\n");
 	check(

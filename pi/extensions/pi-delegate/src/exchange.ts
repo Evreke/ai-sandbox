@@ -46,7 +46,7 @@
  *     ReleaseEnvelope, readQuestion, readQuestionState (watcher stage C:
  *     read-with-reason for the corrupt-q audit, guideline §6.2.5),
  *     writeAnswer, writeRelease, progressPathFor, readLastProgress
- *   - archive: ARCHIVE_DIR, ARCHIVE_TTL_MS, archiveRoot, archiveReport,
+ *   - archive: ARCHIVE_TTL_MS, archiveRoot, archiveReport,
  *     pruneArchive, listArchivedTasks
  *
  * Critical invariants OWNED here (report-ref-map.json hiddenInvariants):
@@ -1857,8 +1857,6 @@ export function readLastProgress(path: string): ProgressEvent | null {
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-
-export const ARCHIVE_DIR = ".pi/agent/delegate-archive";
 
 /** Absolute archive root.
  * <p>
