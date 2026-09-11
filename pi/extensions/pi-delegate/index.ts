@@ -17,7 +17,8 @@
 import { readFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { buildWorkerView, type SelfIdentity } from "./src/fleet.ts";
-import { registerCommands, registerStatusTool } from "./src/observe.ts";
+import { registerCommands } from "./src/commands.ts";
+import { registerStatusTool } from "./src/status-tool.ts";
 import { mountSessionWatcher } from "./src/compose.ts";
 import { buildWidgetRows, disposeFleetUI, mountFleetUI, type FleetWidgetRow as FleetRow, type FleetUIDeps } from "./src/fleet.ts";
 import { createHerdrTransport } from "./src/herdr/host.ts";

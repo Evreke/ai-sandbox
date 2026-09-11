@@ -44,8 +44,8 @@
 
 import { pruneArchive } from "./archive.ts";
 import { manifestStore } from "./manifest-store.ts";
-import { isWorkerSession, ownsChildManifests, startWatcher } from "./observe.ts";
-import type { SelfIdentity } from "./observe.ts";
+import { isWorkerSession, ownsChildManifests, type SelfIdentity } from "./watch-detect.ts";
+import { startWatcher } from "./watcher.ts";
 import type { Transport } from "./host.ts";
 
 /** The slice of the pi extension API the watcher needs (delivery + registry). */
