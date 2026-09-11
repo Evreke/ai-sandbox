@@ -216,6 +216,30 @@ check(
 );
 
 // ---------------------------------------------------------------------------
+// 1.8 Law 6 pin — layering: no src/ module imports src/observe.ts except
+//     the composition root's slices (Wave 3a: the watch-config extraction
+//     killed the spawn→observe edge; this pin keeps it dead).
+// ---------------------------------------------------------------------------
+
+// Plain read-based assertion (modeled on the T1.5/T1.6 hygiene scans):
+// every src/**/*.ts file must not carry a relative import of ./observe —
+// with exactly two allowlisted exceptions: src/compose.ts (the watcher
+// mount slice) and index.ts (the composition root — outside src/ anyway,
+// listed here for clarity). Everything the rest of the layer needs from
+// observe's neighborhood lives in the extracted modules (watch-config.ts,
+// watch-store.ts, report-schema.ts, mailbox-store.ts, manifest-store.ts,
+// archive.ts); importing observe for it re-creates the forbidden edge.
+const OBSERVE_IMPORT_ALLOWLIST = new Set(["compose.ts"]);
+const observeImportOffenders = listTsFiles(resolve(ROOT, "src"))
+	.filter((f) => !OBSERVE_IMPORT_ALLOWLIST.has(f.split("/").pop() ?? ""))
+	.filter((f) => /from\s*["']\.\/observe(\.ts)?["']/.test(readFileSync(f, "utf8")));
+check(
+	"T1.8 no src/ module imports src/observe.ts except compose.ts (Law 6: the spawn→observe edge stays dead — config lives in watch-config.ts)",
+	observeImportOffenders.length === 0,
+	observeImportOffenders.join(", "),
+);
+
+// ---------------------------------------------------------------------------
 // 2. delegate_status tool read-only (section slice: observe.ts SECTION 1/3)
 // ---------------------------------------------------------------------------
 

@@ -139,7 +139,7 @@ import {
 	resolveSpawnDefaults,
 	resolveTierTable,
 } from "./usage.ts";
-import { resolveCollectConfig, resolveWatchConfig } from "./observe.ts";
+import { resolveCollectConfig, resolveWatchConfig } from "./watch-config.ts";
 import {
 	type ReportWitness,
 	witnessEmbodimentReport,
