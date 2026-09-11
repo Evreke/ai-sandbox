@@ -305,7 +305,7 @@ export function registerMailboxTool(pi: import("@earendil-works/pi-coding-agent"
 		promptSnippet: "Read/answer a delegate worker's file mailbox (never touches the pane directly)",
 		promptGuidelines: [
 			"When delegate returns AWAITING_ANSWER, answer the worker's question here (action 'answer'); the worker will be nudged to continue.",
-			"action 'read' is side-effect-free — use it to check for pending questions before/after a delegate run.",
+			"delegate_mailbox action 'read' is side-effect-free — use it to check for pending questions before/after a delegate run.",
 		],
 		parameters: Type.Object({
 			action: StringEnum(["read", "answer", "steer", "release"] as const, {
@@ -1056,9 +1056,9 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			"delegate blocks until the worker settles; the worker's report file is the completion criterion, not the agent status — status fail in the report is still an honest completion.",
 			"If delegate returns E_REPORT_MISSING or E_REPORT_INVALID, do a diagnosed retry with root cause + fix shape (at most 2 repeats, then escalate); never repeat verbatim. " +
 			RETRY_MANDATE,
-			"mode 'probe' is OPTIONAL (enterprise cost): only for untrusted environments — the first real worker's structured failures (E_PLACE/E_START/E_NAME) are just as cheap a smoke signal. Probes verify the pane reply \"OUTPUT: OK\" by streaming readback.",
-			"Probe workers NEVER write a report file — a 'probe OK/FAIL' result is final by itself; never wait for or read a probe's report-<name>.json (only real workers produce reports).",
-			"After E_TIMEOUT or a detach, END YOUR TURN: the background watcher (DESIGN.md §21) wakes you when the report lands, a question arrives, grill_deck is invoked, context goes critical, or the worker dies. Never sleep in bash to wait for a worker and never re-call delegate to wait; delegate_status polling is the only in-turn alternative (bash sleep only when the watcher is absent — old extension build).",
+			"delegate mode 'probe' is OPTIONAL (enterprise cost): only for untrusted environments — the first real worker's structured failures (E_PLACE/E_START/E_NAME) are just as cheap a smoke signal. Probes verify the pane reply \"OUTPUT: OK\" by streaming readback.",
+			"delegate probe workers NEVER write a report file — a 'probe OK/FAIL' result is final by itself; never wait for or read a probe's report-<name>.json (only real workers produce reports).",
+			"After delegate returns E_TIMEOUT or a detach, END YOUR TURN: the background watcher (DESIGN.md §21) wakes you when the report lands, a question arrives, grill_deck is invoked, context goes critical, or the worker dies. Never sleep in bash to wait for a worker and never re-call delegate to wait; delegate_status polling is the only in-turn alternative (bash sleep only when the watcher is absent — old extension build).",
 		],
 		parameters: delegateParams,
 		renderCall(args, theme: Theme) {

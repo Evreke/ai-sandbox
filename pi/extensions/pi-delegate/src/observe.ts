@@ -2296,6 +2296,10 @@ export function registerCommands(pi: import("@earendil-works/pi-coding-agent").E
 	pi.registerCommand("delegate-fleet", {
 		description: "Mission-control overlay: live worker fleet status, reports, mailbox, budget burn (read-only)",
 		async handler(_args, ctx) {
+			// Headless guard (pi docs Mode Behavior, same pattern as mountFleetUI):
+			// the overlay is a TUI surface and the non-TUI early return in
+			// openFleetOverlay would notify into a UI that is not there.
+			if (!ctx.hasUI || !ctx.ui) return; // headless → no-op
 			await openFleetOverlay(ctx, { transport });
 		},
 	});
@@ -2303,6 +2307,16 @@ export function registerCommands(pi: import("@earendil-works/pi-coding-agent").E
 	pi.registerCommand("delegate-teardown", {
 		description: "Confirm + sequentially tear down all delegate workers (pre-logged, never automatic)",
 		async handler(_args, ctx) {
+			// Headless guard (pi docs Mode Behavior): the confirm/notify dialogs
+			// below need a UI, and a headless session must NOT auto-confirm a
+			// destructive teardown — refuse with a text-only note instead (console
+			// is the headless channel, same as the watcher sink).
+			if (!ctx.hasUI || !ctx.ui) {
+				console.error(
+					"[pi-delegate] /delegate-teardown needs a UI session (it confirms before tearing down) — run it in the interactive session that owns the workers.",
+				);
+				return;
+			}
 			const views = await buildWorkerView(transport);
 			if (views.length === 0) {
 				ctx.ui.notify("No delegate workers to tear down.", "info");
