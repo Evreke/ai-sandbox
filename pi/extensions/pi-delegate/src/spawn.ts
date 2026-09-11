@@ -16,7 +16,7 @@
  * tierWarning, questionDetected, lastBeat, settleAbort) ARE the shared phase
  * state — no splitting into phase files, no ctx object; only zero-closure-
  * state pure helpers may ever be extracted.
- * Dependencies: transport.ts (Transport seam + E_* taxonomy + briefPrompt),
+ * Dependencies: ./host.ts (the Transport seam + E_* taxonomy + briefPrompt),
  * exchange.ts (manifest/report/mailbox lifecycle + archive), usage.ts
  * (session-JSONL gauges), observe.ts (watch/collect config resolution),
  * fleet.ts (render helpers + idle nudge). Never imports the transport
@@ -96,6 +96,8 @@ import {
 	describeFleet,
 	ensureExchangeDir,
 	exchangeRoot,
+	isProbeDir,
+	PROBE_DIR_SUFFIX,
 	persistTaskUsageSnapshot,
 	progressPathFor,
 	questionPathFor,
@@ -106,6 +108,8 @@ import {
 	reportPathFor,
 	resolveReportSchema,
 	scanAllManifests,
+	TEARDOWN_LOG_NAME,
+	teardownLogLine,
 	updateManifest,
 	validateReport,
 	validateReportAgainstSchema,
@@ -542,6 +546,21 @@ export function registerMailboxTool(pi: import("@earendil-works/pi-coding-agent"
  * createHerdrTransport, bound once in index.ts).
  */
 
+/** The diagnosed-retry mandate (W0, rng-sum bug 2): the policy text is ONE
+ *  exported constant — it appears verbatim at BOTH model-facing guidance
+ *  sites (the delegate promptGuidelines and the settle-fail error text).
+ *  Before the migration the sentence was duplicated by hand and pinned
+ *  byte-identical by test/static-check.ts T2.x; the pins now import this.
+ * <p>
+ * FUNCTION_CONTRACT (constant):
+ * Input: none
+ * Output: the retry-mandate sentence (names the <name>-r2 suffixed shape)
+ * Guarantees: any wording change passes through here — both sites stay in
+ *   sync by construction (a T2-style pin still verifies both sites use it).
+ * Raises: never */
+export const RETRY_MANDATE =
+	"The retry MUST use a NEW worker name (e.g. <name>-r2) — the original name stays taken by the settled agent.";
+
 /** Interactive-readiness timeout for `agent start` (DESIGN.md §5.1 step 5). */
 const START_TIMEOUT_MS = 120_000;
 /** Max wait for prompt *submission* to be accepted (not for settle). */
@@ -553,7 +572,7 @@ const PROBE_TIMEOUT_MS = 120_000;
  *  the exchange root). Derived from exchangeRoot() so sandboxed tests
  *  ($PI_DELEGATE_EXCHANGE_ROOT) never touch the live /tmp/exchange root. */
 function probeExchangeDir(): string {
-	return `${exchangeRoot()}/_probe`;
+	return `${exchangeRoot()}/${PROBE_DIR_SUFFIX}`;
 }
 /** Fixed probe prompt (DESIGN.md §5.1 step 4). */
 const PROBE_PROMPT = "Reply with exactly: OUTPUT: OK";
@@ -625,7 +644,7 @@ async function reportExists(path: string): Promise<boolean> {
  */
 async function logTeardownAudit(dir: string, line: string): Promise<void> {
 	try {
-		await appendFile(`${dir}/teardown.log`, `[${new Date().toISOString()}] ${line}\n`);
+		await appendFile(`${dir}/${TEARDOWN_LOG_NAME}`, teardownLogLine(line));
 	} catch {
 		// best-effort audit log — never block teardown on logging failure
 	}
@@ -761,7 +780,8 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 		promptGuidelines: [
 			"Use delegate only after the brief file exists under /tmp/exchange/<task>/ — pass its path as briefPath; the brief is the worker's instructions and its OUTPUT section must point at report-<name>.json.",
 			"delegate blocks until the worker settles; the worker's report file is the completion criterion, not the agent status — status fail in the report is still an honest completion.",
-			"If delegate returns E_REPORT_MISSING or E_REPORT_INVALID, do a diagnosed retry with root cause + fix shape (at most 2 repeats, then escalate); never repeat verbatim. The retry MUST use a NEW worker name (e.g. <name>-r2) — the original name stays taken by the settled agent.",
+			"If delegate returns E_REPORT_MISSING or E_REPORT_INVALID, do a diagnosed retry with root cause + fix shape (at most 2 repeats, then escalate); never repeat verbatim. " +
+			RETRY_MANDATE,
 			"mode 'probe' is OPTIONAL (enterprise cost): only for untrusted environments — the first real worker's structured failures (E_PLACE/E_START/E_NAME) are just as cheap a smoke signal. Probes verify the pane reply \"OUTPUT: OK\" by streaming readback.",
 			"Probe workers NEVER write a report file — a 'probe OK/FAIL' result is final by itself; never wait for or read a probe's report-<name>.json (only real workers produce reports).",
 			"After E_TIMEOUT or a detach, END YOUR TURN: the background watcher (DESIGN.md §21) wakes you when the report lands, a question arrives, grill_deck is invoked, context goes critical, or the worker dies. Never sleep in bash to wait for a worker and never re-call delegate to wait; delegate_status polling is the only in-turn alternative (bash sleep only when the watcher is absent — old extension build).",
@@ -2015,7 +2035,8 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				code,
 				`${code} — worker ${canonical} settled but ${what}.\n` +
 					"Treat as a failed spawn: do a diagnosed retry with root cause + fix shape (at most 2 repeats, then escalate). " +
-					"The retry MUST use a NEW worker name (e.g. <name>-r2) — the original name stays taken by the settled agent. " +
+					RETRY_MANDATE +
+					" " +
 					"Read the worker's pane before retrying to find the actual root cause." +
 					schemaNote +
 					`${uniquified ? ` ${uniquified}` : ""}` +

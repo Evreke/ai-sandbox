@@ -21,6 +21,8 @@
  */
 
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 // ============================================================================
 // SECTION 1 — src/transport/types.ts (verbatim, incl. its review header)
@@ -305,8 +307,20 @@ export const DEFAULT_BUDGET_TOKENS = 150_000;
  *  "budgetTokens": number, "provider": string, "model": string,
  *  "thinking": string}, "tiers": {"<name>": SpawnTier}}.
  *  Missing/corrupt → fallbacks (per key); an unconfigured environment has NO
- *  built-in worker tier — delegate refuses with E_TIER. */
-export const BUDGET_CONFIG_PATH = ".pi/agent/pi-delegate.config.json";
+ *  built-in worker tier — delegate refuses with E_TIER.
+ * <p>
+ * FUNCTION_CONTRACT (constant):
+ * Input: none (resolved once at module load from os.homedir())
+ * Output: the ABSOLUTE config path — the single source every config reader
+ *   takes the path from (usage.ts resolvers, observe.ts watch config,
+ *   index.ts host binding). Was a dead relative suffix before — the six
+ *   live readers each rebuilt the path by hand.
+ * Guarantees:
+ *   - homedir() is cached per process by bun (documented in test/usage-check.ts),
+ *     so module-load resolution is equivalent to per-call resolution there;
+ *     in node (production pi) the home cannot change mid-session either.
+ * Raises: never */
+export const BUDGET_CONFIG_PATH = join(homedir(), ".pi", "agent", "pi-delegate.config.json");
 
 /** Fraction of budget above which terminal results carry a burn warning. */
 export const BUDGET_WARN_FRACTION = 0.8;

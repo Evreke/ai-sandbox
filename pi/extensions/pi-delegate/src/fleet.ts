@@ -17,15 +17,13 @@
  * observe imported these render helpers). The graph is a DAG again:
  * observe → fleet is the only edge between the two.
  * Dependencies: exchange.ts (scanAllManifests), usage.ts (session JSONL
- * usage), transport.ts (CONTEXT_WARN_PCT + Transport type),
- * @earendil-works/pi-coding-agent TUI. The former watch.ts dependency
- * (WATCH_DEFAULT_STALE_AFTER_MS) stays inlined as a local literal at
- * FLEET_STALE_AFTER_MS: importing it from observe.ts would RE-CREATE the
- * fleet<->observe cycle (observe imports this module's render helpers)
- * with its module-eval TDZ ReferenceError hazard whenever observe is
- * evaluated first; duplication is the sanctioned tool (design law 2). The
- * literal is kept in sync with WATCH_DEFAULT_STALE_AFTER_MS in
- * src/observe.ts (watch section).
+ * usage + the shared staleness constant), ./host.ts (the Transport seam +
+ * gauge constants),
+ * @earendil-works/pi-coding-agent TUI. The watch staleness constant
+ * (WATCH_DEFAULT_STALE_AFTER_MS) is IMPORTED from usage.ts — the one layer
+ * both this module and observe.ts already depend on, so the former
+ * fleet<->observe cycle stays broken while the threshold is a single
+ * value (FLEET_STALE_AFTER_MS is a transparent alias of it).
  * Exported surface: WorkerView, buildWorkerView | classifyOwnership,
  * OWNERSHIP_GLYPH, Ownership,
  * SelfIdentity, OwnershipPlacement | stripAnsi, visibleWidth, trunc,
@@ -64,7 +62,7 @@
 import { readFile, stat } from "node:fs/promises";
 import type { ExtensionCommandContext, ExtensionContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { scanAllManifests } from "./exchange.ts";
-import { contextPct, parseSessionUsage, resolveContextWindow } from "./usage.ts";
+import { contextPct, parseSessionUsage, resolveContextWindow, WATCH_DEFAULT_STALE_AFTER_MS } from "./usage.ts";
 import {
 	CONTEXT_WARN_PCT,
 	type AgentStatusName,
@@ -989,15 +987,12 @@ export const MEGA_GROUP_LIMIT = 6;
 
 /** The folded group's stale age tail shares the watcher's worker-stale
  *  default: collected ≥30 min ago = stale-idle (§22). */
-// W2 deviation (orchestrator-approved), audited and made permanent in W5,
-// re-justified in W6: duplicated literal instead of importing
-// WATCH_DEFAULT_STALE_AFTER_MS from src/observe.ts — importing it would
-// re-create the fleet<->observe cycle (observe imports these render
-// helpers), and reading an observe const at module-eval time inside that
-// cycle crashes with a TDZ ReferenceError whenever observe is evaluated
-// first (index.ts and the watcher-side suites). Keep in sync with
-// WATCH_DEFAULT_STALE_AFTER_MS in src/observe.ts (watch section).
-export const FLEET_STALE_AFTER_MS = 30 * 60_000;
+// Migration stage 1: the literal duplicate is GONE — the threshold is ONE
+// constant, canonically owned by src/usage.ts (the layer both this module
+// and observe.ts import, so no fleet<->observe cycle can re-form). This
+// alias keeps fleet's exported surface stable; importing observe.ts here is
+// still forbidden (observe imports these render helpers — cycle).
+export const FLEET_STALE_AFTER_MS = WATCH_DEFAULT_STALE_AFTER_MS;
 
 function slugOf(dir: string): string {
 	const parts = dir.split("/").filter((p) => p.length > 0);

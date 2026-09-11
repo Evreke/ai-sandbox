@@ -34,6 +34,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { readFileSync } from "node:fs";
 import { COLLECT_DEFAULT_TEARDOWN_AFTER_COLLECT, resolveCollectConfig } from "../src/observe.ts";
+import { TEARDOWN_LOG_NAME, teardownLogLine } from "../src/exchange.ts";
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = "") {
@@ -246,12 +247,17 @@ function drive(scenario: string, configJson?: string): DriverOut {
 			!/E_TEARDOWN/.test(src),
 	);
 	check(
-		"C4.4 the audit helper mirrors observe.ts logTo format (commands.ts → index.ts W5 → observe.ts W6)",
+		"C4.4 the teardown-audit trail is ONE shared convention: BOTH close paths (spawn auto-teardown + /delegate-teardown) append via the exchange.ts helpers (name + line format)",
 		(() => {
+			// Migration stage 1: the byte-identical appendFile template pin is
+			// replaced by an import pin — spawn.ts and observe.ts must both append
+			// with TEARDOWN_LOG_NAME + teardownLogLine from exchange.ts, so the two
+			// sites cannot drift apart silently. (C4.3's !/E_TEARDOWN/ stays: the
+			// auto-teardown hook itself must stay advisory/no E_ code even though
+			// the ADAPTER now has a dedicated E_TEARDOWN code.)
 			const cmd = readFileSync(resolve(ROOT, "src/observe.ts"), "utf8");
-			const cmdFmt = cmd.match(/appendFile\(`\$\{dir\}\/teardown\.log`, `\[\$\{new Date\(\)\.toISOString\(\)\}\] \$\{line\}\\n`\);/);
-			const toolFmt = src.match(/appendFile\(`\$\{dir\}\/teardown\.log`, `\[\$\{new Date\(\)\.toISOString\(\)\}\] \$\{line\}\\n`\);/);
-			return cmdFmt !== null && toolFmt !== null;
+			const usesHelper = (s: string) => s.includes("TEARDOWN_LOG_NAME") && s.includes("teardownLogLine(line)");
+			return usesHelper(src) && usesHelper(cmd) && TEARDOWN_LOG_NAME === "teardown.log" && teardownLogLine("x").endsWith("x\n");
 		})(),
 	);
 }

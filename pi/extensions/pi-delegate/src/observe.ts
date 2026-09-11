@@ -15,9 +15,10 @@
  * to fleet.ts — it is view-building and now lives with the other view code
  * (this broke the fleet<->observe import cycle; observe → fleet is one-way).
  * Dependencies: exchange.ts (manifest + report + mailbox protocol), usage.ts
- * (session JSONL usage), archive exports of exchange.ts (resume hint),
+ * (session JSONL usage + the shared staleness constant),
+ * archive exports of exchange.ts (resume hint),
  * fleet.ts (status-tool render helpers + buildWorkerView + fleet-UI
- * mount/overlay), transport.ts (Transport seam + gauge constants), typebox.
+ * mount/overlay), ./host.ts (the Transport seam + gauge constants), typebox.
  * Never imports the transport implementation
  * (dependency rule, DESIGN.md §4.1 — the Transport instance is injected from
  * index.ts).
@@ -88,6 +89,7 @@ import {
 } from "./exchange.ts";
 import {
 	answerPathFor,
+	isProbeDir,
 	nudgeFailedPathFor,
 	parseBriefSchema,
 	progressPathFor,
@@ -97,6 +99,8 @@ import {
 	readQuestion,
 	releasePathFor,
 	scanAllManifests,
+	TEARDOWN_LOG_NAME,
+	teardownLogLine,
 	updateManifest,
 	validateReport,
 	validateReportAgainstSchema,
@@ -111,8 +115,9 @@ import {
 	renderDelegateLines,
 	type WorkerView,
 } from "./fleet.ts";
-import { contextPct, formatTokens, parseSessionUsage, resolveContextWindow } from "./usage.ts";
+import { contextPct, formatTokens, parseSessionUsage, resolveContextWindow, WATCH_DEFAULT_STALE_AFTER_MS } from "./usage.ts";
 import {
+	BUDGET_CONFIG_PATH,
 	CONTEXT_CRITICAL_PCT,
 	CONTEXT_TURNS_WARN,
 	type AgentStatus,
@@ -204,7 +209,7 @@ async function pingMarker(dir: string, name: string): Promise<string> {
  *  so a missing report must render `report —`, never `report✗` (DESIGN.md
  *  §19.4 probe honesty). */
 function isProbeView(v: WorkerView): boolean {
-	return v.dir.endsWith("/_probe");
+	return isProbeDir(v.dir);
 }
 
 /**
@@ -415,8 +420,11 @@ export const WATCH_DEFAULT_SETTLE_GATE_MS = 15_000;
 export const WATCH_MIN_INTERVAL_MS = 1_000;
 /** worker-stale threshold (§22): a collected worker still mounted after this
  *  long wakes its owner ("tear it down or keep"). The overlay's `s` flag
- *  shares the same 30-min default (fleet.ts FLEET_STALE_AFTER_MS). */
-export const WATCH_DEFAULT_STALE_AFTER_MS = 30 * 60_000;
+ *  shares the same 30-min default — ONE constant, canonically owned by
+ *  src/usage.ts (the layer both this module and fleet.ts import; see the
+ *  FUNCTION_CONTRACT there). Re-exported so the watch-config API surface
+ *  (and its tests) keep resolving it from observe.ts. */
+export { WATCH_DEFAULT_STALE_AFTER_MS } from "./usage.ts";
 /** Floor for staleAfterMs — same rationale as the interval floor. */
 export const WATCH_MIN_STALE_AFTER_MS = 60_000;
 /** §23 retire: how long a RETIRABLE worker (valid report + drained mailbox +
@@ -462,7 +470,7 @@ export interface WatchConfig {
  */
 function readDelegateConfig(): Record<string, unknown> | null {
 	try {
-		const raw = readFileSync(join(homedir(), ".pi", "agent", "pi-delegate.config.json"), "utf8");
+		const raw = readFileSync(BUDGET_CONFIG_PATH, "utf8");
 		const cfg = JSON.parse(raw) as unknown;
 		return cfg !== null && typeof cfg === "object" ? (cfg as Record<string, unknown>) : null;
 	} catch {
@@ -846,7 +854,7 @@ export function workersFromManifests(
 				live: liveNames.has(w.name),
 				kind: w.placement?.kind === "tab" ? "tab" : "worktree",
 				self: isSelf,
-				probe: manifest.dir.endsWith("/_probe"),
+				probe: isProbeDir(manifest.dir),
 				...(typeof w.collectedAt === "string" && w.collectedAt.length > 0
 					? { collectedAt: w.collectedAt }
 					: {}),
@@ -1816,7 +1824,7 @@ function asDelegateError(err: unknown): DelegateError | null {
 
 async function logTo(dir: string, line: string): Promise<void> {
 	try {
-		await appendFile(`${dir}/teardown.log`, `[${new Date().toISOString()}] ${line}\n`);
+		await appendFile(`${dir}/${TEARDOWN_LOG_NAME}`, teardownLogLine(line));
 	} catch {
 		// best-effort audit log — never block teardown on logging failure
 	}

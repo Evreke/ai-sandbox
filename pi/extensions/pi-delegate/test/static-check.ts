@@ -25,7 +25,8 @@ import {
 import {
 	placementFromTabResult,
 } from "../src/herdr/host.ts";
-import { validateReport } from "../src/exchange.ts";
+import { validateReport, TEARDOWN_LOG_NAME, teardownLogLine } from "../src/exchange.ts";
+import { RETRY_MANDATE } from "../src/spawn.ts";
 
 const ROOT = resolve(dirname(process.argv[1] ?? "."), "..");
 let failures = 0;
@@ -284,17 +285,18 @@ const good = validateReport(goodPath, "w");
 check("T1.4b validateReport accepts a valid report", good.ok, good.ok ? "" : good.error);
 
 // ---------------------------------------------------------------------------
-// 5. W0 pin (rng-sum bug 2) — retry guidance mandates a NEW suffixed name
+// 5. W0 pin (rng-sum bug 2) — retry guidance mandates a NEW suffixed name.
+// Migration stage 1: the sentence is ONE exported constant (RETRY_MANDATE in
+// src/spawn.ts); the pins verify BOTH guidance sites use the constant, so the
+// two copies can never drift apart again.
 // ---------------------------------------------------------------------------
 
 const delegateSrc = readFileSync(resolve(ROOT, "src/spawn.ts"), "utf8");
-const RETRY_SENTENCE =
-	"The retry MUST use a NEW worker name (e.g. <name>-r2) — the original name stays taken by the settled agent.";
-const retryHits = delegateSrc.split(RETRY_SENTENCE).length - 1;
+const retryHits = delegateSrc.split("RETRY_MANDATE").length - 1;
 check(
-	"T2.1 the NEW-suffixed-name retry mandate appears verbatim at BOTH guidance sites (≥2 occurrences)",
+	"T2.1 BOTH guidance sites reference the RETRY_MANDATE constant (≥2 occurrences of the identifier)",
 	retryHits >= 2,
-	`verbatim hits: ${retryHits}`,
+	`identifier hits: ${retryHits}`,
 );
 check(
 	"T2.2 the mandate sits inside the delegate promptGuidelines (model-facing guidance, not just an error string)",
@@ -302,20 +304,20 @@ check(
 		// W5: spawn.ts holds BOTH tools' promptGuidelines (mailbox + delegate);
 		// the mandate must live in one of the model-facing blocks.
 		const blocks = delegateSrc.match(/promptGuidelines: \[[\s\S]*?\],/g) ?? [];
-		return blocks.some((b) => b.includes(RETRY_SENTENCE));
+		return blocks.some((b) => b.includes("RETRY_MANDATE"));
 	})(),
 );
 check(
 	"T2.3 the mandate sits in the settle-fail guidance (the E_REPORT_MISSING/E_REPORT_INVALID text after 'Treat as a failed spawn')",
 	(() => {
 		const idx = delegateSrc.indexOf("Treat as a failed spawn: do a diagnosed retry");
-		const hit = idx === -1 ? -1 : delegateSrc.indexOf(RETRY_SENTENCE, idx);
+		const hit = idx === -1 ? -1 : delegateSrc.indexOf("RETRY_MANDATE", idx);
 		return hit !== -1 && hit - idx < 400;
 	})(),
 );
 check(
 	"T2.4 the mandate names the suffixed shape explicitly (<name>-r2) — a same-name retry must read as impossible",
-	/<name>-r2/.test(delegateSrc) && /name stays taken/.test(delegateSrc),
+	/<name>-r2/.test(RETRY_MANDATE) && /name stays taken/.test(RETRY_MANDATE),
 );
 
 // ---------------------------------------------------------------------------

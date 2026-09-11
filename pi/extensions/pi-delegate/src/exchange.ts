@@ -14,8 +14,10 @@
  * Dependencies: @earendil-works/pi-coding-agent (parseFrontmatter,
  * withFileMutationQueue), typebox/value entry (deep specifiers are BLOCKED
  * by typebox 1.3.7's exports map — see the note in the import block),
- * node builtins, and ./transport.ts (types + envelope guards ONLY — never
- * the herdr implementation).
+ * node builtins, and ./host.ts (types + envelope guards ONLY — never
+ * the herdr implementation). Also owns the shared exchange-dir conventions
+ * as single-source constants (probe dir suffix, teardown audit trail name
+ * + line format) — migration stage 1.
  *
  * Exported surface (union of the two merged sources, verbatim, plus the F1
  * fleet-accounting section):
@@ -538,6 +540,70 @@ export async function persistTaskUsageSnapshot(dir: string, snapshot: TaskUsageS
 /** Conventional report path for a worker. */
 export function reportPathFor(dir: string, name: string): string {
 	return `${dir}/report-${name}.json`;
+}
+
+// ---------------------------------------------------------------------------
+// Shared dir/file conventions (single-source constants — migration stage 1)
+// ---------------------------------------------------------------------------
+
+/** Probe-run dir convention (DESIGN.md §5.1 step 4, §19.4 probe honesty):
+ *  probe runs exchange under <exchangeRoot>/_probe — no report is ever
+ *  expected there. One suffix, imported by spawn (dir builder), observe and
+ *  index (dir classification). Before the migration the literal was
+ *  duplicated in four files.
+ * <p>
+ * FUNCTION_CONTRACT (constant):
+ * Input: none
+ * Output: the "_probe" dir-name suffix
+ * Guarantees: never changes value without a migration note — fixture dirs
+ *   and classification regexes across tests depend on the exact spelling.
+ * Raises: never */
+export const PROBE_DIR_SUFFIX = "_probe";
+
+/**
+ * True when an exchange dir is the probe dir (or a fixture shaped like one).
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: dir — absolute exchange dir path
+ * Output: true iff dir ends with "/" + PROBE_DIR_SUFFIX
+ * Guarantees:
+ *   - pure string test, no fs access
+ *   - single classifier for probe dirs (observe view building, index tool
+ *     result field, watcher skip logic all read this — before the migration
+ *     each site carried its own endsWith("/_probe") copy)
+ * Raises: never
+ */
+export function isProbeDir(dir: string): boolean {
+	return dir.endsWith(`/${PROBE_DIR_SUFFIX}`);
+}
+
+/** Teardown audit trail file name — <exchange dir>/teardown.log, shared by
+ *  the /delegate-teardown command (observe.ts logTo) and the collect-time
+ *  auto-teardown (spawn.ts logTeardownAudit) so both close paths write ONE
+ *  trail per task dir. Before the migration the name was duplicated in both
+ *  files and pinned byte-identical by a text pin (test C4.4).
+ * <p>
+ * FUNCTION_CONTRACT (constant):
+ * Input: none
+ * Output: "teardown.log"
+ * Guarantees: exact spelling — the file is a shared append-only artifact.
+ * Raises: never */
+export const TEARDOWN_LOG_NAME = "teardown.log";
+
+/**
+ * Format ONE teardown-audit line: `[ISO] line\n` — the format both close
+ * paths append with (byte-identical by construction now, not by convention).
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: line — the audit text (plan/done/error + details)
+ * Output: the full file line, timestamped at CALL time
+ * Guarantees:
+ *   - pure formatting; append + swallow-failures stay at the call sites
+ *     (spawn.ts logTeardownAudit / observe.ts logTo)
+ * Raises: never
+ */
+export function teardownLogLine(line: string): string {
+	return `[${new Date().toISOString()}] ${line}\n`;
 }
 
 function isNonEmptyString(v: unknown): v is string {
