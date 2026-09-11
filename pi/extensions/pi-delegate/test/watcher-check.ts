@@ -19,8 +19,10 @@
  *   W4  mailbox-question.
  *   W5  grill-deck (session JSONL scan, corrupt lines, tail window).
  *   W6  context-critical.
- *   W7  worker-dead + every suppression (live, herdr unreachable, report on
- *       disk, placement grace, probe run).
+ *       W7  worker-dead + every suppression (live, herdr unreachable, report on
+ *           disk, placement grace, probe run); since watcher stage C the branch
+ *           is ALSO the explicit missing-report state for a SETTLED worker
+ *           (done/idle, still live) — guideline §6.2.1.
  *   W8  Dedup: fires once per worker+kind+fingerprint; a condition that stops
  *       being true resets its key; a rewritten report / re-asked question is a
  *       NEW fact and re-fires; a worker that leaves the manifests is forgotten.
@@ -53,6 +55,11 @@
  *       tested in test/composer-check.ts (the old index.ts static pin is
  *       gone).
  * Exit 0 only if all checks pass.
+ *
+ *   W18 Result-plane states (watcher stage C, guideline §6.2): the
+ *       missing-report wake is delivered and durably committed; the branch is
+ *       not gated on collectedAt; a corrupt q-file is audited with its cause
+ *       (zero wake-ups, zero records) and never masked as report-ready.
  */
 
 import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
@@ -412,6 +419,33 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 	);
 	writeFileSync(questionPathFor(dir, "w-question"), "{not json");
 	check("W4.3 corrupt q-file → no question event, never a throw", !kindsOf(eventsFor(w)).includes("mailbox-question"));
+	// Watcher stage C (guideline §6.2.5): the corrupt q-file is a result-plane
+	// fact — audited with the cause, never masked as a report event.
+	{
+		const skips: Array<{ worker: string; reason: string; detail?: string }> = [];
+		const corruptEvents = eventsFor(w, {
+			onSkip: (worker, reason, detail) => skips.push({ worker, reason, detail }),
+		});
+		check(
+			"W4.3b corrupt q-file → audited with the cause (onSkip 'corrupt-question'), no question/report event",
+			!kindsOf(corruptEvents).includes("mailbox-question") &&
+				!kindsOf(corruptEvents).includes("report-ready") &&
+				skips.some((s) => s.worker === "w-question" && s.reason === "corrupt-question" && /JSON/i.test(s.detail ?? "")),
+			`${kindsOf(corruptEvents)} ${JSON.stringify(skips)}`,
+		);
+		// A q-file that is valid JSON but not an envelope is invalid too (the
+		// cause names the shape, not just the parse failure).
+		writeFileSync(questionPathFor(dir, "w-question"), JSON.stringify({ hello: 1 }));
+		const shapeSkips: string[] = [];
+		eventsFor(w, { onSkip: (_w, reason, detail) => shapeSkips.push(`${reason}: ${detail}`) });
+		check(
+			"W4.3c a non-envelope q-file is invalid with a shape reason",
+			shapeSkips.some((s) => s.startsWith("corrupt-question:") && /envelope/i.test(s)),
+			JSON.stringify(shapeSkips),
+		);
+		// Cleanup so later blocks scanning this dir stay clean.
+		rmSync(questionPathFor(dir, "w-question"), { force: true });
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -480,7 +514,33 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 		dead?.message ?? "",
 	);
 	check("W7.2 live worker → no worker-dead", !kindsOf(eventsFor(w, { statuses: [LIVE("w-dead")] })).includes("worker-dead"));
-	check("W7.3 idle-but-known worker (finished, not gone) → no worker-dead", !kindsOf(eventsFor(w, { statuses: [{ name: "w-dead", status: "idle" }] })).includes("worker-dead"));
+	// Watcher stage C (guideline §6.2.1): a SETTLED worker (done/idle, still
+	// known to herdr) without a report is the explicit missing-report state —
+	// the same worker-dead branch, not silence.
+	const settled = eventsFor(w, { statuses: [{ name: "w-dead", status: "idle" }] }).find((e) => e.kind === "worker-dead");
+	check(
+		"W7.3 settled (idle) worker WITHOUT a report → worker-dead names the missing report",
+		!!settled && settled.message.includes(w.reportPath ?? "") && /no report/.test(settled.message),
+		settled?.message ?? kindsOf(eventsFor(w, { statuses: [{ name: "w-dead", status: "idle" }] })),
+	);
+	const wSettledReport = mkWorker(dir, "w-settled-report");
+	writeValidReport(dir, "w-settled-report");
+	check(
+		"W7.3b settled worker WITH a valid report → report-ready, never worker-dead",
+		kindsOf(eventsFor(wSettledReport, { statuses: [{ name: "w-settled-report", status: "done" }] })) === "report-ready",
+		kindsOf(eventsFor(wSettledReport, { statuses: [{ name: "w-settled-report", status: "done" }] })),
+	);
+	check(
+		"W7.3c settled worker + herdr unreachable → silent (statuses unknown ≠ settled-dead)",
+		!kindsOf(eventsFor(w, { statuses: null })).includes("worker-dead"),
+		kindsOf(eventsFor(w, { statuses: null })),
+	);
+	const freshSettled = mkWorker(dir, "w-settled-fresh", { startedAt: new Date(NOW - 1000).toISOString() });
+	check(
+		"W7.3d the placement grace window suppresses the settled shape too",
+		!kindsOf(eventsFor(freshSettled, { statuses: [{ name: "w-settled-fresh", status: "done" }] })).includes("worker-dead"),
+		kindsOf(eventsFor(freshSettled, { statuses: [{ name: "w-settled-fresh", status: "done" }] })),
+	);
 	check("W7.4 herdr unreachable (statuses unknown) → NOBODY is declared dead", !kindsOf(eventsFor(w, { statuses: null })).includes("worker-dead"), kindsOf(eventsFor(w, { statuses: null })));
 
 	const withReport = mkWorker(dir, "w-dead-report");
@@ -493,6 +553,108 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 
 	const probe = mkWorker(taskDir("_probe"), "w-probe");
 	check("W7.7 probe runs expect no report → never worker-dead", !kindsOf(eventsFor(probe, { statuses: NO_STATUS })).includes("worker-dead"), kindsOf(eventsFor(probe, { statuses: NO_STATUS })));
+}
+
+// ---------------------------------------------------------------------------
+// W18. Result-plane states (watcher stage C, guideline §6.2): a missing
+// report, an invalid report and a corrupt q-file are VALID worker outcomes
+// from the sensor's point of view — explicit, observable, and distinct from
+// a router/delivery failure. The missing-report state lives in the
+// worker-dead branch for BOTH episode shapes (gone from the host, settled
+// without a report) and reaches the durable store like every kind; a
+// corrupt q-file is audited with its cause and never masked as report-ready.
+// ---------------------------------------------------------------------------
+
+{
+	// (1) The missing-report wake is delivered AND committed durably.
+	{
+		const dir = taskDir("stagec-missing");
+		const w = mkWorker(dir, "w-missing");
+		const status = { name: "w-missing", status: "done" } as AgentStatus;
+		const snap = snapshotFor([w], [status]);
+		const sent: string[] = [];
+		const h = createWatcher({
+			transport: { listStatuses: async () => [status] } as unknown as Transport,
+			intervalMs: 3_600_000,
+			send: (t: string) => {
+				sent.push(t);
+			},
+			snapshot: async () => snap,
+			self: { sessionFile: TEST_SELF },
+			detect: { legacyFailOpen: true },
+			log: () => {},
+		});
+		const b = await h.tick();
+		check(
+			"W18.1 settled-without-report → a delivered worker-dead wake naming the missing report",
+			b.length === 1 && sent.length === 1 && b[0]?.kind === "worker-dead" && /no report/.test(b[0]?.message ?? ""),
+			`${kindsOf(b)} ${JSON.stringify(sent)}`,
+		);
+		const store = ownStore(dir);
+		const recs = Object.values(store.records);
+		check(
+			"W18.2 the missing-report wake is committed to the durable store with the launch-stamp episode fingerprint",
+			recs.length === 1 && recs[0]?.kind === "worker-dead" && recs[0]?.fingerprint === w.startedAt,
+			JSON.stringify(store.records),
+		);
+		h.stop();
+	}
+
+	// (2) The missing-report branch is NOT gated on collectedAt (guideline
+	// §6.2.1): the branch is about an ABSENT report; the collect stamp
+	// silences only the report branches.
+	{
+		const dir = taskDir("stagec-collected-missing");
+		const w = mkWorker(dir, "w-collected-missing", { collectedAt: new Date(NOW - 60_000).toISOString() });
+		check(
+			"W18.3 collectedAt + report file gone + settled → worker-dead still fires (not collectedAt-gated)",
+			kindsOf(eventsFor(w, { statuses: [{ name: "w-collected-missing", status: "done" }] })).includes("worker-dead"),
+			kindsOf(eventsFor(w, { statuses: [{ name: "w-collected-missing", status: "done" }] })),
+		);
+		const wCollectedReport = mkWorker(dir, "w-collected-report", { collectedAt: new Date(NOW - 60_000).toISOString() });
+		writeValidReport(dir, "w-collected-report");
+		check(
+			"W18.4 collected worker with the report still on disk + settled → silent (no dead wake, no report re-wake)",
+			kindsOf(eventsFor(wCollectedReport, { statuses: [{ name: "w-collected-report", status: "done" }] })) === "",
+			kindsOf(eventsFor(wCollectedReport, { statuses: [{ name: "w-collected-report", status: "done" }] })),
+		);
+	}
+
+	// (3) Corrupt q-file through the LOOP: the default sink writes an audit
+	// line with the cause; nothing is delivered or committed.
+	{
+		const dir = taskDir("stagec-corrupt-q");
+		const w = mkWorker(dir, "w-corrupt-q");
+		writeFileSync(questionPathFor(dir, "w-corrupt-q"), "{not json");
+		const snap = snapshotFor([w], [LIVE("w-corrupt-q")]);
+		const sent: string[] = [];
+		const logs: string[] = [];
+		const h = createWatcher({
+			transport: { listStatuses: async () => [LIVE("w-corrupt-q")] } as unknown as Transport,
+			intervalMs: 3_600_000,
+			send: (t: string) => {
+				sent.push(t);
+			},
+			snapshot: async () => snap,
+			self: { sessionFile: TEST_SELF },
+			detect: { legacyFailOpen: true },
+			log: (m: string) => {
+				logs.push(m);
+			},
+		});
+		const b = await h.tick();
+		check(
+			"W18.5 corrupt q-file → zero wake-ups, zero durable records",
+			b.length === 0 && sent.length === 0 && Object.keys(ownStore(dir).records).length === 0,
+			`${kindsOf(b)} ${JSON.stringify(sent)}`,
+		);
+		check(
+			"W18.6 corrupt q-file → an audit line with the cause (never masked as report-ready)",
+			logs.some((m) => /corrupt q-file/.test(m) && /JSON/.test(m)),
+			JSON.stringify(logs),
+		);
+		h.stop();
+	}
 }
 
 // ---------------------------------------------------------------------------

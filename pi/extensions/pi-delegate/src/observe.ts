@@ -131,6 +131,7 @@ import {
 	readLastProgress,
 	readNudgeFailedMarker,
 	readQuestion,
+	readQuestionState,
 	readWatchStampLayers,
 	releasePathFor,
 	manifestStore,
@@ -1062,11 +1063,21 @@ export interface DetectOptions {
 	/** Audit hook (watcher stage A, guideline §9): called once per SKIPPED
 	 *  delivery with the skip reason — "no-owner" (legacy manifest without any
 	 *  owner field, skipped because legacyFailOpen is false) or "no-self-id"
-	 *  (this session's identity is unreadable; skipped unconditionally).
-	 *  Foreign-owner routing is NOT reported (it is the correct normal path,
-	 *  not a degraded edge). Optional so detectWorkerEvents stays a pure
-	 *  function; production threads a logger from createWatcher. */
-	onSkip?: (worker: string, reason: "no-owner" | "no-self-id") => void;
+	 *  (this session's identity is unreadable; skipped unconditionally) — and,
+	 *  since watcher stage C, once per RESULT-PLANE ANOMALY that produces no
+	 *  event of its own: "corrupt-question" (a q-<name>.json file exists but
+	 *  fails envelope validation — guideline §6.2.5: audited with the cause,
+	 *  never masked as a report event; fires every tick while the file stays
+	 *  corrupt, the same cadence as the ownership skips). Foreign-owner
+	 *  routing is NOT reported (it is the correct normal path, not a degraded
+	 *  edge). `detail` carries the human-readable cause when one exists.
+	 *  Optional so detectWorkerEvents stays a pure function; production
+	 *  threads a logger from createWatcher. */
+	onSkip?: (
+		worker: string,
+		reason: "no-owner" | "no-self-id" | "corrupt-question",
+		detail?: string,
+	) => void;
 	/** worker-stale threshold (§22): injectable for tests; production threads
 	 *  watch.staleAfterMs via startWatcher. Default WATCH_DEFAULT_STALE_AFTER_MS. */
 	staleAfterMs?: number;
@@ -1197,8 +1208,13 @@ export function detectWorkerEvents(w: WatchWorker, opts: DetectOptions = {}): Wa
 
 	// 2. mailbox-question (§12) — fingerprinted by the envelope ts, so a worker
 	//    that asks AGAIN after an answer wakes the orchestrator again.
-	const q = readQuestion(questionPathFor(w.dir, w.name));
-	if (q) {
+	//    Watcher stage C (guideline §6.2.5): a q-file that EXISTS but fails
+	//    envelope validation is a RESULT-PLANE fact, not silence — it is
+	//    audited with the cause via onSkip ("corrupt-question") and never
+	//    masked as a report event. Absent stays the normal no-question state.
+	const qState = readQuestionState(questionPathFor(w.dir, w.name));
+	if (qState.state === "valid") {
+		const q = qState.question;
 		const options = q.options?.length ? ` Options: ${q.options.join(" | ")}.` : "";
 		events.push(
 			mk(
@@ -1208,6 +1224,8 @@ export function detectWorkerEvents(w: WatchWorker, opts: DetectOptions = {}): Wa
 				q.ts,
 			),
 		);
+	} else if (qState.state === "invalid") {
+		opts.onSkip?.(w.name, "corrupt-question", `${qState.error} (file kept as-is — the worker may still be mid-write; re-checked every tick)`);
 	}
 
 	// 2b. nudge-failed (F6) — a mailbox answer/steer whose PANE nudge failed
@@ -1264,22 +1282,33 @@ export function detectWorkerEvents(w: WatchWorker, opts: DetectOptions = {}): Wa
 		}
 	}
 
-	// 5. worker-dead — herdr no longer knows the agent AND nothing landed. Skipped
-	//    when herdr is unreachable (statuses unknown ≠ dead), for probes (no report
-	//    expected) and inside the placement grace window (herdr may not have
-	//    registered the agent yet).
+	// 5. worker-dead — the worker's EPISODE ended WITHOUT a report: herdr no
+	//    longer knows the agent (gone from the host), or the worker SETTLED
+	//    (done/idle) without ever writing one. Both shapes are the explicit
+	//    §6.2.1 "report missing" state (watcher stage C — a settled worker with
+	//    no report used to be silent), they are the same failed-spawn move for
+	//    the orchestrator, and they carry the same launch-stamp episode
+	//    fingerprint (stage B). Skipped when herdr is unreachable (statuses
+	//    unknown ≠ dead), for probes (no report expected) and inside the
+	//    placement grace window (herdr may not have registered the agent yet).
+	//    NOT gated on collectedAt: this branch is about an ABSENT report —
+	//    unlike the report-ready/invalid branches, collect's stamp does not
+	//    suppress it (guideline §6.2.1).
+	const settledWithoutReport = w.status === "done" || w.status === "idle";
 	if (
-		!w.live &&
-		opts.statusesKnown !== false &&
-		reportMtime === null &&
 		!w.probe &&
+		reportMtime === null &&
+		opts.statusesKnown !== false &&
+		(!w.live || settledWithoutReport) &&
 		(w.startedAtMs === undefined || nowMs - w.startedAtMs >= (opts.deadGraceMs ?? WATCH_DEAD_GRACE_MS))
 	) {
+		const state = !w.live
+			? `has no live host status and no report at ${w.reportPath} — it exited without producing anything`
+			: `settled (${w.status}) with no report at ${w.reportPath} — it finished without producing the result`;
 		events.push(
 			mk(
 				"worker-dead",
-				`has no live host status and no report at ${w.reportPath} — it exited without producing ` +
-					"anything. Treat as a failed spawn: read the pane, then a diagnosed retry.",
+				`${state}. Treat as a failed spawn: read the pane, then a diagnosed retry (never verbatim).`,
 				// Watcher stage B episode rule: the fingerprint is the worker's launch
 				// stamp — a NEW run of the worker (new startedAt) is a new death episode
 				// and wakes again; a herdr status flap within one launch does not.
@@ -1883,11 +1912,13 @@ export function createWatcher(deps: WatcherDeps): WatcherHandle {
 		selfSessionFile: deps.self?.sessionFile ?? deps.detect?.selfSessionFile,
 		onSkip:
 			deps.detect?.onSkip ??
-			((worker, reason) =>
+			((worker, reason, detail) =>
 				log(
 					reason === "no-owner"
 						? `skipped delivery worker=${worker} — no owner (legacy manifest; watch.legacyFailOpen is false)`
-						: `skipped delivery worker=${worker} — no self id (E_WATCH_NO_SELF_ID)`,
+						: reason === "corrupt-question"
+							? `result-plane worker=${worker} — corrupt q-file: ${detail ?? "unreadable"} (guideline §6.2.5: audited, not masked as a report event)`
+							: `skipped delivery worker=${worker} — no self id (E_WATCH_NO_SELF_ID)`,
 				)),
 	};
 

@@ -10,6 +10,20 @@ Version numbers align with the iteration numbering in DESIGN.md (v1.x sections).
 
 ### Changed
 
+- **A worker that ends without a report is now reported explicitly (watcher
+  stage C — explicit result-plane states).** The `worker-dead` wake now also
+  fires for a worker that SETTLED (done/idle, still known to herdr) without
+  ever writing a report — previously that state was silent; only the
+  gone-from-host shape woke anyone. Both shapes name the missing report and
+  the failed-spawn move, carry the same launch-stamp episode fingerprint, and
+  are committed to the durable delivery store like every other kind. The
+  missing-report branch is deliberately not silenced by the `collectedAt`
+  stamp (that stamp suppresses only the report-branch wake-ups). A corrupt
+  `q-<name>.json` mailbox file (exists but is not valid JSON or not a question
+  envelope) is now audited in the watcher log with its cause instead of being
+  silently treated as "no question" — it still produces no wake-up and is
+  never masked as a report event. No ownership or delivery behavior changed:
+  unreliable result files never widen the wake-up audience.
 - **Watcher wake-up delivery now survives a session restart (watcher stage
   B — durable delivery store).** The delivered-facts dedup left the memory of
   one watcher mount: each audience session commits its delivery records to

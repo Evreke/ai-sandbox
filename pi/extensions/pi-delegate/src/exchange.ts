@@ -43,8 +43,9 @@
  *     parseBriefSchema, resolveReportSchema, resolveReportSchemaInDir,
  *     loadLibrarySchema
  *   - mailbox: questionPathFor, answerPathFor, releasePathFor,
- *     ReleaseEnvelope, readQuestion, writeAnswer, writeRelease,
- *     progressPathFor, readLastProgress
+ *     ReleaseEnvelope, readQuestion, readQuestionState (watcher stage C:
+ *     read-with-reason for the corrupt-q audit, guideline §6.2.5),
+ *     writeAnswer, writeRelease, progressPathFor, readLastProgress
  *   - archive: ARCHIVE_DIR, ARCHIVE_TTL_MS, archiveRoot, archiveReport,
  *     pruneArchive, listArchivedTasks
  *
@@ -1119,20 +1120,54 @@ export function writeRelease(path: string): Promise<void> {
 	});
 }
 
-/** Read + validate a pending question; null when absent/invalid. */
-export function readQuestion(path: string): QuestionEnvelope | null {
+/** Outcome of reading a q-<name>.json mailbox file (watcher stage C,
+ *  guideline §6.2.5): ABSENT is the normal no-question state; INVALID is a
+ *  file that EXISTS but is corrupt JSON or not a valid question envelope —
+ *  a result-plane fact that must be auditable with its cause, never silently
+ *  equated with "no question"; VALID carries the parsed envelope. */
+export type QuestionRead =
+	| { state: "absent" }
+	| { state: "invalid"; error: string }
+	| { state: "valid"; question: QuestionEnvelope };
+
+/**
+ * Read a pending question WITH the failure reason.
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: path to q-<name>.json (next to the brief)
+ * Output: absent (no/unreadable file), invalid (file exists but fails — with
+ *   the human-readable cause), or valid (parsed envelope)
+ * Guarantees:
+ *   - never throws; a torn mid-write read reads as invalid (with the parse
+ *     error as the cause) and self-heals on a later tick
+ * Raises: never
+ */
+export function readQuestionState(path: string): QuestionRead {
 	let raw: string;
 	try {
 		raw = readFileSync(path, "utf8");
 	} catch {
-		return null; // absent/unreadable → no pending question
+		return { state: "absent" }; // absent/unreadable → no pending question
 	}
+	let parsed: unknown;
 	try {
-		const parsed: unknown = JSON.parse(raw);
-		return isQuestionEnvelope(parsed) ? parsed : null;
-	} catch {
-		return null; // corrupt JSON → no pending question, never throw
+		parsed = JSON.parse(raw);
+	} catch (err) {
+		return { state: "invalid", error: `not valid JSON (${err instanceof Error ? err.message : String(err)})` };
 	}
+	if (!isQuestionEnvelope(parsed)) {
+		return {
+			state: "invalid",
+			error: "JSON is not a question envelope (non-empty string fields worker, ts and question are expected)",
+		};
+	}
+	return { state: "valid", question: parsed };
+}
+
+/** Read + validate a pending question; null when absent/invalid. */
+export function readQuestion(path: string): QuestionEnvelope | null {
+	const r = readQuestionState(path);
+	return r.state === "valid" ? r.question : null;
 }
 
 /**

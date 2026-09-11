@@ -784,7 +784,7 @@ workers' session JSONL (usage gauges + a tail-window tool-call scan).
 | `mailbox-question` | `q-<name>.json` holds a valid envelope | question text + options + "answer via `delegate_mailbox` (action 'answer')" |
 | `grill-deck` | worker's session JSONL contains a `grill_deck` toolCall | "blocked on an interactive deck in its OWN pane — only a human there can answer (or steer it to the mailbox)" |
 | `context-critical` | `contextPct ≥ CONTEXT_CRITICAL_PCT` (90) vs `resolveContextWindow(model)` | pct + "steer it to wrap up now / plan a fresh-name retry" |
-| `worker-dead` | herdr knows the agent is gone (no live status) AND no report on disk | "exited without producing anything — read the pane, then diagnosed retry" |
+| `worker-dead` | the worker's episode ended with NO report on disk: herdr no longer knows the agent (gone from the host), or the worker settled (done/idle in herdr) without ever writing one (watcher stage C — guideline §6.2.1) | "no report — exited/finished without producing anything — read the pane, then diagnosed retry" |
 | `worker-stale` (v1.12.1, §22) | manifest `collectedAt` older than `watch.staleAfterMs` AND the worker still live in herdr | "collected N min ago and still mounted — tear it down (/delegate-teardown) or keep" |
 
 **Dedup (watcher stage B — memory is a cache, disk is the truth).** Every kind
@@ -813,11 +813,39 @@ status flap or a transient read error. One `sendUserMessage` per **batch**
 the episode rules for the gauge/absence kinds — live in the delivered-store
 subsection below. See §21.1b for the durable store itself.
 
+**Result-plane states (watcher stage C — guideline §6.2, all pinned by
+W3/W4/W7/W18).** The result plane (the `report-*.json` / `q-*.json` files the
+WORKER is supposed to write) is an unreliable sensor by nature: absence or
+corruption of these files is a valid worker outcome, never a delivery (router)
+failure. Every state is therefore explicit and observable:
+
+1. **No report after the episode ended** (the worker is gone from herdr, or it
+   settled done/idle without ever writing one, always past the 60 s placement
+   grace) → the `worker-dead` wake names the missing report and the failed-spawn
+   move. This branch is deliberately NOT silenced by the `collectedAt` stamp:
+   it is about an absent report, while `collectedAt` suppresses only the
+   report-branch wake-ups (guideline §6.2.1).
+2. **A report that exists but fails validation** → `report-invalid`, with the
+   validation error quoted — a distinct kind and message, never rendered as a
+   delivery failure.
+3. **A valid report** → `report-ready`.
+4. **A valid question envelope** (`q-<name>.json`) → `mailbox-question`.
+5. **A corrupt q-file** (the file exists but is not valid JSON or not a question
+   envelope) → an audit line in the watcher log with the cause (via the
+   `onSkip` sink, reason `corrupt-question`); it produces NO event and is never
+   masked as `report-ready`. A mid-write torn read reads as corrupt and
+   self-heals on a later tick.
+
+No state above loosens ownership or delivery (guideline §6.3): a missing or
+broken result file never widens the audience, and fixing the model's report
+habits lives in the spawn flow, not here.
+
 **Suppressions** (each pinned by a test): `worker-dead` never fires while herdr
-is unreachable (statuses unknown ≠ dead), inside the 60 s placement grace
-window, for probe runs (probes write no report, §19.4), or when a report
-exists. Manifests older than the 24 h lookback are dropped — a fresh session
-must not be woken for last week's fleet.
+is unreachable (statuses unknown ≠ dead — for both the gone-from-host and the
+settled shape), inside the 60 s placement grace window, for probe runs (probes
+write no report, §19.4), or when a report exists. Manifests older than the
+24 h lookback are dropped — a fresh session must not be woken for last week's
+fleet.
 
 **Self-mute.** Every pi session runs this extension, workers included, so the
 watcher identifies *itself* in the manifests (session JSONL path, or the unique
@@ -1027,7 +1055,7 @@ empty constant):**
 | `nudge-failed` | marker `ts` | No for the same marker |
 | `grill-deck` | deck invocation count | A second deck → a new fingerprint |
 | `context-critical` | EPISODE: worker launch stamp (`startedAt`) + the threshold | One wake per launch per threshold; a restarted worker is a new episode |
-| `worker-dead` | EPISODE: worker launch stamp (`startedAt`); a manifest without a parseable stamp degrades to a stable constant (one wake per dedup lifetime for that edge) | One wake per launch: a herdr status flap within one launch does NOT re-fire; a NEW run (new `startedAt`) is a new death episode |
+| `worker-dead` | EPISODE: worker launch stamp (`startedAt`); a manifest without a parseable stamp degrades to a stable constant (one wake per dedup lifetime for that edge) | One wake per launch: a herdr status flap within one launch does NOT re-fire; a NEW run (new `startedAt`) is a new death episode. Watcher stage C: the episode covers both missing-report shapes (gone from the host, settled without a report) — the same launch, the same episode |
 | `worker-stale` | the `collectedAt` value | A re-collect writes a new stamp → a new fingerprint |
 
 **collectedAt vs the store (guideline §5.5) — two different facts, one rule.**
