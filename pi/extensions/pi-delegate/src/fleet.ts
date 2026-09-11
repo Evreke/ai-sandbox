@@ -70,6 +70,7 @@ import {
 	readWatchStampLayers,
 } from "./exchange.ts";
 import { taskSlug } from "./expaths.ts";
+import { workerAudienceMatch } from "./watch-role.ts";
 import { contextPct, parseSessionUsage, resolveContextWindow, WATCH_DEFAULT_STALE_AFTER_MS } from "./usage.ts";
 import {
 	CONTEXT_WARN_PCT,
@@ -125,34 +126,55 @@ export interface OwnershipPlacement {
 }
 
 /**
+ * Watcher stage A options shape, accepted for parity with the canonical
+ * verdict helper (src/watch-role.ts workerAudienceMatch). Display is
+ * INVARIANT to legacyFailOpen: a no-owner worker renders unknown whether the
+ * delivery edge is open or closed — the flag is a delivery concern only.
+ */
+export interface OwnershipOptions {
+	legacyFailOpen?: boolean;
+}
+
+/**
  * Classify one worker's ownership from the manifest's recorded owner session
- * path, this session's identity, and the worker's placement.
+ * paths, this session's identity, and the worker's placement.
  *
- * - `orchestratorSessionPath` non-empty and === self.sessionFile → "mine".
- * - non-empty and different (self.sessionFile known) → "foreign".
- * - absent/empty (legacy manifest) → UNKNOWN, except the degraded-self-id
- *   fallback: self.sessionFile unknown + worktree + checkoutPath === cwd →
- *   "mine". Tab workers are never matched by cwd → stay "unknown".
- * - non-empty but self.sessionFile unknown → UNKNOWN (fail-closed: cannot
- *   prove the worker is not ours, so never claim it either).
+ * Watcher stage A: this is now a DISPLAY MAPPING over the canonical verdict
+ * (workerAudienceMatch in src/watch-role.ts) — the UI keeps NO ownership
+ * semantics of its own (guideline §3.4: a "UI says foreign but the wake
+ * left" mismatch is a defect; §7.1: the display uses the same owner rules
+ * without its own fail-open). Signature note: the canonical verdict reads
+ * the manifest-level masterSessionPath too (the B1 fallback) — hence the
+ * fourth parameter, which older call sites omit.
+ *
+ * Verdict → display mapping:
+ * - "mine" → "mine"; "foreign" → "foreign".
+ * - "no-owner" / "no-self-id" → "unknown", EXCEPT one DISPLAY-ONLY
+ *   fallback: no owner field + no self.sessionFile + worktree placement
+ *   whose checkoutPath === cwd → "mine". This fallback is a display
+ *   convenience for the degraded-self-id worktree corner (the same
+ *   equivalent the mount gate accepts); it NEVER feeds delivery — a
+ *   degraded self-id delivers nothing in observe.ts, unconditionally
+ *   (guideline §3.6). Tab workers are never matched by cwd → "unknown".
  */
 export function classifyOwnership(
 	orchestratorSessionPath: string | undefined,
 	self: SelfIdentity,
 	placement: OwnershipPlacement,
+	masterSessionPath?: string,
+	_opts?: OwnershipOptions,
 ): Ownership {
-	const field =
-		typeof orchestratorSessionPath === "string" && orchestratorSessionPath.length > 0
-			? orchestratorSessionPath
-			: undefined;
-	if (field !== undefined) {
-		if (self.sessionFile === undefined) return "unknown"; // fail-closed
-		return field === self.sessionFile ? "mine" : "foreign";
-	}
-	// Legacy manifest: no owner field recorded → fail-closed UNKNOWN, with the
-	// observe.ts isSelf worktree fallback for a degraded self-id only.
-	if (self.sessionFile !== undefined) return "unknown";
+	const verdict = workerAudienceMatch(
+		{ orchestratorSessionPath, masterSessionPath },
+		self,
+		{ legacyFailOpen: false },
+	);
+	if (verdict === "mine") return "mine";
+	if (verdict === "foreign") return "foreign";
+	// DISPLAY-ONLY fallback (never feeds delivery — see the doc above): the
+	// degraded-self-id worktree corner.
 	if (
+		self.sessionFile === undefined &&
 		placement?.kind === "worktree" &&
 		self.cwd !== undefined &&
 		typeof placement.checkoutPath === "string" &&
@@ -160,7 +182,7 @@ export function classifyOwnership(
 	) {
 		return "mine";
 	}
-	return "unknown"; // tabs never match by cwd
+	return "unknown"; // no-owner / no-self-id without the display fallback
 }
 
 /** Overlay/widget glyph for an ownership class — all 1 terminal column
@@ -661,6 +683,9 @@ interface ManifestExtras {
 	model?: string;
 	/** Owner session JSONL path (v1.11.1+) — absent on legacy manifests. */
 	orchestratorSessionPath?: string;
+	/** Watcher stage A: the manifest-level fleet owner (F1) — feeds the
+	 *  canonical display mapping so a known-foreign master renders foreign. */
+	masterSessionPath?: string;
 	/** ISO 8601 collect stamp (v1.12.1) — drives the folded group's stale
 	 *  age tail (§22.3). */
 	collectedAt?: string;
@@ -700,8 +725,11 @@ async function readManifestExtras(dir: string, name: string): Promise<ManifestEx
 		if (typeof w.orchestratorSessionPath === "string" && w.orchestratorSessionPath.length > 0) {
 			extras.orchestratorSessionPath = w.orchestratorSessionPath;
 		}
-		if (typeof w.budgetTokens === "number" && Number.isFinite(w.budgetTokens) && w.budgetTokens > 0) {
-			extras.budgetTokens = w.budgetTokens;
+		// Watcher stage A: the manifest-level fleet owner feeds the canonical
+		// display mapping (classifyOwnership → workerAudienceMatch) so a
+		// known-foreign master is rendered foreign, not unknown.
+		if (typeof manifest.masterSessionPath === "string" && manifest.masterSessionPath.length > 0) {
+			extras.masterSessionPath = manifest.masterSessionPath;
 		}
 		if (typeof w.briefPath === "string") {
 			extras.briefPath = w.briefPath;
@@ -827,7 +855,12 @@ function buildRow(view: WorkerView, extras: ManifestExtras, mail: "Q?" | "A→" 
 	// Probe workers never produce a report (§19.4 probe honesty): manifest
 	// briefPath is "" exactly for probes.
 	const isProbe = extras.briefPath === "";
-	const ownership = classifyOwnership(extras.orchestratorSessionPath, self, view.placement);
+	const ownership = classifyOwnership(
+		extras.orchestratorSessionPath,
+		self,
+		view.placement,
+		extras.masterSessionPath,
+	);
 	return {
 		view,
 		budget: window,
@@ -1016,8 +1049,16 @@ function slugOf(dir: string): string {
  * legitimately split into mine/owner?/foreign groups. Within-group order is
  * the input order. Group class from members: any mine → "mine" (renders
  * FLAT — zero regression, and per-row glyphs keep telling the truth in the
- * degraded-self-id mixed edge); else any unknown → "owner?" (fail-open:
- * unknown is NEVER labeled "foreign"); else "foreign".
+ * degraded-self-id mixed edge); else any unknown → "owner?"; else
+ * "foreign".
+ *
+ * Watcher stage A lexicon: the UNKNOWN bucket ("owner?") is a DISPLAY bucket
+ * for rows whose canonical verdict (src/watch-role.ts) is "no-owner" (legacy
+ * manifest) or "no-self-id" (degraded display identity). It is a display
+ * convention only: an unproven owner is never LABELED foreign in the UI —
+ * the bucket asserts nothing. It does NOT describe delivery: delivery is
+ * fail-closed in observe.ts (only a proven owner is woken; a legacy no-owner
+ * manifest delivers nothing unless watch.legacyFailOpen is set).
  */
 export function groupWorkerViews<T extends GroupStatsRow>(rows: T[]): WorkerGroup<T>[] {
 	const byKey = new Map<string, WorkerGroup<T>>();

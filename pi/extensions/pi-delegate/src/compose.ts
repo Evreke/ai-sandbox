@@ -16,15 +16,25 @@
  * unit-testable without pi, herdr, or the filesystem.
  * Exported surface: SessionWatcherDeps, SessionWatcherResult, mountSessionWatcher.
  * Critical invariants:
- *   - the decision is fail-open toward MOUNTING: unknown/garbage manifests
- *     degrade to "not a worker" → the watcher mounts (a lost wake-up is worse
- *     than a spurious one — same convention as the detect-level gates);
+ *   - the mount rule: mount everything EXCEPT a proven pure worker — unknown
+ *     or garbage manifests degrade to "not a worker" and the watcher mounts.
+ *     Watcher stage A: mounting at an UNKNOWN role remains deliberate ONLY
+ *     because delivery is now FAIL-CLOSED (src/watch-role.ts): a mounted
+ *     watcher without a proven owner/identity delivers nothing, so a
+ *     spuriously mounted watcher is harmless noise, never a wrong wake (the
+ *     old justification "fail-open toward MOUNTING: a lost wake-up is worse
+ *     than a spurious one" described the pre-stage-A delivery, which could
+ *     wake bystanders);
  *   - the mount and the archive prune are advisory by contract: a failure in
  *     either must never affect spawn/collect outcomes (§21) — the composer
  *     swallows nothing itself, the collaborators are tolerant by their own
  *     contracts;
  *   - degraded self-id (sessionManager throws) is passed through as-is —
  *     the gates decide with what is known (v1.11.x ownership contract).
+ *     Known consequence (documented, deliberate): a DEGRADED tier-1 lead —
+ *     a worktree worker session whose getSessionFile() throws — matches the
+ *     worker gate by cwd but owns nothing (ownsChildren needs a proven
+ *     sessionFile), so it mounts NO watcher and loses its child wakes;
  * Error modes: none of its own — rethrows only what injected collaborators
  * throw (production collaborators never do).
  */
@@ -72,14 +82,18 @@ export interface SessionWatcherResult {
  * Input:
  *   - deps.pi / deps.transport: the composition root's binding (index.ts)
  *   - deps.self: this session's identity; a degraded sessionFile (undefined)
- *     fails open toward mounting — the watcher tolerates unknown self-id
+ *     mounts toward unknown roles (harmless — delivery is fail-closed), but
+ *     a degraded tier-1 lead is classified a pure worker and mounts nothing
  *   - injected collaborators default to the production ones (scan via
  *     manifestStore + the Transport's backend name)
  * Output: { mounted } — whether startWatcher ran
  * Guarantees:
  *   - PURE worker (isWorkerSession true, ownsChildManifests false) → NOT
  *     mounted; worker-orchestrator or peer orchestrator or bystander →
- *     mounted (the F6 two-tier contract, in ONE place)
+ *     mounted (the F6 two-tier contract, in ONE place). Both gates are thin
+ *     wrappers over the canonical role table (src/watch-role.ts sessionRole)
+ *     — mount and delivery cannot disagree (guideline §3.4: a "UI says
+ *     foreign but the wake left" mismatch is a defect)
  *   - the prune runs exactly once per call, mounted or not
  * Raises:
  *   - only what the injected collaborators throw (production: none —

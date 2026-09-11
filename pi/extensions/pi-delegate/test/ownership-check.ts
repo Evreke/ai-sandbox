@@ -11,10 +11,17 @@
  *     attention-gated widget fold — fixture-shaped input (2 foreign working,
  *     ~60% ctx) renders NOTHING; blocked or ctx≥80 earns exactly one line
  *     per class (≤2 total); idle/done excluded; all-mine fleet byte-identical.
+ *   - Watcher stage A additions: O12–O15 — classifyOwnership is a display
+ *     mapping over the CANONICAL verdict (src/watch-role.ts): a manifest-
+ *     level foreign master renders foreign, the worker-level canon wins,
+ *     and the legacyFailOpen flag never changes the display. O16 — the
+ *     degraded session that the display-only fallback (O5) renders as
+ *     "mine" receives NOTHING at the delivery level (guideline §3.6).
  */
 
 import { classifyOwnership, OWNERSHIP_GLYPH, foldLiveByOwnership, renderLiveRows } from "../src/fleet.ts";
 import { clampLines, visibleWidth, type FleetWidgetRow as FleetRow } from "../src/fleet.ts";
+import { detectWorkerEvents, type WatchWorker } from "../src/observe.ts";
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = "") {
@@ -81,6 +88,54 @@ const OTHER = "/home/u/.pi/agent/sessions/--home-u-other--/s-other.jsonl";
 		[OWNERSHIP_GLYPH.mine, OWNERSHIP_GLYPH.foreign, OWNERSHIP_GLYPH.unknown].every(
 			(g) => visibleWidth(g) === 1,
 		),
+	);
+	// Watcher stage A: the display mapping folds the CANONICAL verdict
+	// (src/watch-role.ts), so a manifest-level foreign master renders foreign
+	// (delivery and display cannot disagree — guideline §3.4), and the
+	// legacyFailOpen flag is accepted but INVARIANT for display (a no-owner
+	// row stays unknown whether the delivery edge is open or closed).
+	check(
+		"O12 manifest-level foreign masterSessionPath → foreign (canonical verdict, not unknown)",
+		classifyOwnership(undefined, self, worktree, OTHER) === "foreign",
+	);
+	check(
+		"O13 manifest-level masterSessionPath === self.sessionFile → mine (the fleet's declared owner)",
+		classifyOwnership(undefined, self, worktree, MINE) === "mine",
+	);
+	check(
+		"O14 worker-level owner wins over a master-level match (the canon is the worker entry)",
+		classifyOwnership(OTHER, self, worktree, MINE) === "foreign",
+	);
+	check(
+		"O15 the legacyFailOpen option never changes the DISPLAY (no-owner stays unknown)",
+		classifyOwnership(undefined, self, worktree, undefined, { legacyFailOpen: true }) === "unknown" &&
+			classifyOwnership(undefined, self, worktree, undefined, { legacyFailOpen: false }) === "unknown",
+	);
+}
+
+// ---------------------------------------------------------------------------
+// O16 — display vs delivery (watcher stage A): the O5 display-only fallback
+// never feeds delivery. The SAME degraded session (no sessionFile) that O5
+// renders as "mine" receives NOTHING at the delivery level — the canonical
+// no-self-id edge is fail-closed unconditionally, with or without the
+// legacyFailOpen flag (guideline §3.6: no configuration escape).
+// ---------------------------------------------------------------------------
+
+{
+	const dir = "/tmp/exchange/o16-degraded-display";
+	const worker: WatchWorker = {
+		name: "degraded-display-worker",
+		dir,
+		reportPath: `${dir}/report-degraded-display-worker.json`,
+		live: true,
+		kind: "worktree",
+		self: false,
+		probe: false,
+	};
+	check(
+		"O16 the degraded session that DISPLAYS as mine receives NOTHING at the delivery level (flag or not)",
+		detectWorkerEvents(worker, { nowMs: 0 }).length === 0 &&
+			detectWorkerEvents(worker, { nowMs: 0, legacyFailOpen: true }).length === 0,
 	);
 }
 

@@ -355,7 +355,9 @@ for (const status of ["idle", "blocked"] as const) {
 			self: false,
 			probe: false,
 		};
-		const ev = detectWorkerEvents(w);
+		// Watcher stage A: a readable self id + the legacy fail-open rollback ON —
+		// this block tests nudge-marker DETECTION, not ownership routing.
+		const ev = detectWorkerEvents(w, { selfSessionFile: "/tmp/sessions/mb-check-orch.jsonl", legacyFailOpen: true });
 		const marker = ev.find((e) => e.kind === "nudge-failed");
 		check("M8.1 marker on disk → nudge-failed event", marker !== undefined, JSON.stringify(ev.map((e) => e.kind)));
 		check(
@@ -368,9 +370,9 @@ for (const status of ["idle", "blocked"] as const) {
 
 		// Tolerance: garbage/corrupt markers are ignored, never throw.
 		writeFileSync(nudgeFailedPathFor(dir, NAME), "{ not json ]");
-		check("M8.4 corrupt marker → no event, never throws", detectWorkerEvents(w).length === 0);
+		check("M8.4 corrupt marker → no event, never throws", detectWorkerEvents(w, { selfSessionFile: "/tmp/sessions/mb-check-orch.jsonl", legacyFailOpen: true }).length === 0);
 		writeFileSync(nudgeFailedPathFor(dir, NAME), JSON.stringify({ name: NAME, error: "no ts" }));
-		check("M8.5 ts-less marker → no event (fingerprint source missing)", detectWorkerEvents(w).length === 0);
+		check("M8.5 ts-less marker → no event (fingerprint source missing)", detectWorkerEvents(w, { selfSessionFile: "/tmp/sessions/mb-check-orch.jsonl", legacyFailOpen: true }).length === 0);
 	} finally {
 		cleanup(dir);
 	}

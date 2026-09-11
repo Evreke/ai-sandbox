@@ -135,7 +135,13 @@ function drive(scenario: string, configJson?: string): DriverOut {
 	);
 	check(
 		"C2.2 the collect result carries the advisory auto-teardown note",
-		valid.text.includes("Auto-teardown") && /torn down after collect/.test(valid.text) && !/^Warning:/m.test(valid.text),
+		valid.text.includes("Auto-teardown") && /torn down after collect/.test(valid.text) &&
+			// Watcher stage A update (stale pin): the only allowed "Warning:" line
+			// is the stage-A unrecorded-owner warning — the teardown driver's
+			// sessionManager cannot produce a session id, so spawn (correctly)
+			// warns that the watcher will not wake this session. Any OTHER
+			// "Warning:" line is still a failure.
+			!/^Warning: (?!could not read this session's id)/m.test(valid.text),
 		valid.text.slice(-300),
 	);
 	check("C2.3 collectedAt stamped before teardown", valid.collectedStamped);

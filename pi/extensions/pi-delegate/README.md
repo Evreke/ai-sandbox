@@ -96,9 +96,12 @@ Judgment stays with the model (decomposition, verification, merge); mechanics be
   environment variable overrides it.
 - Collected reports are copied to `~/.pi/agent/delegate-archive/<task>/` (best-effort,
   30-day TTL) — that archive is the durable copy.
-- Watcher wake-ups are scoped to the owning session via ownership metadata; manifests
-  without owner fields (legacy) currently fail open — a bystander session may be woken for
-  a foreign fleet. The planned direction is fail-closed; no timeline is committed.
+- Watcher wake-ups are scoped to the owning session via ownership metadata and are
+  FAIL-CLOSED by default: a manifest with no owner fields anywhere (legacy) delivers
+  nothing — no bystander session is woken for a foreign fleet. The only rollback is the
+  explicit config `watch.legacyFailOpen: true`, which is unsafe on a machine with several
+  sessions. A session that cannot read its own identity delivers nothing unconditionally
+  (no config escape).
 
 ### Install
 
@@ -196,9 +199,12 @@ done/idle.
   `PI_DELEGATE_EXCHANGE_ROOT` переопределяет его.
 - Собранные отчёты копируются в `~/.pi/agent/delegate-archive/<task>/` (best-effort,
   TTL 30 дней) — архив и есть долговременная копия.
-- Пробуждения вотчера ограничены сессией-владельцем через метки владения; манифесты без
-  полей владельца (legacy) пока fail-open — чужая сессия может получить wake по чужому
-  флоту. Планируемое направление — fail-closed; сроки не обещаны.
+- Пробуждения вотчера ограничены сессией-владельцем через метки владения и по умолчанию
+  fail-closed: манифест без полей владельца (legacy) не доставляет ничего — чужая сессия
+  не получает wake по чужому флоту. Единственный откат — явный конфиг-ключ
+  `watch.legacyFailOpen: true`; это небезопасно на машине с несколькими сессиями. Сессия,
+  которая не может прочитать собственную идентичность, не доставляет ничего безусловно
+  (конфигурационного выхода нет).
 
 ### Установка
 
