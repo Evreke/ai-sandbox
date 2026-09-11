@@ -6,14 +6,14 @@
  * plus the tolerant config resolvers for spawn defaults and tier tables.
  * Stateless and read-only: every function is a pure projection of its
  * arguments (files are read, never written).
- * Dependencies: transport.ts (SessionUsage/SpawnTier types +
- * CONTEXT_WINDOWS/DEFAULT_CONTEXT_WINDOW constants — types move there, the
- * E_* taxonomy lives in transport.ts), node:fs/os/path. No other src/ module
+ * Dependencies: ./host.ts (the seam — SessionUsage/SpawnTier types +
+ * CONTEXT_WINDOWS/DEFAULT_CONTEXT_WINDOW constants + BUDGET_CONFIG_PATH; the
+ * E_* taxonomy lives there too), node:fs/os/path. No other src/ module
  * may parse session JSONL (one parser law).
  * Exported surface: contextPct, overContext, overOutputBudget,
  * parseSessionUsage, resolveContextWindow, resolvePiSessionCandidates,
  * formatGaugeLine, formatBudgetLine, formatTokens, resolveSpawnDefaults,
- * resolveTierTable.
+ * resolveTierTable, WATCH_DEFAULT_STALE_AFTER_MS.
  * Critical invariants (owned here):
  *   - dual-gauge semantics (§20, v1.7): PRIMARY ctx% is a STATE — the LAST
  *     assistant message's usage.totalTokens ÷ contextWindow (mirrors pi's
@@ -46,7 +46,25 @@ import { readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { SessionUsage, SpawnTier } from "./host.ts";
+
+/** Canonical worker-stale default (§22): a collected worker still mounted
+ *  after this long wakes its owner ("tear it down or keep"), and the fleet
+ *  overlay's `s` flag marks the row stale after the SAME threshold.
+ * <p>
+ * FUNCTION_CONTRACT (constant):
+ * Input: none
+ * Output: 30 minutes in ms — the ONE staleness threshold
+ * Guarantees:
+ *   - lives in THIS module (a layer both observe.ts and fleet.ts already
+ *     import) so watcher and fleet read one value with no import cycle:
+ *     observe.ts re-exports it (WATCH_DEFAULT_STALE_AFTER_MS), fleet.ts
+ *     aliases it (FLEET_STALE_AFTER_MS). Before the migration the literal
+ *     was duplicated by hand in both files (fleet.ts could not import
+ *     observe.ts — observe imports fleet's render helpers).
+ * Raises: never */
+export const WATCH_DEFAULT_STALE_AFTER_MS = 30 * 60_000;
 import {
+	BUDGET_CONFIG_PATH,
 	CONTEXT_WINDOWS,
 	DEFAULT_CONTEXT_WINDOW,
 } from "./host.ts";
@@ -164,7 +182,7 @@ function num(v: unknown): number {
 export function resolveContextWindow(modelId?: string): number {
 	// 1. config override (pi-delegate.config.json {"contextWindow": N})
 	try {
-		const raw = readFileSync(join(homedir(), ".pi", "agent", "pi-delegate.config.json"), "utf8");
+		const raw = readFileSync(BUDGET_CONFIG_PATH, "utf8");
 		const cfg = JSON.parse(raw) as { contextWindow?: unknown };
 		if (typeof cfg.contextWindow === "number" && Number.isFinite(cfg.contextWindow) && cfg.contextWindow > 0) {
 			return cfg.contextWindow;
@@ -277,7 +295,7 @@ export function resolveSpawnDefaults(): {
 	tier?: string;
 } {
 	try {
-		const raw = readFileSync(join(homedir(), ".pi", "agent", "pi-delegate.config.json"), "utf8");
+		const raw = readFileSync(BUDGET_CONFIG_PATH, "utf8");
 		const cfg = JSON.parse(raw) as { defaults?: Record<string, unknown> };
 		const d = cfg.defaults;
 		const str = (v: unknown): string | undefined =>
@@ -304,7 +322,7 @@ export function resolveSpawnDefaults(): {
  */
 export function resolveTierTable(): Record<string, SpawnTier> {
 	try {
-		const raw = readFileSync(join(homedir(), ".pi", "agent", "pi-delegate.config.json"), "utf8");
+		const raw = readFileSync(BUDGET_CONFIG_PATH, "utf8");
 		const cfg = JSON.parse(raw) as { tiers?: unknown };
 		if (cfg.tiers === null || typeof cfg.tiers !== "object") return {};
 		const str = (v: unknown): string | undefined =>

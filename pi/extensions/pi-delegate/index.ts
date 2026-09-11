@@ -17,10 +17,8 @@
 import { readFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { progressPathFor, readLastProgress, scanAllManifests } from "./src/exchange.ts";
+import { isProbeDir, progressPathFor, readLastProgress, scanAllManifests } from "./src/exchange.ts";
 import { buildWorkerView, classifyOwnership, type SelfIdentity } from "./src/fleet.ts";
 import {
 	isWorkerSession,
@@ -34,7 +32,7 @@ import { contextPct, parseSessionUsage, resolveContextWindow } from "./src/usage
 import { pruneArchive } from "./src/exchange.ts";
 import { disposeFleetUI, mountFleetUI, type FleetWidgetRow as FleetRow, type FleetUIDeps } from "./src/fleet.ts";
 import { createHerdrTransport } from "./src/herdr/host.ts";
-import { DelegateErrorImpl, type Transport } from "./src/host.ts";
+import { BUDGET_CONFIG_PATH, DelegateErrorImpl, type Transport } from "./src/host.ts";
 import { registerDelegateTool, registerMailboxTool } from "./src/spawn.ts";
 
 // ===========================================================================
@@ -65,7 +63,7 @@ import { registerDelegateTool, registerMailboxTool } from "./src/spawn.ts";
 function resolveConfiguredHost(): "herdr" {
 	let raw: string;
 	try {
-		raw = readFileSync(join(homedir(), ".pi", "agent", "pi-delegate.config.json"), "utf8");
+		raw = readFileSync(BUDGET_CONFIG_PATH, "utf8");
 	} catch {
 		return "herdr"; // no config → default host
 	}
@@ -231,7 +229,7 @@ export default function (pi: ExtensionAPI) {
 						kind: v.kind,
 						branch: v.branch,
 						reportExists: v.reportExists,
-						isProbe: v.dir.endsWith("/_probe"),
+						isProbe: isProbeDir(v.dir),
 						inputTokens: usage.input,
 						outputTokens: usage.output,
 						budgetPct: contextPct(usage, window),

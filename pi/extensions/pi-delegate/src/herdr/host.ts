@@ -26,6 +26,7 @@ import {
 	type AgentStatusName,
 	type AuthorityMode,
 	delegateError,
+	delegateErrorWithDetail,
 	DelegateErrorImpl,
 	type DelegateError,
 	type DelegateErrorCode,
@@ -38,6 +39,7 @@ import {
 	type StartReq,
 	type StartResult,
 	type TeardownReq,
+	type TeardownResult,
 	type Transport,
 	type TransportCapabilities,
 } from "../host.ts";
@@ -755,7 +757,7 @@ export class HerdrTransport implements Transport {
 		return this.enqueue(() => this.submitPromptInner(req));
 	}
 
-	teardown(req: TeardownReq): Promise<void> {
+	teardown(req: TeardownReq): Promise<TeardownResult> {
 		return this.enqueue(() => this.teardownInner(req));
 	}
 
@@ -783,7 +785,7 @@ export class HerdrTransport implements Transport {
 		 *     socket path maps the structured not_found error code, CLI path the
 		 *     legacy message regex — same null contract either way
 	 * Raises:
-	 *   - DelegateErrorImpl (E_START) for any non-not-found herdr failure
+	 *   - DelegateErrorImpl (E_STATUS) for any non-not-found herdr failure
 	 * EXTERNAL_DEPENDENCY: herdr socket API `agent.get` (W3 read-only path;
 	 *   zero subprocesses), falling back to the `herdr agent get <name>`
 	 *   subprocess only when the socket transport is disabled via env.
@@ -799,8 +801,11 @@ export class HerdrTransport implements Transport {
 				// agent_not_found; not_found is the generic resource code — map both.
 				const code = err instanceof HerdrSocketError ? err.code : "";
 				if (code === "agent_not_found" || code === "not_found") return null;
+				// Migration stage 1 (audit, errors-defect 1): a status-read failure is
+				// its OWN taxonomy entry (E_STATUS), not a borrowed E_START — the code
+				// names what failed, not where the throw site happens to sit.
 				throw new DelegateErrorImpl(
-					"E_START",
+					"E_STATUS",
 					`herdr socket agent.get failed for ${name}: ${(err as Error).message}; worker may have exited`,
 					"herdr socket status query failed for worker; worker may have exited — reconcile via `herdr agent list` before retrying.",
 					err,
@@ -812,8 +817,9 @@ export class HerdrTransport implements Transport {
 			return agentStatusFromResult(parseHerdrResult(stdout).result, name);
 		} catch (err) {
 			if (isNotFound(err)) return null;
+			// Migration stage 1: E_STATUS — same rationale as the socket path above.
 			throw new DelegateErrorImpl(
-				"E_START",
+				"E_STATUS",
 				`herdr status query failed for ${name}: ${(err as Error).message}; worker may have exited`,
 				"herdr status query failed for worker; worker may have exited — reconcile via `herdr agent list` before retrying.",
 				err,
@@ -836,7 +842,7 @@ export class HerdrTransport implements Transport {
 	 *     Calls in DISTINCT time windows each hit herdr (no memoization) and a
 	 *     failure is shared as-is (caller degrades — buildWorkerView catches).
 	 * Raises:
-	 *   - DelegateErrorImpl (E_START) when the herdr call fails
+	 *   - DelegateErrorImpl (E_STATUS) when the herdr call fails
 	 * EXTERNAL_DEPENDENCY: herdr socket API `agent.list` (W3 read-only path;
 	 *   zero subprocesses) with no CLI fallback — an unreachable server is a
 	 *   per-call error, never a spawn and never a hang.
@@ -868,8 +874,9 @@ export class HerdrTransport implements Transport {
 						: [];
 				return list.filter(isRecord).map((a) => herdrStatusFromResult(a, String(a.name ?? "")));
 			} catch (err) {
+				// Migration stage 1: E_STATUS (was a borrowed E_START).
 				throw new DelegateErrorImpl(
-					"E_START",
+					"E_STATUS",
 					`herdr socket agent.list failed: ${(err as Error).message}; worker statuses unavailable`,
 					"herdr unreachable over the socket; worker statuses unavailable — reconcile via `herdr agent list`.",
 					err,
@@ -887,8 +894,9 @@ export class HerdrTransport implements Transport {
 					: [];
 			return list.filter(isRecord).map((a) => herdrStatusFromResult(a, String(a.name ?? "")));
 		} catch (err) {
+			// Migration stage 1: E_STATUS (was a borrowed E_START).
 			throw new DelegateErrorImpl(
-				"E_START",
+				"E_STATUS",
 				`herdr status query failed for agent list: ${(err as Error).message}; worker statuses unavailable`,
 				"herdr status query failed; worker statuses unavailable — reconcile via `herdr agent list`.",
 				err,
@@ -1232,10 +1240,13 @@ export class HerdrTransport implements Transport {
 			// candidate-list guidance.
 			if (/agent_name_taken/i.test(msg) || /name taken by a live agent/i.test(msg)) {
 				const candidates = /candidat\w*\s*[:=]?\s*([^\n]+)/i.exec(msg)?.[1]?.trim() ?? "unknown";
-				throw new DelegateErrorImpl(
+				// Migration stage 1 (errors-defect 2): the guidance BASE TEXT is the
+				// seam dictionary's (GUIDANCE.E_NAME via delegateErrorWithDetail) —
+				// the adapter appends only the backend FACT (the candidate list).
+				throw delegateErrorWithDetail(
 					"E_NAME",
 					`herdr agent start ${req.name}: name taken by a live agent (candidates: ${candidates})`,
-					`requested worker name is taken by a live agent — choose a different name (candidates: ${candidates})`,
+					`candidates: ${candidates}`,
 					err,
 				);
 			}
@@ -1290,21 +1301,28 @@ export class HerdrTransport implements Transport {
 	/**
 	 * FUNCTION_CONTRACT:
 	 * Input: TeardownReq — name, placement, force (worktree removal flag)
-	 * Output: resolves when the placement is gone (worktree removed + workspace
-	 *   reconciled, or tab closed)
+	 * Output: TeardownResult — alreadyGone: true when the placement was ALREADY
+	 *   gone (idempotent no-op), false when this call closed something
 	 * Guarantees:
 	 *   - worktree teardown is ROOT-only (sub-orchestrator → E_PLACE): a
 	 *     sub-orchestrator enumerating globally-scanned manifests must never be
 	 *     able to remove a root orchestrator's worktrees
 	 *   - not_linked_worktree removal errors are tolerated and reconciled via
 	 *     closeWorkspaceIfPresent
+	 *   - migration stage 1 (extensibility-defect 1): not-found-shaped failures
+	 *     (worktree removal OR tab close) resolve with { alreadyGone: true } —
+	 *     the structured "already gone" signal; callers read the FIELD, never
+	 *     the message text (the old unsynchronized isAlreadyGone regexes at
+	 *     every call site are gone)
 	 * Raises:
-	 *   - DelegateErrorImpl E_PLACE for CLI failures / surviving workspaces /
-	 *     failed tab close / authority rejection
+	 *   - DelegateErrorImpl E_TEARDOWN for CLI failures / surviving workspaces /
+	 *     failed tab close that is NOT not-found-shaped
+	 *   - DelegateErrorImpl E_PLACE for the authority rejection (policy guard,
+	 *     mirrors placeInner)
 	 * EXTERNAL_DEPENDENCY: `herdr worktree remove`, `herdr workspace list/close`,
 	 *   `herdr tab close` subprocesses.
 	 */
-	private async teardownInner(req: TeardownReq): Promise<void> {
+	private async teardownInner(req: TeardownReq): Promise<TeardownResult> {
 		const p = req.placement as Placement & { tabId?: string };
 
 		// Authority guard (mirrors placeInner): worktree teardown is root-only.
@@ -1331,18 +1349,21 @@ export class HerdrTransport implements Transport {
 				} else if (/not[\s_-]?found/i.test(msg)) {
 					// BUG_FIX_CONTEXT (parity pin, workerhost impl 2026-09-10): the seam
 					// contract is "teardown of an already-gone placement → idempotent
-					// no-op success" (pinned by the fake and the host-parity-check P3;
-					// the tool layer already mirrored it via observe.ts isAlreadyGone).
+					// no-op success" (pinned by the fake and the host-parity-check P3).
 					// Symptom: the SECOND worktree teardown failed E_PLACE with herdr's
 					// `workspace_not_found` — only the tab path was idempotent. Why the
 					// old guard did not work: it tolerated only not_linked_worktree.
 					// What was done: not-found-shaped removal errors are a no-op success
-					// too (the placement is verifiably absent — the reconcile below is
-					// then also a no-op via closeWorkspaceIfPresent).
-					return;
+					// too; migration stage 1 additionally reports it STRUCTURED
+					// (alreadyGone: true) so callers no longer regex the message text.
+					return { alreadyGone: true };
 				} else {
+					// Migration stage 1 (audit, errors-defect 1): teardown-operation
+					// failures are E_TEARDOWN, not a borrowed E_PLACE. The authority
+					// guard ABOVE stays E_PLACE — a policy rejection, symmetric with
+					// place()'s guard, not a failed close operation.
 					throw delegateError(
-						"E_PLACE",
+						"E_TEARDOWN",
 						`herdr worktree remove failed for workspace ${workspaceId}: ${msg}`,
 						err,
 					);
@@ -1353,7 +1374,7 @@ export class HerdrTransport implements Transport {
 			// removes — verify against `workspace list`, close if still present,
 			// and re-verify before reporting success.
 			await this.closeWorkspaceIfPresent(workspaceId);
-			return;
+			return { alreadyGone: false };
 		}
 
 		// kind === "tab"
@@ -1374,12 +1395,22 @@ export class HerdrTransport implements Transport {
 		try {
 			await runHerdr(["tab", "close", tabId]);
 		} catch (err) {
+			const msg = (err as Error).message ?? "";
+			// Migration stage 1 (extensibility-defect 1): the tab branch used to
+			// THROW on not-found (only the worktree branch was idempotent) and the
+			// tool layer re-parsed the message text at every call site. Now: a
+			// not-found-shaped close is the structured alreadyGone signal — the
+			// placement is verifiably absent, an idempotent no-op, not an error.
+			if (/not[\s_-]?found/i.test(msg)) return { alreadyGone: true };
+			// Genuine close failure → E_TEARDOWN (was a borrowed E_PLACE; DESIGN.md
+			// §7 backlog item closed in step 2).
 			throw delegateError(
-				"E_PLACE",
-				`herdr tab close ${tabId} failed: ${(err as Error).message}`,
+				"E_TEARDOWN",
+				`herdr tab close ${tabId} failed: ${msg}`,
 				err,
 			);
 		}
+		return { alreadyGone: false };
 	}
 
 	/** Resolve the LIVE herdr tab id for a named agent (herdr drift guard):
@@ -1426,7 +1457,7 @@ export class HerdrTransport implements Transport {
 	 * Guarantees:
 	 *   - no-op when the workspace does not exist
 	 * Raises:
-	 *   - DelegateErrorImpl E_PLACE when the close fails or the workspace
+	 *   - DelegateErrorImpl E_TEARDOWN when the close fails or the workspace
 	 *     survives a successful close (caller must reconcile manually)
 	 * EXTERNAL_DEPENDENCY: `herdr workspace list` / `herdr workspace close`
 	 *   subprocesses.
@@ -1436,15 +1467,17 @@ export class HerdrTransport implements Transport {
 		try {
 			await runHerdr(["workspace", "close", workspaceId]);
 		} catch (err) {
+			// Migration stage 1: E_TEARDOWN (was a borrowed E_PLACE).
 			throw delegateError(
-				"E_PLACE",
+				"E_TEARDOWN",
 				`herdr workspace close ${workspaceId} failed after worktree remove: ${(err as Error).message}`,
 				err,
 			);
 		}
 		if (await this.workspaceExists(workspaceId)) {
+			// Migration stage 1: E_TEARDOWN (was a borrowed E_PLACE).
 			throw delegateError(
-				"E_PLACE",
+				"E_TEARDOWN",
 				`workspace ${workspaceId} still present after herdr workspace close — reconcile via herdr workspace list`,
 			);
 		}

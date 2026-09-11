@@ -21,6 +21,8 @@
  */
 
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 // ============================================================================
 // SECTION 1 — src/transport/types.ts (verbatim, incl. its review header)
@@ -182,6 +184,22 @@ export interface TeardownReq {
 	force?: boolean;
 }
 
+/** Result of a teardown operation (migration stage 1, audit extensibility
+ *  defect 1): "teardown of an already-gone placement" is NOT an error — it is
+ *  an idempotent success the CALLER can see (DESIGN.md §24.2 invariant 3).
+ *  Before this the seam had no way to say it: the herdr adapter swallowed
+ *  not-found on the worktree branch but threw on the tab branch, and the
+ *  tool layer re-parsed "not found" out of the error MESSAGE text at every
+ *  call site (three unsynchronized copies of the same regex).
+ *  alreadyGone is optional-in-type so older test doubles (which return
+ *  undefined) keep working; both real adapters always set it. */
+export interface TeardownResult {
+	/** True when the placement was ALREADY gone (herdr dropped it, another
+	 *  session closed it, the user closed the pane) — the close was a no-op.
+	 *  False when this call actually closed something. */
+	alreadyGone?: boolean;
+}
+
 export interface TransportCapabilities {
 	/** False in sub-orchestrator mode: place() must reject worktree requests. */
 	worktrees: boolean;
@@ -230,7 +248,11 @@ export interface Transport {
 	 *  readback may reject — callers must fall back to status-based verdicts. */
 	readPane?(name: string, opts?: { maxChars?: number }): Promise<string>;
 	listStatuses(): Promise<AgentStatus[]>;
-	teardown(req: TeardownReq): Promise<void>;
+	/** Close the placement (worktree removal + workspace reconcile, or tab
+	 *  close). Idempotent by seam semantics: an ALREADY-GONE placement resolves
+	 *  with { alreadyGone: true } instead of throwing — callers read the field,
+	 *  never the message text. Genuine close failures still throw (E_TEARDOWN). */
+	teardown(req: TeardownReq): Promise<TeardownResult>;
 	capabilities(): TransportCapabilities;
 }
 
@@ -246,6 +268,8 @@ export type DelegateErrorCode =
 	| "E_START"
 	| "E_PROMPT_STALLED"
 	| "E_TIMEOUT"
+	| "E_TEARDOWN"
+	| "E_STATUS"
 	| "E_REPORT_MISSING"
 	| "E_REPORT_INVALID"
 	| "E_BUDGET"
@@ -305,8 +329,20 @@ export const DEFAULT_BUDGET_TOKENS = 150_000;
  *  "budgetTokens": number, "provider": string, "model": string,
  *  "thinking": string}, "tiers": {"<name>": SpawnTier}}.
  *  Missing/corrupt → fallbacks (per key); an unconfigured environment has NO
- *  built-in worker tier — delegate refuses with E_TIER. */
-export const BUDGET_CONFIG_PATH = ".pi/agent/pi-delegate.config.json";
+ *  built-in worker tier — delegate refuses with E_TIER.
+ * <p>
+ * FUNCTION_CONTRACT (constant):
+ * Input: none (resolved once at module load from os.homedir())
+ * Output: the ABSOLUTE config path — the single source every config reader
+ *   takes the path from (usage.ts resolvers, observe.ts watch config,
+ *   index.ts host binding). Was a dead relative suffix before — the six
+ *   live readers each rebuilt the path by hand.
+ * Guarantees:
+ *   - homedir() is cached per process by bun (documented in test/usage-check.ts),
+ *     so module-load resolution is equivalent to per-call resolution there;
+ *     in node (production pi) the home cannot change mid-session either.
+ * Raises: never */
+export const BUDGET_CONFIG_PATH = join(homedir(), ".pi", "agent", "pi-delegate.config.json");
 
 /** Fraction of budget above which terminal results carry a burn warning. */
 export const BUDGET_WARN_FRACTION = 0.8;
@@ -487,10 +523,48 @@ export function delegateError(code: DelegateErrorCode, message: string, cause?: 
 	return new DelegateErrorImpl(code, message, GUIDANCE[code], cause);
 }
 
-/** Guidance text per DESIGN.md §7 — embedded in every typed error. */
-const GUIDANCE: Record<DelegateErrorCode, string> = {
+/**
+ * Migration stage 1 (audit, errors-defect 2): the guidance TEXT has ONE
+ * writer — the central §7 dictionary (GUIDANCE). Adapters never write their
+ * own hint phrasing: they append a backend FACT (candidate names, existing
+ * agent, stderr detail) to the dictionary's base text via this helper.
+ * Before this, three sources phrased the same "name taken" advice three
+ * different ways (seam: "use the canonical name", herdr: "choose a different
+ * name", fake: a third variant).
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: code — taxonomy entry; message — the error message (facts, may
+ *   name the backend); detail — the adapter's fact clause (or empty)
+ * Output: DelegateErrorImpl whose guidance = GUIDANCE[code], optionally
+ *   followed by the detail clause in parentheses
+ * Guarantees:
+ *   - the base phrasing of every hint is byte-identical across adapters
+ *   - empty/absent detail → guidance is exactly GUIDANCE[code]
+ * Raises: never
+ */
+export function delegateErrorWithDetail(
+	code: DelegateErrorCode,
+	message: string,
+	detail?: string,
+	cause?: unknown,
+): DelegateErrorImpl {
+	return new DelegateErrorImpl(
+		code,
+		message,
+		detail ? `${GUIDANCE[code]} (${detail})` : GUIDANCE[code],
+		cause,
+	);
+}
+
+/** Guidance text per DESIGN.md §7 — embedded in every typed error.
+ *  Migration stage 1: EXPORTED as the single writer of the base hint text —
+ *  adapters may only append a detail clause (delegateErrorWithDetail); the
+ *  single-source pin in test/error-code-check.ts asserts the base phrasing
+ *  exists nowhere else. */
+export const GUIDANCE: Record<DelegateErrorCode, string> = {
 	E_BRIEF: "Write the brief file first, then retry the delegate call.",
-	E_NAME: "Use the returned canonical name.",
+	E_NAME:
+		"Name collision: the requested worker name is taken by a live agent — choose a different name.",
 	E_TIER:
 		"Add tiers/defaults to ~/.pi/agent/pi-delegate.config.json or pass provider/model/thinking explicitly on the delegate call.",
 	E_PLACE:
@@ -498,6 +572,10 @@ const GUIDANCE: Record<DelegateErrorCode, string> = {
 	E_START: "Check pane readiness (pane must sit at an interactive shell prompt); retry is a new delegate call.",
 	E_PROMPT_STALLED: "Worker pane not at prompt; inspect via delegate_status.",
 	E_TIMEOUT: "Worker still running; poll delegate_status.",
+	E_TEARDOWN:
+		"Teardown (worktree remove / tab close / workspace reconcile) failed; backend stderr is attached — reconcile manually via /delegate-teardown or the host workspace listing, then retry the close.",
+	E_STATUS:
+		"Status read from the backend failed (worker may have exited or the backend is unreachable) — reconcile via the host's status listing before trusting any lifecycle decision.",
 	E_REPORT_MISSING: "Settled but no report file — treat as failed spawn; diagnosed retry is the orchestrator's move.",
 	E_REPORT_INVALID: "Report exists but fails the JSON schema; attach validator output; treated identically to missing.",
 	E_BUDGET:

@@ -100,6 +100,7 @@ const transport = (opts: { teardownShouldThrow: boolean; startShouldThrow: boole
 		teardown: async () => {
 			teardownCalls++;
 			if (opts.teardownShouldThrow) throw new Error("herdr exploded");
+			return { alreadyGone: false }; // structured seam result (migration stage 1)
 		},
 		capabilities: () => ({ worktrees: true, authority: "root" }),
 	}) as Transport;

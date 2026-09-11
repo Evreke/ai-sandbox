@@ -129,7 +129,7 @@ async function drive(
 		waitSettle: async () => ({ status: "idle", timedOut: false }),
 		getStatus: async () => ({ name: NAME, status }),
 		listStatuses: async () => [],
-		teardown: async () => {},
+		teardown: async () => ({ alreadyGone: false }),
 		capabilities: () => ({ worktrees: true, authority: "root" }),
 	} as unknown as Transport;
 

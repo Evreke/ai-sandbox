@@ -58,6 +58,9 @@ interface FlowResult {
 	manifestEntry: ManifestWorker | undefined;
 	teardownCalls: number;
 	secondTeardownOk: boolean;
+	/** Migration stage 1: the structured alreadyGone field on BOTH closes. */
+	firstTeardownAlreadyGone: boolean | undefined;
+	secondTeardownAlreadyGone: boolean | undefined;
 	dedupSurvivor: string | undefined;
 }
 
@@ -115,13 +118,15 @@ async function driveParityFlow(host: Transport, label: string, mode: "worktree" 
 		await updateManifest(dir, (m) => ({ ...m, workers: [...m.workers, entry] }));
 		const manifestEntry = readManifest(dir)?.workers.find((w) => w.name === entry.name);
 
-		// 3. teardown ×2 — second close resolves as an idempotent no-op.
+		// 3. teardown ×2 — second close resolves as an idempotent no-op, and BOTH
+		// closes report the structured alreadyGone field (migration stage 1).
 		let teardownCalls = 0;
 		let secondTeardownOk = true;
-		await host.teardown({ name: entry.name, placement, force: true });
+		const firstRes = await host.teardown({ name: entry.name, placement, force: true });
 		teardownCalls++;
+		let secondRes: Awaited<ReturnType<Transport["teardown"]>> | undefined;
 		try {
-			await host.teardown({ name: entry.name, placement, force: true });
+			secondRes = await host.teardown({ name: entry.name, placement, force: true });
 			teardownCalls++;
 		} catch (err) {
 			secondTeardownOk = false;
@@ -149,7 +154,15 @@ async function driveParityFlow(host: Transport, label: string, mode: "worktree" 
 		);
 		const dedupSurvivor = after.find((w) => w.name === survivor)?.name;
 
-		return { placement, manifestEntry, teardownCalls, secondTeardownOk, dedupSurvivor };
+		return {
+			placement,
+			manifestEntry,
+			teardownCalls,
+			secondTeardownOk,
+			firstTeardownAlreadyGone: firstRes?.alreadyGone,
+			secondTeardownAlreadyGone: secondRes?.alreadyGone,
+			dedupSurvivor,
+		};
 	} finally {
 		rmSync(repoDir, { recursive: true, force: true });
 	}
@@ -177,6 +190,11 @@ check(
 		typeof fakeFlow.manifestEntry.placement.checkoutPath === "string",
 );
 check("P3.fake teardown ×2: both calls resolve (second = idempotent no-op)", fakeFlow.secondTeardownOk && fakeFlow.teardownCalls === 2, `calls=${fakeFlow.teardownCalls}`);
+check(
+	"P3b.fake alreadyGone field: first close = false (closed something), second = true (already gone)",
+	fakeFlow.firstTeardownAlreadyGone === false && fakeFlow.secondTeardownAlreadyGone === true,
+	`first=${fakeFlow.firstTeardownAlreadyGone} second=${fakeFlow.secondTeardownAlreadyGone}`,
+);
 check("P4.fake ref-based dedup: only THIS flow's entry removed, same-name other-ref survives", fakeFlow.dedupSurvivor === "parity-other");
 
 // Read-model parity: the fake's statuses leak no backend ids. The pin reads
@@ -223,6 +241,11 @@ if (!herdrAvailable) {
 			typeof h.manifestEntry.placement.workspaceId === "string",
 	);
 	check("P3.herdr teardown ×2: both calls resolve (second = idempotent no-op)", h.secondTeardownOk && h.teardownCalls === 2, `calls=${h.teardownCalls}`);
+check(
+	"P3b.herdr alreadyGone field: first close = false (closed something), second = true (already gone)",
+	h.firstTeardownAlreadyGone === false && h.secondTeardownAlreadyGone === true,
+	`first=${h.firstTeardownAlreadyGone} second=${h.secondTeardownAlreadyGone}`,
+);
 	check("P4.herdr ref-based dedup: only THIS flow's entry removed, same-name other-ref survives", h.dedupSurvivor === "parity-other");
 
 	// Read-model parity on the live adapter: statuses carry the ref, never ids.

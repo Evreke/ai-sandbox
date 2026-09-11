@@ -14,8 +14,10 @@
  * Dependencies: @earendil-works/pi-coding-agent (parseFrontmatter,
  * withFileMutationQueue), typebox/value entry (deep specifiers are BLOCKED
  * by typebox 1.3.7's exports map — see the note in the import block),
- * node builtins, and ./transport.ts (types + envelope guards ONLY — never
- * the herdr implementation).
+ * node builtins, and ./host.ts (types + envelope guards ONLY — never
+ * the herdr implementation). Also owns the shared exchange-dir conventions
+ * as single-source constants (probe dir suffix, teardown audit trail name
+ * + line format) — migration stage 1.
  *
  * Exported surface (union of the two merged sources, verbatim, plus the F1
  * fleet-accounting section):
@@ -76,12 +78,12 @@
  */
 
 import { parseFrontmatter, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
-import type {
-	DelegateError,
-	DelegateErrorCode,
-	Placement,
-	ProgressEvent,
-	WorkerReport,
+import {
+	delegateError,
+	type DelegateError,
+	type Placement,
+	type ProgressEvent,
+	type WorkerReport,
 } from "./host.ts";
 import {
 	isProgressEvent,
@@ -236,21 +238,11 @@ export interface ExchangeDir {
 // Errors
 // ---------------------------------------------------------------------------
 
-class ExchangeDelegateError extends Error implements DelegateError {
-	readonly code: DelegateErrorCode;
-	readonly guidance: string;
-	override cause?: unknown;
-
-	constructor(code: DelegateErrorCode, message: string, cause?: unknown) {
-		super(message);
-		this.name = "DelegateError";
-		this.code = code;
-		this.guidance = E_BRIEF_GUIDANCE;
-		if (cause !== undefined) this.cause = cause;
-	}
-}
-
-const E_BRIEF_GUIDANCE = "Write the brief file first, then retry the delegate call.";
+// Migration stage 1 (audit, errors-defect 2): the exchange module's SECOND
+// error class (ExchangeDelegateError, with its own hardcoded E_BRIEF guidance
+// duplicating the seam dictionary) is DELETED. Every error this module raises
+// goes through the ONE seam factory (delegateError from src/host.ts), so the
+// guidance text has exactly one writer.
 
 // ---------------------------------------------------------------------------
 // Path validation + ensureExchangeDir
@@ -259,14 +251,15 @@ const E_BRIEF_GUIDANCE = "Write the brief file first, then retry the delegate ca
 /**
  * Validate and open the exchange dir for a brief.
  * Rules: briefPath absolute, inside /tmp/exchange/<task>/, file exists and is
- * non-empty. Throws a DelegateError with code E_BRIEF otherwise.
+ * non-empty. Throws a DelegateError (typed, seam taxonomy) with code E_BRIEF
+ * otherwise.
  */
 export function ensureExchangeDir(briefPathRaw: string): ExchangeDir {
 	// Normalize a leading @ (models sometimes prefix tool path args with it).
 	const briefPath = briefPathRaw.startsWith("@") ? briefPathRaw.slice(1) : briefPathRaw;
 
 	if (!briefPath || !isAbsolute(briefPath)) {
-		throw new ExchangeDelegateError(
+		throw delegateError(
 			"E_BRIEF",
 			`Brief path must be absolute, got: "${briefPathRaw}"`,
 		);
@@ -277,27 +270,27 @@ export function ensureExchangeDir(briefPathRaw: string): ExchangeDir {
 	const parent = dirname(dir);
 
 	if (resolve(parent) !== exchangeRoot()) {
-		throw new ExchangeDelegateError(
+		throw delegateError(
 			"E_BRIEF",
 			`Brief must live directly inside ${exchangeRoot()}/<task>/ — parent dir of "${dir}" is "${parent}"`,
 		);
 	}
 	if (!task || task === basename(exchangeRoot())) {
-		throw new ExchangeDelegateError("E_BRIEF", `Missing task slug in brief path: "${brief}"`);
+		throw delegateError("E_BRIEF", `Missing task slug in brief path: "${brief}"`);
 	}
 
 	let content: string;
 	try {
 		content = readFileSync(brief, "utf8");
 	} catch (err) {
-		throw new ExchangeDelegateError(
+		throw delegateError(
 			"E_BRIEF",
 			`Brief file not readable at ${brief}: ${(err as Error).message}`,
 			err,
 		);
 	}
 	if (content.trim().length === 0) {
-		throw new ExchangeDelegateError("E_BRIEF", `Brief file is empty: ${brief}`);
+		throw delegateError("E_BRIEF", `Brief file is empty: ${brief}`);
 	}
 
 	// Conventional report path: brief-<name>.md → report-<name>.json (sibling).
@@ -538,6 +531,70 @@ export async function persistTaskUsageSnapshot(dir: string, snapshot: TaskUsageS
 /** Conventional report path for a worker. */
 export function reportPathFor(dir: string, name: string): string {
 	return `${dir}/report-${name}.json`;
+}
+
+// ---------------------------------------------------------------------------
+// Shared dir/file conventions (single-source constants — migration stage 1)
+// ---------------------------------------------------------------------------
+
+/** Probe-run dir convention (DESIGN.md §5.1 step 4, §19.4 probe honesty):
+ *  probe runs exchange under <exchangeRoot>/_probe — no report is ever
+ *  expected there. One suffix, imported by spawn (dir builder), observe and
+ *  index (dir classification). Before the migration the literal was
+ *  duplicated in four files.
+ * <p>
+ * FUNCTION_CONTRACT (constant):
+ * Input: none
+ * Output: the "_probe" dir-name suffix
+ * Guarantees: never changes value without a migration note — fixture dirs
+ *   and classification regexes across tests depend on the exact spelling.
+ * Raises: never */
+export const PROBE_DIR_SUFFIX = "_probe";
+
+/**
+ * True when an exchange dir is the probe dir (or a fixture shaped like one).
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: dir — absolute exchange dir path
+ * Output: true iff dir ends with "/" + PROBE_DIR_SUFFIX
+ * Guarantees:
+ *   - pure string test, no fs access
+ *   - single classifier for probe dirs (observe view building, index tool
+ *     result field, watcher skip logic all read this — before the migration
+ *     each site carried its own endsWith("/_probe") copy)
+ * Raises: never
+ */
+export function isProbeDir(dir: string): boolean {
+	return dir.endsWith(`/${PROBE_DIR_SUFFIX}`);
+}
+
+/** Teardown audit trail file name — <exchange dir>/teardown.log, shared by
+ *  the /delegate-teardown command (observe.ts logTo) and the collect-time
+ *  auto-teardown (spawn.ts logTeardownAudit) so both close paths write ONE
+ *  trail per task dir. Before the migration the name was duplicated in both
+ *  files and pinned byte-identical by a text pin (test C4.4).
+ * <p>
+ * FUNCTION_CONTRACT (constant):
+ * Input: none
+ * Output: "teardown.log"
+ * Guarantees: exact spelling — the file is a shared append-only artifact.
+ * Raises: never */
+export const TEARDOWN_LOG_NAME = "teardown.log";
+
+/**
+ * Format ONE teardown-audit line: `[ISO] line\n` — the format both close
+ * paths append with (byte-identical by construction now, not by convention).
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: line — the audit text (plan/done/error + details)
+ * Output: the full file line, timestamped at CALL time
+ * Guarantees:
+ *   - pure formatting; append + swallow-failures stay at the call sites
+ *     (spawn.ts logTeardownAudit / observe.ts logTo)
+ * Raises: never
+ */
+export function teardownLogLine(line: string): string {
+	return `[${new Date().toISOString()}] ${line}\n`;
 }
 
 function isNonEmptyString(v: unknown): v is string {
