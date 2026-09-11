@@ -96,7 +96,7 @@ try {
 		const r = await t.waitSettle({ name: "w-idle", timeoutMs: 2500 });
 		check(
 			"D3.1 idle-before-start never settles (neverStarted+timedOut, status unknown)",
-			r.status === "unknown" && r.timedOut === true && r.neverStarted === true,
+			r.kind === "never-started" && r.status === "unknown",
 			JSON.stringify(r),
 		);
 		check("D3.1b ran the full timeoutMs budget", Date.now() - t0 >= 2400, `${Date.now() - t0}ms`);
@@ -107,8 +107,8 @@ try {
 	{
 		const r = await t.waitSettle({ name: "w-unknown", timeoutMs: 2300 });
 		check(
-			"D3.2 unknown-before-start keeps polling → neverStarted",
-			r.status === "unknown" && r.timedOut === true && r.neverStarted === true,
+			"D3.2 unknown-before-start keeps polling → never-started",
+			r.kind === "never-started" && r.status === "unknown",
 			JSON.stringify(r),
 		);
 	}
@@ -119,7 +119,7 @@ try {
 		const r = await t.waitSettle({ name: "w-work", timeoutMs: 20_000 });
 		check(
 			"D3.3 working→idle settles (status idle, no neverStarted)",
-			r.status === "idle" && r.timedOut === false && r.neverStarted === undefined,
+			r.kind === "settled" && r.status === "idle",
 			JSON.stringify(r),
 		);
 	}
@@ -131,7 +131,7 @@ try {
 		const r = await t.waitSettle({ name: "w-block", timeoutMs: 20_000 });
 		check(
 			"D3.4 blocked settles immediately (started + settled)",
-			r.status === "blocked" && r.timedOut === false && r.neverStarted === undefined,
+			r.kind === "settled" && r.status === "blocked",
 			JSON.stringify(r),
 		);
 	}
@@ -144,7 +144,7 @@ try {
 		const r = await t.waitSettle({ name: "w-done-first", timeoutMs: 20_000 });
 		check(
 			"D3.5 first-observation done settles immediately (proves life)",
-			r.status === "done" && r.timedOut === false && r.neverStarted === undefined,
+			r.kind === "settled" && r.status === "done",
 			JSON.stringify(r),
 		);
 	}
@@ -156,7 +156,7 @@ try {
 		const r = await t.waitSettle({ name: "w-done-then-idle", timeoutMs: 20_000 });
 		check(
 			"D3.6 first-slice done settles (started + settled)",
-			r.status === "done" && r.timedOut === false && r.neverStarted === undefined,
+			r.kind === "settled" && r.status === "done",
 			JSON.stringify(r),
 		);
 	}
@@ -191,7 +191,7 @@ try {
 		const r = await t.waitSettle({ name: "w-aged", timeoutMs: 10_000 });
 		check(
 			"D3.7 aged done→idle settles via session reply proof (finishedBeforeWatch)",
-			r.status === "idle" && r.timedOut === false && r.finishedBeforeWatch === true && r.neverStarted === undefined,
+			r.kind === "finished-before-watch" && r.status === "idle",
 			JSON.stringify(r),
 		);
 		check("D3.7b settles immediately, no timeout spin", Date.now() - t0 < 5_000, `${Date.now() - t0}ms`);
@@ -204,8 +204,8 @@ try {
 	{
 		const r = await t.waitSettle({ name: "w-empty", timeoutMs: 2500 });
 		check(
-			"D3.8 idle + reply-less session stays neverStarted (no false salvage)",
-			r.status === "unknown" && r.timedOut === true && r.neverStarted === true,
+			"D3.8 idle + reply-less session stays never-started (no false salvage)",
+			r.kind === "never-started" && r.status === "unknown",
 			JSON.stringify(r),
 		);
 	}
@@ -215,8 +215,8 @@ try {
 	{
 		const r = await t.waitSettle({ name: "w-corrupt", timeoutMs: 2500 });
 		check(
-			"D3.9 corrupt session file → no proof, neverStarted (never throws)",
-			r.neverStarted === true,
+			"D3.9 corrupt session file → no proof, never-started (never throws)",
+			r.kind === "never-started",
 			JSON.stringify(r),
 		);
 	}
@@ -225,7 +225,7 @@ try {
 	writeFileSync(join(STUB_DIR, "get-session"), join(sessDir, "absent.jsonl"));
 	{
 		const r = await t.waitSettle({ name: "w-absent", timeoutMs: 2500 });
-		check("D3.10 missing session file → no proof, neverStarted", r.neverStarted === true, JSON.stringify(r));
+		check("D3.10 missing session file → no proof, never-started", r.kind === "never-started", JSON.stringify(r));
 	}
 
 	// 3.11 heartbeat: onPoll fires per slice with the observed state.
@@ -244,7 +244,7 @@ try {
 		);
 		check(
 			"D3.11b heartbeat did not change the settle outcome",
-			r.status === "idle" && r.timedOut === false,
+			r.kind === "settled" && r.status === "idle",
 			JSON.stringify(r),
 		);
 	}
@@ -257,7 +257,7 @@ try {
 		const r = await t.waitSettle({ name: "w-reconcile", timeoutMs: 10_000 });
 		check(
 			"D3.12 reconcile-path aged finish settles (finishedBeforeWatch)",
-			r.status === "idle" && r.finishedBeforeWatch === true,
+			r.kind === "finished-before-watch" && r.status === "idle",
 			JSON.stringify(r),
 		);
 	}
@@ -288,7 +288,7 @@ try {
 		});
 		check(
 			"P1 proofSettled rescues an idle-never-working watcher (finishedBeforeWatch)",
-			r.status === "idle" && r.timedOut === false && r.finishedBeforeWatch === true && r.neverStarted === undefined,
+			r.kind === "finished-before-watch" && r.status === "idle",
 			JSON.stringify(r),
 		);
 		check("P1b settled long before the budget expired", Date.now() - t0 < 6_000, `${Date.now() - t0}ms`);
@@ -301,7 +301,7 @@ try {
 		const r = await t.waitSettle({ name: "w-proof-unknown", timeoutMs: 9_000, proofSettled: async () => true });
 		check(
 			"P2 proof covers unresolved-status slices (no idle observation needed)",
-			r.status === "idle" && r.timedOut === false && r.finishedBeforeWatch === true,
+			r.kind === "finished-before-watch" && r.status === "idle",
 			JSON.stringify(r),
 		);
 	}
@@ -312,7 +312,7 @@ try {
 		const r = await t.waitSettle({ name: "w-proof-false", timeoutMs: 2_500, proofSettled: async () => false });
 		check(
 			"P3 false proof keeps neverStarted semantics (no false salvage)",
-			r.status === "unknown" && r.timedOut === true && r.neverStarted === true,
+			r.kind === "never-started" && r.status === "unknown",
 			JSON.stringify(r),
 		);
 	}
@@ -327,7 +327,7 @@ try {
 				throw new Error("boom");
 			},
 		});
-		check("P4 throwing proof tolerated (neverStarted, no crash)", r.neverStarted === true, JSON.stringify(r));
+		check("P4 throwing proof tolerated (never-started, no crash)", r.kind === "never-started", JSON.stringify(r));
 	}
 
 	// P5 the observation gate keeps precedence: a normally-observed run settles
@@ -345,7 +345,7 @@ try {
 		});
 		check(
 			"P5 observed working→idle settles normally, no finishedBeforeWatch",
-			r.status === "idle" && r.timedOut === false && r.finishedBeforeWatch === undefined,
+			r.kind === "settled" && r.status === "idle",
 			JSON.stringify(r),
 		);
 		check("P5b proof never consulted when observations prove life", calls === 0, `${calls} calls`);

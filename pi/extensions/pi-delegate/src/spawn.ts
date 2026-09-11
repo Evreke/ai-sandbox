@@ -15,7 +15,13 @@
  * returns the next) driven by the INJECTABLE clock/delay port (ClockPort,
  * systemClock, createVirtualClock) — the grace recheck loop is testable on
  * virtual clocks (test/grace-loop-check.ts); the execute closure keeps its
- * shape and delegates the seam to the machine. W4 refactor: verbatim concatenation of the
+ * shape and delegates the seam to the machine. Migration stage 3 (audit step
+ * 8): the settle completion criterion is the canonical report file observed
+ * against THIS embodiment's witness (lifecycle.ts ReportWitness — content-
+ * addressed, never file-mtime/wall-clock), and the settle outcome is the
+ * seam's discriminated union (host.ts SettleResult "kind" variants) — the
+ * backend status is an advisory sensor, never the criterion. W4 refactor:
+ * verbatim concatenation of the
  * old src/tools/mailbox.ts (leaf, first) and src/tools/delegate.ts. The
  * ~1140-line execute() closure is kept AS-IS by design (user decision): its
  * closure-scoped mutables (sessionPath, manifestWarning, reportPath,
@@ -136,7 +142,13 @@ import {
 	resolveTierTable,
 } from "./usage.ts";
 import { resolveCollectConfig, resolveWatchConfig } from "./observe.ts";
-import { nextEmbodiment, stampCollected } from "./lifecycle.ts";
+import {
+	type ReportWitness,
+	witnessEmbodimentReport,
+	nextEmbodiment,
+	reportWitnessProvesRun,
+	stampCollected,
+} from "./lifecycle.ts";
 import { nudgeFailedPathFor } from "./exchange.ts";
 import { probeDirPathFor, questionArchivePathFor } from "./expaths.ts";
 import { clampLines, notifyFleetIdle, renderDelegateLines } from "./fleet.ts";
@@ -1265,6 +1277,32 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			//    BEFORE startAgent: if the start fails, the placement is still real
 			//    and /delegate-teardown must be able to clean it up.
 			let reportPath = reportPathFor(manifestDir, params.name);
+			// Migration stage 3 (audit step 8): snapshot the report paths' PRE-RUN
+			// state as THIS embodiment's witness (lifecycle.ts) — the settle wait
+			// proves completion by observing the canonical report file against the
+			// witness (file appeared / was rewritten since THIS run started), never
+			// by comparing file mtimes against the wall clock.
+			const readReportOrNull = async (p: string): Promise<string | null> => {
+				try {
+					return await readFile(p, "utf8");
+				} catch {
+					return null; // absent/unreadable — the witness records "did not exist"
+				}
+			};
+			const reportWitnesses = new Map<string, ReportWitness>();
+			// BUG_FIX_CONTEXT (migration stage 3, audit step 8): symptom — a stale
+			// report of an earlier same-name run could false-settle THIS run (the old
+			// proof compared file mtime against the spawn wall-clock time; clock skew
+			// and sub-millisecond ordering made both false-settle and false-miss
+			// possible). Why the WIP snapshot alone did not work: the witness map is
+			// built HERE, before startAgent, when only the REQUESTED-name path is
+			// known — a uniquified canonical name gets its report path later, and
+			// settleProof would find no witness for it and silently skip the file
+			// proof. What was done: witnesses are keyed by path; the canonical path
+			// gets its own snapshot right after the manifest rename (still BEFORE
+			// submitPrompt — the prompt is not yet delivered, so the snapshot is a
+			// true pre-run state of THIS embodiment).
+			reportWitnesses.set(reportPath, witnessEmbodimentReport(await readReportOrNull(reportPath)));
 			let manifestWarning = "";
 			try {
 				// v1.5 (DESIGN.md §17): record the resolved-schema provenance as a plain
@@ -1452,6 +1490,14 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 						),
 					}));
 					reportPath = canonicalReportPath;
+					if (canonical !== params.name && !reportWitnesses.has(reportPath)) {
+						// Canonical path was unknown at the pre-start snapshot (above);
+						// take the embodiment witness now — the agent has started but the
+						// brief prompt is not yet delivered, so this is still a pre-run
+						// state (a stale report from an earlier run is captured as
+						// existed+digest and can never false-settle THIS run).
+						reportWitnesses.set(reportPath, witnessEmbodimentReport(await readReportOrNull(reportPath)));
+					}
 				} catch (err) {
 					manifestWarning =
 						`Manifest rename to canonical name failed (${errText(err)}) — audit/teardown still references "${params.name}".`;
@@ -1849,38 +1895,40 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 
 			//
 			// FUNCTION_CONTRACT:
-			// Input: none (closure: startedAtDate, reportPath, canonical/requested
+			// Input: none (closure: reportWitnesses, reportPath, canonical/requested
 			//   names, placement, sessionPath)
-			// Output: true when THIS run provably finished (report mtime ≥ spawn
-			//   time, canonical path first / requested-name fallback; else ≥1
-			//   assistant turn in the worker's session JSONL)
+			// Output: true when THIS run provably finished — the canonical report
+			//   file (or the requested-name fallback) OBSERVED against THIS
+			//   embodiment's witness (appeared / rewritten since launch; lifecycle.
+			//   reportWitnessProvesRun), else ≥1 assistant turn in the worker's
+			//   session JSONL
 			// Guarantees:
-			//   - only evidence written AFTER this spawn counts (a stale report from
-			//     an earlier same-name attempt can never false-settle)
+			//   - ownership of the report belongs to THIS embodiment via its
+			//     witness (content-addressed), never via file-mtime/wall-clock
+			//     comparison — a stale report of an earlier same-name run can
+			//     never false-settle, and this run's own report cannot be missed
+			//     by a timestamp race
 			//   - may lazily resolve sessionPath as a side effect (pi-storage fallback)
 			// Raises: never
 			// EXTERNAL_DEPENDENCY: filesystem — report files under the exchange dir;
 			//   the worker's pi session JSONL (via parseSessionUsage /
 			//   resolvePiSessionCandidates — pi's own session storage layout).
 			// Completion proof for the settle watch (§19.1c): the report file for
-			// THIS run (mtime after spawn) is the completion criterion per the tool
-			// contract; the session reply is the backup proof for probes and
-			// report-less finishes. herdr builds that never report working for pi
-			// workers otherwise spin the whole budget against a finished worker.
+			// THIS run is the completion criterion per the tool contract; the
+			// session reply is the backup proof for probes and report-less
+			// finishes. herdr builds that never report working for pi workers
+			// otherwise spin the whole budget against a finished worker.
 			const settleProof = async (): Promise<boolean> => {
 				if (!isProbe) {
 					// canonical-name path first, requested-name fallback (same order as
-					// collectReport): mtime ≥ spawn time proves THIS run wrote it — a
-					// stale report from an earlier same-name attempt is older.
+					// collectReport): the file proves THIS run when it differs from the
+					// witness snapshot taken at launch.
 					const paths = canonical !== params.name
 						? [reportPath, reportPathFor(manifestDir, params.name)]
 						: [reportPath];
 					for (const p of paths) {
-						try {
-							if ((await stat(p)).mtimeMs >= startedAtDate.getTime()) return true;
-						} catch {
-							// missing → next candidate
-						}
+						const w = reportWitnesses.get(p);
+						if (w && reportWitnessProvesRun(w, await readReportOrNull(p))) return true;
 					}
 				}
 				// Session-reply proof (probes have no report file). Assumes a fresh
@@ -2029,7 +2077,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			// v1.14 early release (watch.releaseOn=started): the worker is proven
 			// started and actively working — the §21 discipline applies now, not
 			// at timeout: end the turn, the watcher wakes you on its events.
-			if (settle.startedConfirmed === true) {
+			if (settle.kind === "started-confirmed") {
 				const b = gaugeSummary();
 				return textResult(
 					`Worker ${canonical} started and running — orchestrator released early (releaseOn=started, ${Math.round(elapsedMs / 1000)}s). ` +
@@ -2058,7 +2106,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				// Honest-settle v1.6 (DESIGN.md §19.1, R6 blocker fix): a never-started
 				// probe is probe FAIL — never let the pane status produce a spurious
 				// 'probe OK' (the original spurious-pass bug half-survived here).
-				if ((settle as { neverStarted?: boolean }).neverStarted === true) {
+				if (settle.kind === "never-started") {
 					void maybeNotifyFleetIdle();
 					return fail(
 						"E_START",
@@ -2066,7 +2114,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 							"inspect the pane via a pane read (readPane); do NOT fan out. Probes write no report file." +
 							`${uniquified ? ` ${uniquified}` : ""}` +
 							`${manifestWarning ? ` Warning: ${manifestWarning}` : ""}`,
-						{ probe: "fail", canonical, placement, neverStarted: true, elapsedMs },
+						{ probe: "fail", canonical, placement, settleKind: settle.kind, elapsedMs },
 					);
 				}
 				let live: AgentStatusName = "unknown";
@@ -2122,21 +2170,21 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 							"Fix before fanning out. Probes write no report file. " +
 							`${reminder}${uniquified ? ` ${uniquified}` : ""}` +
 							`${manifestWarning ? ` Warning: ${manifestWarning}` : ""}`,
-						{ probe: "fail", canonical, placement, status: live, verified: "pane-marker-missing", timedOut: settle.timedOut, elapsedMs },
+						{ probe: "fail", canonical, placement, status: live, verified: "pane-marker-missing", timedOut: settle.kind === "timeout", elapsedMs },
 					);
 				}
 				return fail(
 					"E_START",
 					`probe FAIL — agent ${canonical} status ${live}` +
-						`${settle.timedOut ? " (settle timed out)" : ""}: pane/agent did not reach a healthy state.${paneEvidence} ` +
+						`${settle.kind === "timeout" ? " (settle timed out)" : ""}: pane/agent did not reach a healthy state.${paneEvidence} ` +
 						"Check pane readiness and model flags (provider/model/thinking); fix before fanning out. Probes write no report file. " +
 						`${reminder}${uniquified ? ` ${uniquified}` : ""}` +
 						`${manifestWarning ? ` Warning: ${manifestWarning}` : ""}`,
-					{ probe: "fail", canonical, placement, status: live, timedOut: settle.timedOut, elapsedMs },
+					{ probe: "fail", canonical, placement, status: live, timedOut: settle.kind === "timeout", elapsedMs },
 				);
 			}
 
-			if (settle.timedOut) {
+			if (settle.kind === "timeout") {
 				// v1.9b: a question pending even at timeout outranks E_TIMEOUT — the
 				// orchestrator's next action is answering, not retrying.
 				const timedOutQuestion = readQuestion(questionPathFor(manifestDir, canonical));
@@ -2263,11 +2311,11 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			}
 
 			const missing = !(await reportExists(collected.usedPath));
-			// Honest-settle v1.6 (DESIGN.md §19.1): neverStarted → the prompt was
+			// Honest-settle v1.6 (DESIGN.md §19.1): never-started → the prompt was
 			// never consumed and the worker never started — a distinct terminal code
-			// instead of E_REPORT_MISSING. Field is pre-approved on SettleResult;
-			// read defensively until A6's transport change lands in this tree.
-			const neverStarted = (settle as { neverStarted?: boolean }).neverStarted === true;
+			// instead of E_REPORT_MISSING. Migration stage 3 (audit step 8): the
+			// outcome is the union KIND from the seam (the flag set is gone).
+			const neverStarted = settle.kind === "never-started";
 			const code = missing
 				? neverStarted
 					? "E_PROMPT_STALLED"

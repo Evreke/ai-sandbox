@@ -5,10 +5,11 @@
  *
  * Verifies, against a STUB herdr CLI on PATH (no live herdr needed):
  *   1. waitSettle({releaseOnStarted:true}) returns on the FIRST working
- *      observation with {status:"working", startedConfirmed:true, timedOut:false}
+ *      observation with {kind:"started-confirmed", status:"working"}
  *      — fast (<10 s), not a timeout-burn of the full gate.
  *   2. waitSettle without the flag keeps the old behavior: blocks the full
- *      (short, test-sized) gate and reports timedOut with the last status.
+ *      (short, test-sized) gate and reports kind "timeout" with the last
+ *      observed status.
  *   3. resolveWatchConfig parses "releaseOn":"started" from the config file
  *      (via $HOME seam, same caveat as usage.ts).
  *
@@ -60,8 +61,8 @@ try {
 		const settle = await t.waitSettle({ name: "rel-worker", timeoutMs: 60_000, releaseOnStarted: true });
 		const elapsed = Date.now() - t0;
 		check(
-			"T-rel.1 waitSettle(releaseOnStarted) returns startedConfirmed on first working",
-			settle.startedConfirmed === true && settle.status === "working" && settle.timedOut === false,
+			"T-rel.1 waitSettle(releaseOnStarted) returns started-confirmed on first working",
+			settle.kind === "started-confirmed" && settle.status === "working",
 			JSON.stringify(settle),
 		);
 		check("T-rel.1b early release is fast (<10 s, not a gate burn)", elapsed < 10_000, `${elapsed} ms`);
@@ -72,7 +73,7 @@ try {
 		const settle = await t.waitSettle({ name: "rel-worker", timeoutMs: 4_000 });
 		check(
 			"T-rel.2 without the flag the gate blocks to timeout (status working)",
-			settle.timedOut === true && settle.status === "working" && settle.startedConfirmed === undefined,
+			settle.kind === "timeout" && settle.status === "working",
 			JSON.stringify(settle),
 		);
 	}
