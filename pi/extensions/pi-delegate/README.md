@@ -56,6 +56,8 @@ a **validated JSON report** is on disk — never when the agent status says done
 - **Event-driven watcher.** You are woken only when attention is needed: report ready or
   invalid, mailbox question, worker blocked on an interactive deck, context critical (≥90%),
   worker died without a report, collected-but-still-mounted worker. No `sleep 1500`.
+  The watcher is session-keyed: exactly one mount per session, and a second mount for the
+  same session file is refused rather than silently replaced.
   Delivered facts are durable: a session restart does NOT re-wake you on already-delivered
   facts (one file per session per task directory). Emergency rollback:
   `watch.durableDelivery: false`. One-time note: the first run after upgrading on a
@@ -74,7 +76,14 @@ a **validated JSON report** is on disk — never when the agent status says done
   report, full audit in `teardown.log`.
 - **Honest errors.** Every refusal is a structured code with a recovery hint:
   `E_BRIEF`, `E_NAME`, `E_TIER`, `E_PLACE`, `E_START`, `E_TIMEOUT`, `E_BUDGET`, `E_CONTEXT`,
-  `E_REPORT_MISSING`, `E_REPORT_INVALID`.
+  `E_REPORT_MISSING`, `E_REPORT_INVALID`. Two result classes are control flow, not
+  failures — `E_TIMEOUT` (the detach handoff: the worker keeps running and the watcher
+  wakes you) and the awaiting-answer result (a pending mailbox question) — a deliberate,
+  documented deviation from pi's throw convention (ARCHITECTURE.md, Law 8).
+- **Capped tool output.** Tool returns that carry worker-written content are bounded by
+  pi's truncation helpers: status listings show at most 100 rows (with an "N more omitted"
+  note — the full list stays in the result details), and report summaries / mailbox
+  bodies are truncated with a pointer to where the full copy lives.
 
 ### How it automates the routine
 
@@ -172,6 +181,8 @@ done/idle.
 - **Event-driven вотчер.** Будит только когда нужен ход: отчёт готов или бит, вопрос через
   почтовый ящик, воркер завис на интерактивном grill-deck, контекст критический (≥90%),
   воркер умер без отчёта, собранный воркер всё ещё висит. Никаких `sleep 1500`.
+  Вотчер привязан к сессии: ровно один маунт на сессию, повторный маунт для той же
+  сессии отклоняется, а не молча заменяет первый.
 - **Почтовый ящик.** `q-<имя>.json` / `a-<имя>.json` — докидывайте уточнения работающему
   воркеру и отвечайте на его вопросы без пересоздания.
 - **Строгие отчёты.** Критерий завершения — **валидный JSON-отчёт** с evidence
@@ -185,7 +196,15 @@ done/idle.
   отчёта, полный аудит в `teardown.log`.
 - **Честные ошибки.** Каждый отказ — структурный код с подсказкой:
   `E_BRIEF`, `E_NAME`, `E_TIER`, `E_PLACE`, `E_START`, `E_TIMEOUT`, `E_BUDGET`, `E_CONTEXT`,
-  `E_REPORT_MISSING`, `E_REPORT_INVALID`.
+  `E_REPORT_MISSING`, `E_REPORT_INVALID`. Два класса результатов — не сбои, а управление
+  потоком: `E_TIMEOUT` (передача управления: воркер продолжает работать, вотчер вас
+  разбудит) и результат «ожидает ответа» (висит вопрос в почтовом ящике) — это
+  осознанное, документированное отклонение от throw-конвенции pi (ARCHITECTURE.md,
+  закон 8).
+- **Обрезанный вывод инструментов.** Возвраты инструментов, несущие написанный воркером
+  текст, ограничены штатными помощниками pi: в статусных списках не больше 100 строк (с
+  пометкой «N more omitted» — полный список лежит в details результата), а саммари
+  отчётов и тела писем обрезаются с указанием, где лежит полная копия.
 
 ### Как автоматизирует рутину
 
