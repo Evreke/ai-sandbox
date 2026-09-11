@@ -261,12 +261,14 @@ function drive(scenario: string, configJson?: string): DriverOut {
 		"C4.4 the teardown-audit trail is ONE shared convention: BOTH close paths (spawn auto-teardown + /delegate-teardown) append via the exchange.ts helpers (name + line format)",
 		(() => {
 			// Migration stage 1: the byte-identical appendFile template pin is
-			// replaced by an import pin — spawn.ts and observe.ts must both append
+			// replaced by an import pin — spawn.ts and commands.ts must both append
 			// with TEARDOWN_LOG_NAME + teardownLogLine from exchange.ts, so the two
-			// sites cannot drift apart silently. (C4.3's !/E_TEARDOWN/ stays: the
+			// sites cannot drift apart silently. (Wave 3 decomposition: the
+			// /delegate-teardown command lives in src/commands.ts now — the pin
+			// follows the code. C4.3's !/E_TEARDOWN/ stays: the
 			// auto-teardown hook itself must stay advisory/no E_ code even though
 			// the ADAPTER now has a dedicated E_TEARDOWN code.)
-			const cmd = readFileSync(resolve(ROOT, "src/observe.ts"), "utf8");
+			const cmd = readFileSync(resolve(ROOT, "src/commands.ts"), "utf8");
 			const usesHelper = (s: string) => s.includes("TEARDOWN_LOG_NAME") && s.includes("teardownLogLine(line)");
 			return usesHelper(src) && usesHelper(cmd) && TEARDOWN_LOG_NAME === "teardown.log" && teardownLogLine("x").endsWith("x\n");
 		})(),
