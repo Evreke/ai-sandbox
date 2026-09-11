@@ -629,7 +629,9 @@ function dOwnCheckLegacy(t: FakeTransport): boolean {
 // ---------------------------------------------------------------------------
 
 {
-	const watchSrc = readFileSync(resolve(ROOT, "src/observe.ts"), "utf8");
+	// Wave 3 decomposition: the watcher tick lives in src/watcher.ts — the pin
+	// follows the code.
+	const watchSrc = readFileSync(resolve(ROOT, "src/watcher.ts"), "utf8");
 	check("R6.1 the watcher tick runs the retire pass", /await retirePass\(/.test(watchSrc));
 	const mailboxSrc = readFileSync(resolve(ROOT, "src/spawn.ts"), "utf8");
 	check("R6.2 delegate_mailbox exposes the release action", /"read", "answer", "steer", "release"/.test(mailboxSrc) && /writeRelease\(/.test(mailboxSrc));

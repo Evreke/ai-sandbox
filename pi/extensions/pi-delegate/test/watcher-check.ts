@@ -1490,7 +1490,9 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 
 	// startWatcher threads the config threshold into detection (static pin, same
 	// convention as W14.17 — startWatcher needs a live pi to runtime-test).
-	const watchSrcStale = readFileSync(resolve(ROOT, "src/observe.ts"), "utf8");
+	// Wave 3 decomposition: startWatcher lives in src/watcher.ts now — the pin
+	// follows the code.
+	const watchSrcStale = readFileSync(resolve(ROOT, "src/watcher.ts"), "utf8");
 	check(
 		"W15.15 startWatcher threads watch.staleAfterMs (§23 retireTtlMs and the stage-A legacyFailOpen) into detect opts",
 		/staleAfterMs: cfg\.staleAfterMs/.test(watchSrcStale) &&
