@@ -29,13 +29,7 @@
 
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import {
-	graceTransition,
-	runGraceLoop,
-	type CollectAttempt,
-	type GraceLoopDeps,
-	type GraceState,
-} from "../src/spawn.ts";
+import { graceTransition, runGraceLoop, type CollectAttempt, type GraceLoopDeps, type GraceState } from "../src/grace.ts";
 // Wave 3 decomposition: the clock port lives in src/clock.ts now.
 import { createVirtualClock } from "../src/clock.ts";
 import type { ProgressEvent, QuestionEnvelope, WorkerReport } from "../src/host.ts";
