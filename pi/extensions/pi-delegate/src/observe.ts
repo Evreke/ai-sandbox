@@ -39,7 +39,16 @@
  * detectWorkerEvents, detectEvents, RetireReason, RetireDecision, RetireEval,
  * mailboxDrained, evaluateRetire, RetirePassOptions, retirePass,
  * formatEventBatch, formatWakeUpAuditLine, WatcherDeps, WatcherHandle, createWatcher, stopWatcher,
- * makeSender, startWatcher, registerCommands, formatFleetUsageLine (F1).
+ * makeSender, markDeliveredBeforeThrow, startWatcher, registerCommands,
+ * formatFleetUsageLine (F1).
+ * Wave 2 (session lifecycle, Law 3): watcher mounts are keyed by session file
+ * in a globalThis registry — a second mount for an already-mounted session is
+ * REFUSED (keeps the first instance), closing the double-module-load double-
+ * delivery class (audit D2). RESIDUAL, documented deliberately: two SEPARATE
+ * pi processes mounting watchers over the same session file are NOT arbitrated
+ * here (no cross-process lockfile in this wave) — the durable per-audience
+ * delivered-facts store (delivered-<watcherKey>.json) is the cross-process
+ * dedup backstop, and delivery is fail-closed on identity (stage A).
  * Critical invariants (owned here, per report-ref-map.json hiddenInvariants):
  *   - collectedAt-dedup (reader side): report-ready/report-invalid are SILENT
  *     once the manifest records collectedAt — the watcher `seen` dedup is
@@ -1097,6 +1106,35 @@ function truncate(s: string, max = 220): string {
 	return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
 }
 
+/**
+ * Re-read the manifest's collectedAt for one worker straight from disk
+ * (Wave 2 — the watcher-vs-collect race).
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input:
+ *   - dir: the exchange task dir (manifest.json is read from it)
+ *   - worker: the canonical worker name
+ * Output: true when the manifest NOW records a collectedAt for the worker
+ * Guarantees:
+ *   - tolerant: absent/corrupt manifest or entry → false (an unreadable
+ *     manifest never blocks a wake — advisory by contract)
+ *   - read-only; called immediately before a report-kind batch is sent, so a
+ *     collect that stamped BETWEEN the tick's snapshot and the send still
+ *     suppresses the wake (the collect already delivered the report)
+ * Raises: never
+ * EXTERNAL_DEPENDENCY: exchange manifest on disk at <dir>/manifest.json
+ *   (via the manifestStore port).
+ */
+function becameCollectedOnDisk(dir: string, worker: string): boolean {
+	try {
+		const m = manifestStore.read(dir);
+		const w = m?.workers.find((x) => x.name === worker);
+		return typeof w?.collectedAt === "string" && w.collectedAt.length > 0;
+	} catch {
+		return false;
+	}
+}
+
 function fileMtimeMs(path: string): number | null {
 	try {
 		return statSync(path).mtimeMs;
@@ -2032,37 +2070,69 @@ export function createWatcher(deps: WatcherDeps): WatcherHandle {
 			});
 		}
 		if (events.length === 0) return [];
+		// Wave 2 (the watcher-vs-collect race): report-kind suppression reads
+		// collectedAt in the TICK SNAPSHOT — a collect that stamps between the
+		// snapshot and the send produced a duplicate report-ready wake for a
+		// fresh session (empty memory dedup, empty durable store).
+		// BUG_FIX_CONTEXT: symptom — a fresh orchestrator session received the
+		// report-ready wake even though the report had just been collected. Why
+		// the old solution did not work: the collectedAt check ran against the
+		// snapshot taken at tick start, and the stamp landed inside the tick.
+		// What was done: collectedAt is RE-READ from the manifest immediately
+		// before the batch is sent; report-kind events for a worker that became
+		// collected are dropped (other kinds are unaffected — collect only ever
+		// means "the report was delivered"). Residual (documented): a stamp
+		// landing between this re-read and the actual send still races — the
+		// window is now a single atomic-rename scale, and the durable store
+		// records the wake for cross-restart dedup.
+		events = events.filter((e) => {
+			if (e.kind !== "report-ready" && e.kind !== "report-invalid") return true;
+			return !becameCollectedOnDisk(e.dir, e.worker);
+		});
+		if (events.length === 0) return [];
 		// ONE send per batch, INSIDE the error guard, its outcome AWAITED (the
 		// pre-stage-B code ignored the returned value — a silent no-op sender
 		// was indistinguishable from success, and a future async failure would
 		// have gone unnoticed).
-		let outcome: SendOutcome | void;
+		// Wave 2 (audit B4, accept-then-log): the outcome is CLASSIFIED — a
+		// sink error tagged deliveredBeforeThrow (markDeliveredBeforeThrow)
+		// means the wake was already queued by pi when a LATER sink step threw;
+		// the batch counts as DELIVERED (keys stay, durable record commits, no
+		// re-fire). Only a genuine PRE-delivery failure rolls the keys back.
+		let delivered: boolean;
 		try {
-			outcome = await deps.send(formatEventBatch(events));
+			const outcome = await deps.send(formatEventBatch(events));
+			delivered = outcome === undefined || outcome.delivered === true;
 		} catch (err) {
-			// BUG_FIX_CONTEXT: symptom — one failed send during a transient
-			// delivery outage permanently silenced that wake-up (the `seen` key was
-			// already recorded). Why the old behavior did not work: keys were added
-			// before delivery, with no rollback path. What was done: on send failure
-			// the batch's keys are deleted from `seen`, so the event re-fires on the
-			// next tick while its condition still holds.
-			// Delivery failed: roll the batch's keys back out of `seen`, or a single
-			// transient send error would permanently swallow the wake-up. Nothing is
-			// written to the durable store (a commit would claim a delivery that
-			// did not happen). Still advisory, never a queue: nothing is buffered,
-			// and an event whose condition already reset is simply gone.
-			for (const e of events) seen.delete(eventKey(e));
-			log(`delivery failed (${errText(err)}) — batch rolled back, durable store untouched, re-fires while still true (advisory)`);
-			return events;
+			if (isDeliveredBeforeThrow(err)) {
+				// BUG_FIX_CONTEXT: symptom — a wake pi had already queued could be
+				// re-fired on the next tick (the old tick treated ANY sink throw as
+				// "not delivered" and rolled the batch's dedup keys back), so an
+				// accepted-then-thrown delivery arrived twice. Why the old solution
+				// did not work: the rollback path had no notion of WHERE in the
+				// sink the throw happened. What was done: sinks tag post-acceptance
+				// throws with markDeliveredBeforeThrow; the tick counts those as
+				// delivered. Genuine pre-delivery failures (pi threw before
+				// accepting) keep the rollback + re-fire behavior (W9.13 pins it).
+				delivered = true;
+				log(`delivery sink threw AFTER queuing the wake (${errText(err)}) — counted as delivered (accept-then-log), no re-fire`);
+			} else {
+				// BUG_FIX_CONTEXT: symptom — one failed send during a transient
+				// delivery outage permanently silenced that wake-up (the `seen` key was
+				// already recorded). Why the old behavior did not work: keys were added
+				// before delivery, with no rollback path. What was done: on send failure
+				// the batch's keys are deleted from `seen`, so the event re-fires on the
+				// next tick while its condition still holds.
+				// Delivery failed: roll the batch's keys back out of `seen`, or a single
+				// transient send error would permanently swallow the wake-up. Nothing is
+				// written to the durable store (a commit would claim a delivery that
+				// did not happen). Still advisory, never a queue: nothing is buffered,
+				// and an event whose condition already reset is simply gone.
+				for (const e of events) seen.delete(eventKey(e));
+				log(`delivery failed (${errText(err)}) — batch rolled back, durable store untouched, re-fires while still true (advisory)`);
+				return events;
+			}
 		}
-		// Watcher stage B send semantics: a legacy injectable sink returning
-		// void is treated as a real send; an explicit silent outcome (no
-		// usable pi.sendUserMessage) is NOT a delivery — nothing is committed
-		// to disk, and the memory keys are NOT rolled back either (a rollback
-		// would re-fire the batch every tick forever: endless noise from a
-		// session that can never deliver — the existing "headless watcher is
-		// silent but unbroken" contract).
-		const delivered = outcome === undefined || outcome.delivered === true;
 		if (!delivered) {
 			log("delivery sink is silent (no usable pi.sendUserMessage) — wake-up suppressed in memory, nothing committed to the durable store");
 			return events;
@@ -2129,13 +2199,46 @@ export function createWatcher(deps: WatcherDeps): WatcherHandle {
 }
 
 // ---------------------------------------------------------------------------
-// Lifecycle registry (mirrors fleet.ts mount/dispose: module-level, so
-// session_shutdown can stop what session_start started; double-start replaces)
+// Lifecycle registry (Wave 2, Law 3): KEYED mounts live in a globalThis
+// registry by session file — module copies loaded twice still share
+// globalThis, so a double module load cannot silently start a second watcher
+// for the same session (audit D2): the second mount is REFUSED and the first
+// instance's stop handle is returned. The module-global activeStop survives
+// ONLY as the fallback for mounts whose session identity is unknown
+// (sessionFile undefined — cannot be keyed); those keep the legacy
+// double-start-replaces semantics, scoped to anonymous mounts only.
 // ---------------------------------------------------------------------------
 
 let activeStop: (() => void) | null = null;
 
-/** Stop the running watcher (idempotent, safe when nothing is running). */
+/** globalThis slot of the per-session watcher mount registry (survives a
+ *  double module load — two copies of this module share one globalThis). */
+const WATCHER_MOUNT_REGISTRY_KEY = "__piDelegateWatcherMounts";
+
+/**
+ * The per-session watcher mount registry (Wave 2, Law 3).
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: none
+ * Output: the process-wide Map<sessionFile, stopHandle> — created lazily on
+ *   globalThis so every module copy sees the SAME registry
+ * Guarantees:
+ *   - a corrupted/non-Map slot is replaced with a fresh Map (defensive)
+ * Raises: never
+ */
+function watcherMountRegistry(): Map<string, () => void> {
+	const g = globalThis as unknown as Record<string, unknown>;
+	const existing = g[WATCHER_MOUNT_REGISTRY_KEY];
+	if (existing instanceof Map) return existing as Map<string, () => void>;
+	const fresh = new Map<string, () => void>();
+	g[WATCHER_MOUNT_REGISTRY_KEY] = fresh;
+	return fresh;
+}
+
+/** Stop the running anonymous watcher (idempotent, safe when nothing is
+ *  running). DEPRECATED fallback kept for compatibility: production code
+ *  tears watchers down through the per-session stop handles (Law 3) — the
+ *  module-global registry is no longer the shutdown path. */
 export function stopWatcher(): void {
 	const s = activeStop;
 	activeStop = null;
@@ -2160,6 +2263,39 @@ export interface SendOutcome {
 	mode: "sent" | "silent";
 }
 
+/** Error-marker key for the accept-then-log contract (Wave 2, audit B4):
+ *  a delivery sink that had ALREADY handed the wake to pi when a LATER step
+ *  threw tags the error with this property (markDeliveredBeforeThrow) — the
+ *  tick then counts the batch as DELIVERED (keys stay, durable record
+ *  commits, no re-fire) instead of rolling it back. */
+const DELIVERED_BEFORE_THROW = "deliveredBeforeThrow";
+
+/**
+ * Tag an error as "the wake was already queued by pi when a later sink step
+ * threw" (accept-then-log, Wave 2 audit B4).
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: the error a sink wants to report AFTER it has queued the send
+ * Output: the (Error-coerced) error, tagged with the deliveredBeforeThrow
+ *   marker the tick's send-outcome classification reads
+ * Guarantees:
+ *   - non-Error values are wrapped into an Error (the message is preserved)
+ *   - the tick counts a batch whose send threw a tagged error as DELIVERED:
+ *     dedup keys stay, the durable record commits, no re-fire next tick —
+ *     a rollback would re-fire a wake pi already queued (the B4 bug class)
+ * Raises: never
+ */
+export function markDeliveredBeforeThrow(err: unknown): Error {
+	const e = err instanceof Error ? err : new Error(String(err));
+	(e as Error & Record<string, unknown>)[DELIVERED_BEFORE_THROW] = true;
+	return e;
+}
+
+/** The read side of the marker (see markDeliveredBeforeThrow). */
+function isDeliveredBeforeThrow(err: unknown): boolean {
+	return (err as Record<string, unknown> | null | undefined)?.[DELIVERED_BEFORE_THROW] === true;
+}
+
 /**
  * Delivery sink builder (§21). Guarded by design: a build without
  * `sendUserMessage` (headless/old pi) returns a SILENT outcome (mode
@@ -2173,6 +2309,19 @@ export function makeSender(
 ): (text: string) => SendOutcome {
 	return (text: string): SendOutcome => {
 		if (typeof pi.sendUserMessage !== "function") return { delivered: false, mode: "silent" };
+		// Wave 2 (audit B4, accept-then-log): THIS call is the ACCEPTANCE POINT.
+		// A throw from it is a genuine PRE-delivery failure (pi never accepted —
+		// in practice only assertActive-style refusals; the runtime binding is
+		// fire-and-forget and reports async errors itself) — it propagates so
+		// the tick classifies the batch as not-delivered, rolls the dedup keys
+		// back and re-fires while the condition holds (preserved behavior).
+		// Everything AFTER this point in a sink is POST-acceptance: once pi has
+		// queued the wake, the delivery is a FACT — a later step's failure must
+		// never flip the outcome back to not-delivered (the tick would roll the
+		// keys back and re-fire an already-queued wake). A richer custom sink
+		// with post-acceptance steps therefore catches its own later failures
+		// and either returns the delivered outcome or rethrows the error tagged
+		// with markDeliveredBeforeThrow(err) — the tick reads that marker.
 		pi.sendUserMessage(text, { deliverAs: "followUp" });
 		return { delivered: true, mode: "sent" };
 	};
@@ -2217,21 +2366,59 @@ export function makeWatcherLogSink(): (m: string) => void {
 
 /**
  * Start the watcher for this session (DESIGN.md §21: headless-safe — NO
- * ctx.hasUI guard). Returns the dispose fn; also reachable via stopWatcher().
+ * ctx.hasUI guard). Returns the dispose fn.
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input:
+ *   - pi: the extension API (delivery sink via makeSender)
+ *   - transport: the injected WorkerHost seam
+ *   - ctx.cwd / ctx.sessionManager: the session identity (sessionFile read
+ *     tolerantly — a throwing getter degrades to undefined, the mount lives)
+ * Output: the stop handle for THIS mount. For an already-mounted session file
+ *   the handle of the FIRST (still running) instance.
+ * Guarantees:
+ *   - Wave 2 (Law 3, audit D2): mounts are keyed by session file in a
+ *     globalThis registry (shared across module copies). A second mount for
+ *     an ALREADY-MOUNTED session file is REFUSED — logged, first instance
+ *     kept, no second interval started; the first instance's stop handle is
+ *     returned so the caller stays handle-complete.
+ *   - a mount with an UNKNOWN session file (degraded identity) cannot be
+ *     keyed — it keeps the legacy double-start-replaces semantics, scoped to
+ *     anonymous mounts only (module-global activeStop fallback).
+ *   - the returned stop handle is idempotent and unregisters the mount from
+ *     the registry when it is still the current entry.
+ * Raises: never (all failures are advisory by §21)
  */
 export function startWatcher(
 	pi: import("@earendil-works/pi-coding-agent").ExtensionAPI,
 	transport: Transport,
 	ctx: { cwd?: string; sessionManager?: { getSessionFile?: () => string | undefined } },
 ): () => void {
-	stopWatcher(); // idempotent double-start replaces the previous mount
-	const cfg = resolveWatchConfig();
 	let sessionFile: string | undefined;
 	try {
 		sessionFile = ctx.sessionManager?.getSessionFile?.();
 	} catch {
 		sessionFile = undefined; // self-identification degrades, watcher lives
 	}
+	// Wave 2 (Law 3, audit D2): a second mount for an already-mounted session
+	// file is REFUSED — keep the first instance (its dedup state stays
+	// authoritative; two live watchers for one session would deliver every
+	// wake twice — the double-delivery bug class this closes).
+	if (sessionFile !== undefined) {
+		const existing = watcherMountRegistry().get(sessionFile);
+		if (existing) {
+			console.error(
+				`[pi-delegate watch] second watcher mount refused for session ${sessionFile} — already mounted ` +
+					"(double module-load guard, Law 3); keeping the first instance",
+			);
+			return existing;
+		}
+	} else {
+		// Unknown identity: not keyable — legacy replace among anonymous mounts
+		// only (never touches a keyed session's watcher).
+		stopWatcher();
+	}
+	const cfg = resolveWatchConfig();
 	const handle = createWatcher({
 		transport,
 		intervalMs: cfg.intervalMs,
@@ -2254,11 +2441,14 @@ export function startWatcher(
 		},
 		durableDelivery: cfg.durableDelivery,
 	});
+	const registry = sessionFile !== undefined ? watcherMountRegistry() : null;
 	const stop = (): void => {
 		handle.stop();
+		if (registry && registry.get(sessionFile as string) === stop) registry.delete(sessionFile as string);
 		if (activeStop === stop) activeStop = null;
 	};
-	activeStop = stop;
+	if (registry) registry.set(sessionFile as string, stop);
+	else activeStop = stop; // anonymous mount — legacy fallback registry only
 	return stop;
 }
 
