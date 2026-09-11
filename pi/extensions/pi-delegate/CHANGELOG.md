@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Version numbers align with the iteration numbering in DESIGN.md (v1.x sections).
 
+## [1.16.1] — 2026-09-11
+
+### Changed
+
+- Migration stage 1 (architecture-audit steps 1–4, behavior-preserving hardening):
+  - Shared conventions extracted to exported constants: staleness threshold
+    (duplicate copies in observe.ts and fleet.ts replaced by one import),
+    config path, probes directory, teardown journal format, repeat-mandate text.
+  - Error codes are now carried on typed error objects instead of being parsed
+    from message text; new codes for teardown failure and status-read failure;
+    guidance hints produced by a single factory with adapter-supplied detail.
+  - Teardown results carry a structured `alreadyGone` field — closing an
+    absent worker is no longer an error; regex-based "not found" detection
+    removed; adapter parity check extended to cover the new field.
+
 ## [1.16.0] — 2026-09-10
 
 ### Changed
