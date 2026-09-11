@@ -1892,6 +1892,83 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 		check("W17.17b the rollback creates no store file", !storeFileExists);
 		h.stop();
 	}
+
+	// (9) Audit line for a REAL send (guideline §9.1, DESIGN.md §21 delivery): a
+	// successful send writes exactly ONE watcher-log line per batch naming the
+	// send fact and the batch content (dir :: worker/kind#fingerprint per event)
+	// — the recovery trail after an incident. Negative parts: silent mode and a
+	// failed send do NOT write it (each already has its own line).
+	{
+		const dir = taskDir("audit-line");
+		const w1 = mkWorker(dir, "w-audit1");
+		const w2 = mkWorker(dir, "w-audit2");
+		writeValidReport(dir, "w-audit1");
+		writeValidReport(dir, "w-audit2");
+		const snap = snapshotFor([w1, w2], [LIVE("w-audit1"), LIVE("w-audit2")]);
+		const mkA = (send: (t: string) => unknown) => {
+			const logs: string[] = [];
+			const h = createWatcher({
+				transport: { listStatuses: async () => [LIVE("w-audit1"), LIVE("w-audit2")] } as unknown as Transport,
+				intervalMs: 3_600_000,
+				send: send as (text: string) => never,
+				snapshot: async () => snap,
+				self: { sessionFile: TEST_SELF },
+				detect: { legacyFailOpen: true },
+				log: (m) => logs.push(m),
+			});
+			return { h, logs };
+		};
+
+		// (a) real send → ONE audit line carrying the send fact + both events.
+		{
+			const { h, logs } = mkA(() => ({ delivered: true, mode: "sent" as const }));
+			const b = await h.tick();
+			const audit = logs.filter((m) => /wake-up sent/.test(m));
+			check(
+				"W17.18 a successful send writes exactly ONE audit line for the batch (not one per event)",
+				b.length === 2 && audit.length === 1,
+				JSON.stringify(logs),
+			);
+			const line = audit[0] ?? "";
+			check(
+				"W17.18b the audit line names the send fact and BOTH events' full composition (dir :: worker/kind#fingerprint)",
+				line.includes(`${dir} :: w-audit1/report-ready#`) && line.includes(`${dir} :: w-audit2/report-ready#`),
+				line,
+			);
+			check(
+				"W17.18c the audit line carries the non-empty fingerprints (the recovery trail re-derives the exact dedup keys)",
+				/report-ready#[^,\s]/.test(line),
+				line,
+			);
+			h.stop();
+		}
+
+		// (b) silent mode → no "wake-up sent" line (the silent line is its own).
+		{
+			const { h, logs } = mkA(() => ({ delivered: false, mode: "silent" as const }));
+			await h.tick();
+			check(
+				"W17.19 silent mode does NOT write the 'wake-up sent' audit line",
+				!logs.some((m) => /wake-up sent/.test(m)),
+				JSON.stringify(logs),
+			);
+			h.stop();
+		}
+
+		// (c) failed send → no "wake-up sent" line (the failure line is its own).
+		{
+			const { h, logs } = mkA(() => {
+				throw new Error("send exploded");
+			});
+			await h.tick();
+			check(
+				"W17.20 a failed send does NOT write the 'wake-up sent' audit line",
+				!logs.some((m) => /wake-up sent/.test(m)),
+				JSON.stringify(logs),
+			);
+			h.stop();
+		}
+	}
 }
 
 rmSync(FIX, { recursive: true, force: true });

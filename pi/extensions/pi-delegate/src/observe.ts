@@ -38,7 +38,7 @@
  * ownsChildManifests, workersFromManifests, readStatusesTolerant, collectSnapshot, DetectOptions,
  * detectWorkerEvents, detectEvents, RetireReason, RetireDecision, RetireEval,
  * mailboxDrained, evaluateRetire, RetirePassOptions, retirePass,
- * formatEventBatch, WatcherDeps, WatcherHandle, createWatcher, stopWatcher,
+ * formatEventBatch, formatWakeUpAuditLine, WatcherDeps, WatcherHandle, createWatcher, stopWatcher,
  * makeSender, startWatcher, registerCommands, formatFleetUsageLine (F1).
  * Critical invariants (owned here, per report-ref-map.json hiddenInvariants):
  *   - collectedAt-dedup (reader side): report-ready/report-invalid are SILENT
@@ -1751,6 +1751,39 @@ export function formatEventBatch(events: WatchEvent[]): string {
 	return [head, ...events.map((e) => `- [${e.kind}] ${e.worker}: ${e.message}`)].join("\n");
 }
 
+/**
+ * Audit line for a REAL send (guideline §9.1, DESIGN.md §21 delivery).
+ * <p>
+ * The durable delivery store answers "what did this audience already hear";
+ * this line answers the incident question the store cannot: WHAT EXACTLY was
+ * considered delivered at what moment — the recovery trail after a send pi
+ * may have swallowed asynchronously. One line per BATCH (not per event — the
+ * watcher log already carries a lot of service noise, §9.1 forbids spamming
+ * it). The line states the send FACT and the batch CONTENT: for every event
+ * its task dir, worker name, event kind and fingerprint — the same four
+ * components the dedup key is built from, so a post-incident reader can
+ * re-derive exactly which key was committed.
+ * <p>
+ * The word "sent" (never "fail"/"error") is deliberate: the production sink
+ * (makeWatcherLogSink) surfaces only error-shaped lines to the pane, so a
+ * routine success lands in the audit FILE only — §9.1 ("routine success
+ * deliver must not spam the TUI; the audit file — yes").
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: events — the events of one batch that was really sent (silent mode
+ *   and a failed send have their own lines and never reach this formatter)
+ * Output: one line, e.g.
+ *   `wake-up sent: 2 event(s) — /tmp/exchange/x :: w1/report-ready#1726..., /tmp/exchange/x :: w2/report-ready#1726...`
+ * Guarantees: pure formatting; no I/O; one line per batch regardless of how
+ *   many task dirs the batch spans; an event without a fingerprint renders an
+ *   empty `#` (the same empty component the dedup key uses)
+ * Raises: never
+ */
+export function formatWakeUpAuditLine(events: WatchEvent[]): string {
+	const content = events.map((e) => `${e.dir} :: ${e.worker}/${e.kind}#${e.fingerprint ?? ""}`).join(", ");
+	return `wake-up sent: ${events.length} event(s) — ${content}`;
+}
+
 // ---------------------------------------------------------------------------
 // Watcher loop
 // ---------------------------------------------------------------------------
@@ -1994,6 +2027,14 @@ export function createWatcher(deps: WatcherDeps): WatcherHandle {
 			log("delivery sink is silent (no usable pi.sendUserMessage) — wake-up suppressed in memory, nothing committed to the durable store");
 			return events;
 		}
+		// Guideline §9.1 / DESIGN.md §21 delivery: every REAL send is recorded as
+		// ONE audit line per batch with the batch content (dir :: worker/kind#fp
+		// per event) — the recovery trail after an incident. Written at the send
+		// SUCCESS, before the durable commit: the line describes the FACT OF
+		// SENDING, so a later commit failure must not hide it (the commit-failure
+		// line below then names the same batch). Silent mode and a failed send
+		// returned above with their own lines — never a third line here.
+		log(formatWakeUpAuditLine(events));
 		// §5.3 step 9 — commit AFTER the successful send, one atomic merge per
 		// task dir (a batch may span dirs: atomicity holds WITHIN each dir's
 		// file; a partial commit between dirs is possible and documented). A

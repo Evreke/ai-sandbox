@@ -843,7 +843,16 @@ would require changes on the pi side (out of scope for stage B): the runtime
 swallows asynchronous send failures, so "no synchronous exception" is the only
 honest signal — therefore every real send is also recorded as a line in the
 watcher audit log with the batch content (the recovery trail after an
-incident). Nothing is buffered: an event whose condition has already reset is
+incident). The audit line is ONE PER BATCH, never one per event (the log
+carries a lot of service noise; guideline §9.1 forbids spamming it), and names
+the send fact plus every event's four key components — task dir, worker, event
+kind and fingerprint (`<dir> :: <worker>/<kind>#<fingerprint>`, comma-
+separated) — so a post-incident reader can re-derive exactly which dedup keys
+were considered delivered. It is written at the send SUCCESS, before the
+durable commit, so a later commit failure cannot hide the fact that the batch
+went out; silent mode and a failed send have their own lines and never produce
+one. The line is routed to the audit FILE only (it never matches the sink's
+error pattern), so a routine success does not reach the pane. Nothing is buffered: an event whose condition has already reset is
 simply gone. **Advisory by contract**: no watcher failure — bad manifest, dead
 herdr, throwing sink — can affect a spawn or a collect; the report file
 remains the only completion criterion.
