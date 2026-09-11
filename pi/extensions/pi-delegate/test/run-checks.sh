@@ -14,6 +14,15 @@
 # are allowed but must be listed.
 set -u
 cd "$(dirname "$0")/.." || exit 2
+
+# BUG_FIX_CONTEXT: empty node_modules in git worktrees (node_modules is
+# gitignored) sent bun into an auto-install spin on private @earendil-works
+# packages — tests hung with empty stderr and burned workers diagnosed a
+# phantom "flaky environment". A worktree must install deps before checks.
+if [ -z "$(ls -A node_modules 2>/dev/null)" ]; then
+  echo "node_modules is empty (fresh worktree) — bun install first"
+  bun install || exit 2
+fi
 OUT="${1:-/tmp/checks-results.txt}"
 : > "$OUT"
 pass=0; fail=0; envfail=0
