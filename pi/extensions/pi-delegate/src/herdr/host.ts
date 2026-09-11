@@ -974,21 +974,16 @@ export class HerdrTransport implements Transport {
 		// idle/done/blocked settle; slices + reconcile; abort → detach.
 		//
 		// BUG_FIX_CONTEXT (v1.8, DESIGN.md §19.1b) — the aged-finish blind spot
-		// (live-reproduced): herdr ages done→idle within minutes, so a watcher that
-		// attaches late — fast flash probes, abort/detach recovery, slow start — can
-		// NEVER observe working/done and spins the FULL timeout against a visibly
-		// finished worker, then false-reports neverStarted. Why the two-phase fix
-		// alone did not work: it still required observing working/blocked/done.
-		// What was done: an unexplained idle is checked against the session JSONL —
-		// an assistant reply proves the prompt was consumed → settle as
-		// finishedBeforeWatch (success, not failure). No reply → never started.
-		// herdr ages done→idle within minutes, so a watcher that attaches late —
-		// fast flash probes, abort/detach recovery, slow start — can NEVER observe
-		// working/done and spins the FULL timeout against a visibly finished
-		// worker, then false-reports neverStarted. Disambiguation: an unexplained
-		// idle is checked against the session JSONL — an assistant reply proves the
-		// prompt was consumed → settle as finishedBeforeWatch (success, not
-		// failure). No reply → genuinely never started → keep polling.
+		// (live-reproduced; full record: DESIGN.md §19.1b — the CHANGELOG starts
+		// at v1.11.0, so §19.1b is the audit trail): herdr ages done→idle within
+		// minutes, so a watcher that attaches late — fast flash probes,
+		// abort/detach recovery, slow start — can NEVER observe working/done and
+		// spins the FULL timeout against a visibly finished worker, then
+		// false-reports neverStarted. Why the two-phase fix alone did not work:
+		// it still required observing working/blocked/done. What was done: an
+		// unexplained idle is checked against the session JSONL — an assistant
+		// reply proves the prompt was consumed → settle as finishedBeforeWatch
+		// (success, not failure). No reply → never started.
 		const startedAt = Date.now();
 		const deadline = startedAt + req.timeoutMs;
 		let last: AgentStatusName = "unknown";
