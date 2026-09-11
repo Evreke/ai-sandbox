@@ -173,7 +173,10 @@ export {
  *     sandboxing: test manifests are written under mkdtemp dirs, NEVER into
  *     the live root (field lesson 2026-09-10: a PoC test manifest in the
  *     live /tmp/exchange root woke a bystander orchestrator through the
- *     fail-open legacy manifest scan)
+ *     then-fail-open legacy manifest scan; since watcher stage A the
+ *     default delivery is fail-closed, so such fixtures would now be
+ *     SILENT instead of noisy — the hermetic override stays mandatory,
+ *     otherwise fixture hygiene bugs become invisible rather than fixed)
  * Raises: never
  * EXTERNAL_DEPENDENCY: filesystem path + $PI_DELEGATE_EXCHANGE_ROOT (test
  *   override; unset in production) + %LOCALAPPDATA% / os.homedir() on win32.

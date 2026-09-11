@@ -406,8 +406,10 @@ collect would have rejected.
 - **Task tree + Tab fold (v1.12.0 stage 2, fleet-UX wave 2)**: overlay rows
   group by `manifest.dir :: orchestratorSessionPath` (pure
   `groupWorkerViews`); legacy manifests (field absent) land in the dir's
-  UNKNOWN bucket, tagged `owner?` — never labeled "foreign" (fail-open, no
-  lies). MINE rows render FLAT exactly as stage 1 — no header, no tree
+  UNKNOWN bucket, tagged `owner?` — never labeled "foreign" (a display
+  convention only: an unproven owner is never LABELED foreign; the bucket
+  asserts nothing — delivery meanwhile is fail-closed, §21.1 F1 stage-A
+  update). MINE rows render FLAT exactly as stage 1 — no header, no tree
   glyphs, no fold — so the single-session case is byte-identical (zero
   regression). FOREIGN/`owner?` groups render an expanded full-width dim
   header `▼ slug · live/total live · owner · ctx↑max%` (ctx is the MAX
@@ -636,7 +638,12 @@ archived tasks ("last task: <task> — N archived reports — ~/.pi/agent/delega
   (no mailbox joins); fold lines are short by construction AND routed through
   clampLines (v1.8b guard). `getRows` wires the self session path via the live
   `sessionManager.getSessionFile()` getter (same as watch.ts); absent self-id
-  degrades to UNKNOWN, never "mine".
+  degrades to UNKNOWN, never "mine". Watcher stage A note (ownership fold):
+  the fold classifies through the SAME canonical verdict as delivery and the
+  mount gate (src/watch-role.ts, classifyOwnership → workerAudienceMatch) —
+  the display-only degraded-self worktree fallback (checkoutPath === cwd →
+  "mine") NEVER feeds delivery: a degraded self-id delivers nothing
+  unconditionally (§21.1 F1, stage-A update).
 - **Placed-count chip — REMOVED (v1.8, user decision)**: the global cross-session
   count + pessimistic burn were confusing. `ctx.ui.setFooter` itself is also banned
   (it REPLACES pi's native footer — context %, model, cost, cwd). Only the live-rows
@@ -852,14 +859,56 @@ none of them can corrupt a spawn or a collect result). One fix shape each:
   manifests). Two layers: `isWorkerSession` gate — a manifest worker session
   mounts NO watcher (`index.ts` session_start); spawn records
   `orchestratorSessionPath` (live `getSessionFile()` getter) and
-  `detectWorkerEvents` silences workers owned by another session — fail-open on
-  legacy manifests and degraded self-ids. **Display side DONE in v1.12.0**
+  `detectWorkerEvents` silences workers owned by another session.
+  **Watcher stage A — delivery is FAIL-CLOSED** (normative source:
+  WATCHER-ARCHITECTURE-GUIDELINE.md §3.5/§3.6): the old fail-open on legacy
+  manifests (no owner field anywhere) and degraded self-ids is GONE. One
+  canonical verdict (`workerAudienceMatch` in src/watch-role.ts — a leaf
+  module with zero production imports, shared by delivery, the mount gate
+  and the UI) decides per worker × session: deliver ONLY on a proven owner
+  ("mine"); a legacy no-owner manifest delivers ONLY under the explicit
+  config rollback `watch.legacyFailOpen: true` (default false — UNSAFE on a
+  multi-session machine: bystander wakes return); a degraded self-id
+  delivers NOTHING unconditionally — that edge has no configuration escape
+  (§3.6), and every skip is auditable in `~/.pi/agent/delegate-watch.log`
+  (reason: no owner, or no self id). The spawn side signals a degraded
+  write: a manifest entry recorded WITHOUT an owner path returns an
+  explicit warning to the orchestrator and an audit line (full fail-spawn
+  is a separate decision, not made here). **Display side DONE in v1.12.0**
   (fleet-UX stage 1): the same field now also drives ownership GLYPHS
-  (classifyOwnership, fail-closed — unknown never renders as mine) on the
+  (classifyOwnership — since stage A a display mapping over the canonical
+  verdict; unknown never renders as mine) on the
   overlay and the attention-gated widget fold (§19.4). Companion fix in the
   same release: collect stamps `collectedAt` and the watcher stays silent
   about delivered reports (fresh sessions no longer re-wake on earlier
   sessions' 14 stale reports); `pruneArchive` gives the archive a 30-day TTL.
+
+  **The role table (guideline §3.4, mandatory in code AND design) — one
+  table implemented by `sessionRole` (src/watch-role.ts) and folded by the
+  mount gate (src/compose.ts), delivery (src/observe.ts detectWorkerEvents)
+  and the UI (src/fleet.ts classifyOwnership):**
+
+  | Role | Definition | Mount local watcher? | Receives wake for worker W? |
+  |------|------------|----------------------|------------------------------|
+  | Pure orchestrator | Is not a worker entry in any live manifest; is the owner of its own workers | Yes | Yes, when the owner of W is this session |
+  | Pure worker | Is a worker entry; owns no child workers | No | No (not a fleet audience) |
+  | Worker-orchestrator (tier-1) | Is a worker entry of the parent AND the owner of its own child workers | Yes | Yes only for W whose owner is this session; never for the parent's other workers |
+  | Foreign | Any other session | Does not matter | Never for W with a foreign owner |
+
+  In natural language: a session either appears as a worker entry in some
+  live manifest or it does not. A session that is nobody's worker is a pure
+  orchestrator: it mounts a watcher and is woken for the workers it owns.
+  A session that appears as a worker entry and owns no children is a pure
+  worker: it mounts no watcher and is never woken for fleet events. A
+  session that appears as a worker entry AND is recorded as the owner of
+  child workers (a tier-1 worker-orchestrator) mounts a watcher scoped to
+  its own children only — never for its siblings in the parent's manifest.
+  Everything a session can neither prove as its own worker nor be proven
+  the owner of is foreign: no wake. A session whose own identity is
+  unreadable (degraded self-id) is delivery-silent regardless of role — it
+  owns nothing and receives nothing; a degraded tier-1 lead therefore loses
+  its child wakes (a documented known behavior, pinned in
+  test/composer-check.ts, check M7).
 - **F2 — `report-invalid` fires on half-written reports and on brief-declared
   schemas.** The watcher validates with the BASE `validateReport` and has no mtime
   grace, so a worker mid-write is called invalid (and a §17 `reportSchema` report
@@ -1082,10 +1131,15 @@ no TTL wait.
   E_REPORT_INVALID/E_BUDGET guidance ("retry MUST use a NEW name") with a
   sanctioned way to reclaim the original name.
 - **Ownership (mutation discipline, stricter than the wake-ups).** Retire is
-  a mutation, so it fails CLOSED where the wake-ups fail open: a worker that
+  a mutation, so it fails CLOSED where the wake-ups used to fail open: a worker that
   declares an `orchestratorSessionPath` is retired only by that session
   (a degraded self-id mutates nothing); legacy manifests (no field) stay
   fail-open so old fleets still drain; a worker never retires itself.
+  Watcher stage A note: with wake-up delivery now fail-closed (§21.1 F1),
+  this legacy fail-open RETIRE is a CONSCIOUS REMAINING EXCEPTION on the
+  mutation side — deliberately not fixed in the same change as delivery
+  (the guideline forbids unrelated fixes in one change); a follow-up may
+  gate it behind the same `watch.legacyFailOpen` flag or fail it closed.
 - **Advisory by contract (§21, sacred).** The pass runs inside the watcher
   tick, fully guarded: a failed stamp or teardown is logged and retried next
   tick (the missing `retiredAt` re-fires the decision). No retire failure can

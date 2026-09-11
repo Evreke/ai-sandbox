@@ -21,6 +21,10 @@
  *       or not.
  *   M6  The production defaults are wired: with no overrides the composer
  *       scans via manifestStore with the Transport's backend name.
+ *   M7  Watcher stage A: a DEGRADED tier-1 lead (unreadable session id)
+ *       mounts NO watcher — ownsChildren needs a proven sessionFile, so the
+ *       session classifies as a pure worker and its child wakes are lost
+ *       (documented known behavior of the role table).
  * Exit 0 only if all checks pass.
  */
 
@@ -132,6 +136,31 @@ writeFileSync(join(garbageDir, "manifest.json"), "{nope");
 rec = drive([], { sessionFile: WORKER_SESSION, cwd: SANDBOX });
 check("M4 no readable worker evidence → the watcher mounts (fail-open)", rec.mounted === true);
 rmSync(garbageDir, { recursive: true, force: true });
+
+// --- M4b: DEGRADED tier-1 lead → does NOT mount (documented known loss) ---
+
+// Watcher stage A fixture-pins a known behavior of the canonical role table
+// (src/watch-role.ts sessionRole): a tier-1 lead whose session identity is
+// DEGRADED (the live sessionManager getter throws → sessionFile undefined)
+// still matches the worker gate by its worktree checkoutPath (the mounting
+// identity-equivalent), but owns NOTHING — ownsChildren requires a PROVEN
+// sessionFile. So it is classified a pure worker: NO watcher is mounted and
+// its child wakes are lost. Deliberate: delivery is fail-closed, and a
+// session that cannot prove its id must neither mount an audience role nor
+// be woken (guideline §3.6); the loss is the documented cost.
+{
+	const leadChild = [
+		{
+			name: "child-of-degraded-lead",
+			sessionPath: join(SANDBOX, "deg-child-session.jsonl"),
+			orchestratorSessionPath: WORKER_SESSION, // the id the lead can no longer read
+			placement: { kind: "tab" },
+		},
+	];
+	rec = drive([...pureWorkerManifest, ...leadChild], { sessionFile: undefined, cwd: join(SANDBOX, "wt-w1") });
+	check("M7 degraded tier-1 lead (unreadable self id) mounts NO watcher (child wake loss is documented)", rec.mounted === false);
+	check("M7b degraded tier-1 lead still prunes the archive once", rec.prunes === 1, `prunes=${rec.prunes}`);
+}
 
 // --- M5: identity threading + single prune --------------------------------
 

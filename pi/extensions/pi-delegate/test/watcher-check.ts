@@ -146,7 +146,7 @@ check(
 
 const WATCH_MOD = new URL("../src/observe.ts", import.meta.url).pathname;
 
-function watchConfigInHome(configJson: string): { intervalMs: number; settleGateMs: number; staleAfterMs: number; raw: string } {
+function watchConfigInHome(configJson: string): { intervalMs: number; settleGateMs: number; staleAfterMs: number; legacyFailOpen?: boolean; raw: string; stderr: string } {
 	const home = mkdtempSync(join(tmpdir(), "watcher-check-home-"));
 	const configDir = join(home, ".pi", "agent");
 	mkdirSync(configDir, { recursive: true });
@@ -157,10 +157,11 @@ function watchConfigInHome(configJson: string): { intervalMs: number; settleGate
 	const res = spawnSync("bun", ["-e", src], { env: { ...process.env, HOME: home }, encoding: "utf8", timeout: 20_000 });
 	rmSync(home, { recursive: true, force: true });
 	const raw = res.stdout.toString().trim();
+	const stderr = res.stderr.toString();
 	try {
-		return { ...JSON.parse(raw), raw };
+		return { ...JSON.parse(raw), raw, stderr };
 	} catch {
-		return { intervalMs: -1, settleGateMs: -1, staleAfterMs: -1, raw: `SPAWN FAILED: ${res.stderr.toString().slice(0, 200)}` };
+		return { intervalMs: -1, settleGateMs: -1, staleAfterMs: -1, raw: `SPAWN FAILED: ${stderr.slice(0, 200)}`, stderr };
 	}
 }
 
@@ -204,6 +205,19 @@ function watchConfigInHome(configJson: string): { intervalMs: number; settleGate
 		"W2.10 below-floor staleAfterMs falls back (floor 60 s), other keys still default",
 		staleFloor.staleAfterMs === WATCH_DEFAULT_STALE_AFTER_MS && staleFloor.intervalMs === WATCH_DEFAULT_INTERVAL_MS,
 		staleFloor.raw,
+	);
+	// Watcher stage A: watch.legacyFailOpen — absent → false (fail-closed
+	// default); true → true (the explicit rollback); a non-boolean warns ONCE
+	// on stderr and STAYS false (a typo must never silently enable the unsafe
+	// legacy delivery).
+	check("W2.11 no config → legacyFailOpen defaults false", d.legacyFailOpen === false, d.raw);
+	const lf = watchConfigInHome(JSON.stringify({ watch: { legacyFailOpen: true } }));
+	check("W2.12 watch.legacyFailOpen:true resolves true (explicit rollback)", lf.legacyFailOpen === true, lf.raw);
+	const badLf = watchConfigInHome(JSON.stringify({ watch: { legacyFailOpen: "yes" } }));
+	check(
+		"W2.13 non-boolean legacyFailOpen → stays false + warn-once on stderr",
+		badLf.legacyFailOpen === false && /legacyFailOpen/.test(badLf.stderr),
+		`${badLf.raw} | stderr: ${badLf.stderr.slice(0, 200)}`,
 	);
 }
 
@@ -262,13 +276,19 @@ function snapshotFor(workers: ManifestWorker[], statuses: AgentStatus[] | null, 
 }
 
 /** Fresh dedup-free detection for one worker (live by default, so the
- *  worker-dead detector stays out of unrelated scenarios). */
+ *  worker-dead detector stays out of unrelated scenarios).
+ *  Watcher stage A defaults: a readable self id + the legacy fail-open
+ *  rollback ON — tests that are not ABOUT ownership keep firing on legacy
+ *  (no-owner) fixtures exactly as before the flip. Ownership tests pass
+ *  explicit selfSessionFile/legacyFailOpen overrides (a spread key set to
+ *  undefined overrides the default). */
+const TEST_SELF = "/tmp/sessions/check-self.jsonl";
 function eventsFor(
 	w: ManifestWorker,
 	opts: DetectOptions & { statuses?: AgentStatus[] | null; self?: { sessionFile?: string; cwd?: string } } = {},
 ): WatchEvent[] {
 	const snap = snapshotFor([w], opts.statuses === undefined ? [LIVE(w.name)] : opts.statuses, opts.self ?? {}, opts.nowMs ?? NOW);
-	return detectEvents(snap, new Set<string>(), { nowMs: NOW, ...opts });
+	return detectEvents(snap, new Set<string>(), { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true, ...opts });
 }
 
 function writeSession(dir: string, name: string, lines: unknown[]): string {
@@ -450,35 +470,35 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 	writeValidReport(dir, "w-dedup");
 	const snap = snapshotFor([w], [LIVE("w-dedup")]);
 	const seen = new Set<string>();
-	const first = detectEvents(snap, seen, { nowMs: NOW });
-	const second = detectEvents(snap, seen, { nowMs: NOW });
+	const first = detectEvents(snap, seen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true });
+	const second = detectEvents(snap, seen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true });
 	check("W8.1 first tick fires report-ready", first.some((e) => e.kind === "report-ready"), kindsOf(first));
 	check("W8.2 identical second tick fires nothing (dedup)", second.length === 0, kindsOf(second));
 
 	rmSync(reportPathFor(dir, "w-dedup"));
-	check("W8.3 removed report produces no new event", detectEvents(snap, seen, { nowMs: NOW }).length === 0);
+	check("W8.3 removed report produces no new event", detectEvents(snap, seen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true }).length === 0);
 	writeValidReport(dir, "w-dedup");
 	// D1: the fingerprinted key now survives a no-observation tick, so the
 	// re-appearance re-fires only when the fingerprint CHANGES. Force a distinct
 	// mtime — two writes can land in the same millisecond, and an identical
 	// fingerprint is deliberately NOT a new fact (the W16.16 contract).
 	utimesSync(reportPathFor(dir, "w-dedup"), new Date(NOW + 30_000), new Date(NOW + 30_000));
-	check("W8.4 report re-appearing with a NEW fingerprint re-fires", detectEvents(snap, seen, { nowMs: NOW }).some((e) => e.kind === "report-ready"));
+	check("W8.4 report re-appearing with a NEW fingerprint re-fires", detectEvents(snap, seen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true }).some((e) => e.kind === "report-ready"));
 
 	const p = reportPathFor(dir, "w-dedup");
 	utimesSync(p, new Date(NOW + 60_000), new Date(NOW + 60_000));
-	check("W8.5 rewritten report (new mtime) is a new fact → re-fires", detectEvents(snap, seen, { nowMs: NOW }).some((e) => e.kind === "report-ready"));
+	check("W8.5 rewritten report (new mtime) is a new fact → re-fires", detectEvents(snap, seen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true }).some((e) => e.kind === "report-ready"));
 
 	const qdir = taskDir("dedup-q");
 	const qw = mkWorker(qdir, "w-ask");
 	const qsnap = snapshotFor([qw], [LIVE("w-ask")]);
 	const qseen = new Set<string>();
 	writeFileSync(questionPathFor(qdir, "w-ask"), JSON.stringify({ worker: "w-ask", ts: "T1", question: "first?" }));
-	check("W8.6 question fires once", detectEvents(qsnap, qseen, { nowMs: NOW }).filter((e) => e.kind === "mailbox-question").length === 1);
+	check("W8.6 question fires once", detectEvents(qsnap, qseen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true }).filter((e) => e.kind === "mailbox-question").length === 1);
 	writeFileSync(questionPathFor(qdir, "w-ask"), JSON.stringify({ worker: "w-ask", ts: "T1", question: "first?" }));
-	check("W8.7 the SAME question is not re-fired", detectEvents(qsnap, qseen, { nowMs: NOW }).length === 0);
+	check("W8.7 the SAME question is not re-fired", detectEvents(qsnap, qseen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true }).length === 0);
 	writeFileSync(questionPathFor(qdir, "w-ask"), JSON.stringify({ worker: "w-ask", ts: "T2", question: "second?" }));
-	check("W8.8 a NEW question (new envelope ts) re-fires", detectEvents(qsnap, qseen, { nowMs: NOW }).some((e) => e.kind === "mailbox-question"));
+	check("W8.8 a NEW question (new envelope ts) re-fires", detectEvents(qsnap, qseen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true }).some((e) => e.kind === "mailbox-question"));
 
 	// A SECOND deck is a new question set → re-fires (fingerprint = deck count).
 	const gdir = taskDir("dedup-deck");
@@ -486,14 +506,14 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 	gw.sessionPath = writeSession(gdir, "w-deck", [assistantToolCall(GRILL_DECK_TOOL)]);
 	const gsnap = snapshotFor([gw], [LIVE("w-deck")]);
 	const gseen = new Set<string>();
-	check("W8.8b first deck fires", detectEvents(gsnap, gseen, { nowMs: NOW }).some((e) => e.kind === "grill-deck"));
-	check("W8.8c same deck count does not re-fire", detectEvents(gsnap, gseen, { nowMs: NOW }).length === 0);
+	check("W8.8b first deck fires", detectEvents(gsnap, gseen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true }).some((e) => e.kind === "grill-deck"));
+	check("W8.8c same deck count does not re-fire", detectEvents(gsnap, gseen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true }).length === 0);
 	writeFileSync(gw.sessionPath, readFileSync(gw.sessionPath, "utf8") + JSON.stringify(assistantToolCall(GRILL_DECK_TOOL)) + "\n");
-	check("W8.8d a SECOND deck re-fires", detectEvents(gsnap, gseen, { nowMs: NOW }).some((e) => e.kind === "grill-deck"));
+	check("W8.8d a SECOND deck re-fires", detectEvents(gsnap, gseen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true }).some((e) => e.kind === "grill-deck"));
 
 	// Worker removed from manifests entirely → its memory is pruned, not leaked.
 	const empty = workersFromManifests([], [LIVE("w-dedup")], {}, NOW);
-	check("W8.9 empty snapshot forgets nothing it never saw", detectEvents(empty, seen, { nowMs: NOW }).length === 0);
+	check("W8.9 empty snapshot forgets nothing it never saw", detectEvents(empty, seen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true }).length === 0);
 
 	// A worker that VANISHES from the manifests is forgotten too (QA F4): its keys
 	// must not leak in a long-lived orchestrator, and if it comes back it must be
@@ -502,11 +522,11 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 	const vw = mkWorker(vdir, "w-vanish");
 	const vsnap = snapshotFor([vw], NO_STATUS); // not live, no report → worker-dead
 	const vseen = new Set<string>();
-	check("W8.10 dead worker fires once", detectEvents(vsnap, vseen, { nowMs: NOW }).some((e) => e.kind === "worker-dead"));
+	check("W8.10 dead worker fires once", detectEvents(vsnap, vseen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true }).some((e) => e.kind === "worker-dead"));
 	check("W8.10b the key is held while the worker is in the snapshot", vseen.size === 1, JSON.stringify([...vseen]));
-	detectEvents(workersFromManifests([], NO_STATUS, {}, NOW), vseen, { nowMs: NOW });
+	detectEvents(workersFromManifests([], NO_STATUS, {}, NOW), vseen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true });
 	check("W8.11 worker gone from the manifests → its key is dropped (no leak, QA F4)", vseen.size === 0, JSON.stringify([...vseen]));
-	check("W8.11b the same worker reappearing dead re-fires (no lost wake-up)", detectEvents(vsnap, vseen, { nowMs: NOW }).some((e) => e.kind === "worker-dead"));
+	check("W8.11b the same worker reappearing dead re-fires (no lost wake-up)", detectEvents(vsnap, vseen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true }).some((e) => e.kind === "worker-dead"));
 }
 
 // ---------------------------------------------------------------------------
@@ -527,6 +547,11 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 			sent.push(text);
 		},
 		snapshot: async () => snap,
+		// Watcher stage A defaults for this non-ownership loop: a readable self
+		// id + the legacy rollback ON (the fixture workers carry no owner
+			// field — fail-closed would silence them all).
+		self: { sessionFile: TEST_SELF },
+		detect: { legacyFailOpen: true },
 		log: () => {},
 	});
 
@@ -566,6 +591,8 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 			throw new Error("sink exploded");
 		},
 		snapshot: async () => sinkSnap,
+		self: { sessionFile: TEST_SELF },
+		detect: { legacyFailOpen: true },
 		log: () => {
 			logs++;
 		},
@@ -607,6 +634,8 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 				got.push(t);
 			},
 			snapshot: async () => snapshotFor([tw], [LIVE("w-timer")]),
+			self: { sessionFile: TEST_SELF },
+			detect: { legacyFailOpen: true },
 			log: () => {},
 		});
 		await new Promise<void>((res) => setTimeout(res, 60));
@@ -642,6 +671,8 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 				rsent.push(t);
 			},
 			snapshot: async () => rsnap,
+			self: { sessionFile: TEST_SELF },
+			detect: { legacyFailOpen: true },
 			log: () => {},
 		});
 		const lost = await retry.tick();
@@ -881,17 +912,40 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 			eventsFor(wDeck, { statuses: [LIVE("w-own-deck")], selfSessionFile: ORCH_A }).some((e) => e.kind === "grill-deck"),
 	);
 
-	// Legacy manifest (no field) → fires, and a degraded self-id fails OPEN
-	// (locked decision: a lost report-ready is worse than a duplicate).
+	// Legacy manifest (no field) → FAIL-CLOSED by default (watcher stage A):
+	// a bystander session is no longer woken for an owner-less manifest, and
+	// the skip is auditable via the onSkip hook. The explicit
+	// watch.legacyFailOpen:true rollback restores the old delivery — which is
+	// unsafe on a machine with several sessions. A degraded self-id is a
+	// DIFFERENT edge: it delivers NOTHING with or without the flag (guideline
+	// §3.6 — no configuration escape).
 	const wLegacy = mkWorker(odir, "w-legacy");
 	writeValidReport(odir, "w-legacy");
+	{
+		const legacySkips: Array<{ worker: string; reason: string }> = [];
+		const legacyOff = eventsFor(wLegacy, {
+			statuses: [LIVE("w-legacy")],
+			selfSessionFile: ORCH_B,
+			legacyFailOpen: false,
+			onSkip: (worker, reason) => legacySkips.push({ worker, reason }),
+		});
+		check(
+			"W14.12 legacy manifest (no orchestratorSessionPath) delivers NOTHING by default (fail-closed) with an audit skip reason",
+			legacyOff.length === 0 &&
+				legacySkips.some((s) => s.worker === "w-legacy" && s.reason === "no-owner"),
+			`${kindsOf(legacyOff)} ${JSON.stringify(legacySkips)}`,
+		);
+		check(
+			"W14.12b legacyFailOpen:true restores legacy delivery for the no-owner edge (explicit rollback)",
+			eventsFor(wLegacy, { statuses: [LIVE("w-legacy")], selfSessionFile: ORCH_B, legacyFailOpen: true }).some(
+				(e) => e.kind === "report-ready",
+			),
+		);
+	}
 	check(
-		"W14.12 legacy manifest (no orchestratorSessionPath) fires for anyone (regression)",
-		eventsFor(wLegacy, { statuses: [LIVE("w-legacy")], selfSessionFile: ORCH_B }).some((e) => e.kind === "report-ready"),
-	);
-	check(
-		"W14.13 degraded self (no sessionFile) fails OPEN — foreign-owned worker still fires",
-		eventsFor(wReport, { statuses: [LIVE("w-own-report")] }).some((e) => e.kind === "report-ready"),
+		"W14.13 degraded self (no sessionFile) delivers NOTHING — fail-closed with AND without the flag (guideline §3.6)",
+		eventsFor(wReport, { statuses: [LIVE("w-own-report")], selfSessionFile: undefined }).length === 0 &&
+			eventsFor(wReport, { statuses: [LIVE("w-own-report")], selfSessionFile: undefined, legacyFailOpen: true }).length === 0,
 	);
 
 	// (в) The field threads through workersFromManifests onto WatchWorker…
@@ -974,12 +1028,26 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 		detectWorkerEvents(masterSnap(wMasterForeign, ORCH_A).workers[0]!, { selfSessionFile: ORCH_A, nowMs: NOW }).some((e) => e.kind === "report-ready"),
 	);
 	check(
-		"W14.21 masterSessionPath absent + no orchestratorSessionPath → fails OPEN (true legacy, W14.12 regression)",
-		detectWorkerEvents(masterSnap(wMasterForeign, undefined).workers[0]!, { selfSessionFile: ORCH_B, nowMs: NOW }).some((e) => e.kind === "report-ready"),
+		"W14.21 masterSessionPath absent + no orchestratorSessionPath → fail-closed by default (audit skip), the flag restores legacy delivery",
+		(() => {
+			const skips: string[] = [];
+			const off = detectWorkerEvents(masterSnap(wMasterForeign, undefined).workers[0]!, {
+				selfSessionFile: ORCH_B,
+				nowMs: NOW,
+				onSkip: (worker, reason) => skips.push(`${worker}:${reason}`),
+			});
+			const on = detectWorkerEvents(masterSnap(wMasterForeign, undefined).workers[0]!, {
+				selfSessionFile: ORCH_B,
+				nowMs: NOW,
+				legacyFailOpen: true,
+			});
+			return off.length === 0 && skips.includes("w-master-foreign:no-owner") && on.some((e) => e.kind === "report-ready");
+		})(),
 	);
 	check(
-		"W14.22 degraded self (no sessionFile) + foreign masterSessionPath → fails OPEN (a lost report-ready is worse than a duplicate)",
-		detectWorkerEvents(masterSnap(wMasterForeign, ORCH_A).workers[0]!, { nowMs: NOW }).some((e) => e.kind === "report-ready"),
+		"W14.22 degraded self (no sessionFile) + foreign masterSessionPath → delivers NOTHING, flag or not (§3.6: no configuration escape)",
+		detectWorkerEvents(masterSnap(wMasterForeign, ORCH_A).workers[0]!, { nowMs: NOW }).length === 0 &&
+			detectWorkerEvents(masterSnap(wMasterForeign, ORCH_A).workers[0]!, { nowMs: NOW, legacyFailOpen: true }).length === 0,
 	);
 	const wMasterGarbage = mkWorker(mdir, "w-master-garbage");
 	writeValidReport(mdir, "w-master-garbage");
@@ -989,9 +1057,12 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 	} as unknown as ExchangeManifest;
 	const garbageMasterView = workersFromManifests([garbageMasterManifest], [LIVE("w-master-garbage")], {}, NOW).workers[0]!;
 	check(
-		"W14.23 non-string masterSessionPath is ignored (fail-open, legacy behavior)",
+		"W14.23 non-string masterSessionPath is ignored (reads as no-owner: fail-closed by default, the flag restores legacy)",
 		garbageMasterView.masterSessionPath === undefined &&
-			detectWorkerEvents(garbageMasterView, { selfSessionFile: ORCH_B, nowMs: NOW }).some((e) => e.kind === "report-ready"),
+			detectWorkerEvents(garbageMasterView, { selfSessionFile: ORCH_B, nowMs: NOW }).length === 0 &&
+			detectWorkerEvents(garbageMasterView, { selfSessionFile: ORCH_B, nowMs: NOW, legacyFailOpen: true }).some(
+				(e) => e.kind === "report-ready",
+			),
 	);
 }
 
@@ -1042,8 +1113,8 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 	{
 		const snap = snapshotFor([w], [LIVE("w-stale")]);
 		const seen = new Set<string>();
-		check("W15.9 first tick fires once", detectEvents(snap, seen, { nowMs: NOW }).filter((e) => e.kind === "worker-stale").length === 1);
-		check("W15.10 identical second tick is silent (dedup)", detectEvents(snap, seen, { nowMs: NOW }).length === 0);
+		check("W15.9 first tick fires once", detectEvents(snap, seen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true }).filter((e) => e.kind === "worker-stale").length === 1);
+		check("W15.10 identical second tick is silent (dedup)", detectEvents(snap, seen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true }).length === 0);
 		check(
 			"W15.11 the dedup key carries the collectedAt fingerprint",
 			seen.has(eventKey({ worker: "w-stale", dir, kind: "worker-stale", fingerprint: old })),
@@ -1053,7 +1124,7 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 		const snap2 = snapshotFor([w2], [LIVE("w-stale")]);
 		check(
 			"W15.12 a re-collect (new collectedAt) re-arms the wake-up",
-			detectEvents(snap2, seen, { nowMs: NOW }).some((e) => e.kind === "worker-stale"),
+			detectEvents(snap2, seen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true }).some((e) => e.kind === "worker-stale"),
 		);
 	}
 
@@ -1074,9 +1145,9 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 	// convention as W14.17 — startWatcher needs a live pi to runtime-test).
 	const watchSrcStale = readFileSync(resolve(ROOT, "src/observe.ts"), "utf8");
 	check(
-		"W15.15 startWatcher threads watch.staleAfterMs (and §23 retireTtlMs) into detect opts",
+		"W15.15 startWatcher threads watch.staleAfterMs (§23 retireTtlMs and the stage-A legacyFailOpen) into detect opts",
 		/staleAfterMs: cfg\.staleAfterMs/.test(watchSrcStale) &&
-			/detect: \{ staleAfterMs: cfg\.staleAfterMs, retireTtlMs: cfg\.retireTtlMs \}/.test(watchSrcStale),
+			/staleAfterMs: cfg\.staleAfterMs,[\s\S]*?retireTtlMs: cfg\.retireTtlMs,[\s\S]*?legacyFailOpen: cfg\.legacyFailOpen,/.test(watchSrcStale),
 	);
 }
 
@@ -1206,12 +1277,12 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 	// (M1 pure worker silent, M2 worker-orchestrator mounts) against the
 	// composer module src/compose.ts.
 
-	// (д) Legacy fail-open pin (F6 review minor #3): the F6 gate WIDENS the
-	// mounted-watcher population — a worker-orchestrator over a LEGACY parent
-	// manifest (workers without orchestratorSessionPath) now hears the
-	// parent's fleet, because the ownership gate cannot disprove ownership.
-	// Deliberate policy (a lost wake-up is worse than a duplicate) — pinned
-	// here so a future tightening is a conscious decision, not an accident.
+	// (д) Legacy fail-closed pin (watcher stage A): a worker-orchestrator's
+	// watcher over a LEGACY parent manifest (workers without
+	// orchestratorSessionPath) hears NOTHING from that fleet by default — the
+	// canonical no-owner verdict is fail-closed, and the flag is what an
+	// operator must set explicitly to restore the old delivery. Pinned here
+	// so the fail-closed default is a conscious invariant, not an accident.
 	{
 		const legacyDir = taskDir("f6-meta-legacy");
 		const legacyLead = mkWorker(legacyDir, "lead-impl");
@@ -1222,14 +1293,18 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 		delete (legacyWorker as Partial<ManifestWorker>).orchestratorSessionPath;
 		writeValidReport(legacyDir, "lead-sibling");
 		const legacyManifest = manifestOf(legacyDir, [legacyLead, legacyWorker]);
-		const legacyBatch = detectWorkerEvents(
-			{ ...legacyWorker, dir: legacyDir, collectedAt: undefined } as unknown as WatchWorker,
-			{ selfSessionFile: LEAD, nowMs: NOW },
+		const legacyWorkerView = { ...legacyWorker, dir: legacyDir, collectedAt: undefined } as unknown as WatchWorker;
+		const legacyOff = detectWorkerEvents(legacyWorkerView, { selfSessionFile: LEAD, nowMs: NOW });
+		const legacyOn = detectWorkerEvents(legacyWorkerView, { selfSessionFile: LEAD, nowMs: NOW, legacyFailOpen: true });
+		check(
+			"W16.14 legacy manifest (no orchestratorSessionPath) delivers NOTHING to a worker-orchestrator's watcher by default (fail-closed)",
+			legacyOff.length === 0,
+			`${kindsOf(legacyOff)}`,
 		);
 		check(
-			"W16.14 legacy manifest (no orchestratorSessionPath) fails OPEN for a worker-orchestrator's watcher",
-			legacyBatch.some((e) => e.kind === "report-ready" && e.worker === "lead-sibling"),
-			`${kindsOf(legacyBatch)}`,
+			"W16.14b legacyFailOpen:true restores the legacy delivery to a worker-orchestrator's watcher (explicit rollback)",
+			legacyOn.some((e) => e.kind === "report-ready" && e.worker === "lead-sibling"),
+			`${kindsOf(legacyOn)}`,
 		);
 		check(
 			"W16.15 the legacy lead still counts as a worker session (gate still matches it)",
@@ -1256,7 +1331,7 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 	const seen = new Set<string>();
 
 	// Tick 1: report readable → delivered exactly once.
-	const t1 = detectEvents(snap, seen, { nowMs: NOW });
+	const t1 = detectEvents(snap, seen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true });
 	check(
 		"W16.16 tick 1: readable report → report-ready delivered once",
 		t1.filter((e) => e.kind === "report-ready").length === 1,
@@ -1268,7 +1343,7 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 	const p = reportPathFor(dir, "w-dup-wake");
 	const parked = `${p}.parked`;
 	renameSync(p, parked);
-	const t2 = detectEvents(snap, seen, { nowMs: NOW });
+	const t2 = detectEvents(snap, seen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true });
 	check("W16.16b tick 2: renamed-away report → no event", t2.length === 0, kindsOf(t2));
 	check(
 		"W16.16c tick 2: the fingerprinted seen-key survives the missed observation",
@@ -1278,7 +1353,7 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 
 	// Tick 3: report back with the SAME mtime (rename-back) → NO second delivery.
 	renameSync(parked, p);
-	const t3 = detectEvents(snap, seen, { nowMs: NOW });
+	const t3 = detectEvents(snap, seen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true });
 	check(
 		"W16.16d tick 3: same fingerprint restored → NO duplicate report-ready",
 		t3.length === 0,
@@ -1288,7 +1363,7 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 	// Contrast: the fingerprint CHANGES (mtime moves) → the event re-fires
 	// (a rewritten report is a NEW fact — the W8.5 contract stays intact).
 	utimesSync(p, new Date(NOW + 60_000), new Date(NOW + 60_000));
-	const t4 = detectEvents(snap, seen, { nowMs: NOW });
+	const t4 = detectEvents(snap, seen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true });
 	check(
 		"W16.16e contrast: a CHANGED fingerprint (new mtime) re-fires",
 		t4.some((e) => e.kind === "report-ready"),
@@ -1304,10 +1379,10 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 	const gseen = new Set<string>();
 	check(
 		"W16.16f gauge kind (worker-dead) fires once",
-		detectEvents(gsnap, gseen, { nowMs: NOW }).some((e) => e.kind === "worker-dead"),
+		detectEvents(gsnap, gseen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true }).some((e) => e.kind === "worker-dead"),
 	);
 	const gAlive = snapshotFor([gw], [LIVE("w-dup-gauge")]); // condition stops being true
-	detectEvents(gAlive, gseen, { nowMs: NOW });
+	detectEvents(gAlive, gseen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true });
 	check(
 		"W16.16g gauge kind: the key is FORGOTTEN when the condition stops being true (reset semantics intact)",
 		gseen.size === 0,
@@ -1315,7 +1390,7 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 	);
 	check(
 		"W16.16h gauge kind: dead again → re-fires",
-		detectEvents(gsnap, gseen, { nowMs: NOW }).some((e) => e.kind === "worker-dead"),
+		detectEvents(gsnap, gseen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true }).some((e) => e.kind === "worker-dead"),
 	);
 }
 

@@ -99,6 +99,7 @@
 // ./observe.ts, ui render helpers in ./fleet.ts, the transport surface in
 // ./transport.ts (facades remain at the old paths until W5).
 import { appendFile, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
@@ -756,8 +757,10 @@ function journal(
  * sessionManager getter at the moment of the manifest write — /new and /resume
  * change the path, so a captured constant would pin a dead session (and a new
  * session inheriting no wake-ups is the DESIRED behavior). Undefined when
- * unavailable (headless/degraded) → the field is simply not recorded, and the
- * watcher falls back to legacy behavior for that worker.
+ * unavailable (headless/degraded) → the field is simply not recorded.
+ * Watcher stage A: an unrecorded owner is no longer silently harmless — the
+ * delivery default is fail-closed, so the CALLER (the spawn flow) must signal
+ * the orchestrator and the audit file (see the manifest-write site).
  */
 function liveSessionFile(ctx: {
 	sessionManager?: { getSessionFile?: () => string | undefined };
@@ -768,6 +771,28 @@ function liveSessionFile(ctx: {
 	} catch {
 		return undefined;
 	}
+}
+
+/**
+ * Watcher stage A (guideline §9): best-effort line into the watcher's audit
+ * file — the same append-only sink the watcher log uses. Advisory by
+ * contract: a write failure is swallowed, never affects the spawn outcome.
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: line — the audit text (ISO timestamp is prepended here)
+ * Output: none
+ * Guarantees:
+ *   - appends one line to ~/.pi/agent/delegate-watch.log, best-effort
+ *   - never throws past the caller (append failures are swallowed)
+ * Raises: never
+ * EXTERNAL_DEPENDENCY: ~/.pi/agent/delegate-watch.log (append-only audit
+ *   file under $HOME; os.homedir() is cached by bun — see the
+ *   makeWatcherLogSink contract in observe.ts for the test seam).
+ */
+function watchAudit(line: string): void {
+	void appendFile(join(homedir(), ".pi", "agent", "delegate-watch.log"), `${new Date().toISOString()} ${line}\n`).catch(
+		() => undefined,
+	);
 }
 
 /** Abort-aware sleep: resolves early when the signal fires. */
@@ -1306,6 +1331,11 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			// true pre-run state of THIS embodiment).
 			reportWitnesses.set(reportPath, witnessEmbodimentReport(await readReportOrNull(reportPath)));
 			let manifestWarning = "";
+			// Watcher stage A: set when the manifest entry went out WITHOUT an
+			// owner session path (degraded session id) — surfaced to the
+			// orchestrator in the result payload (declared here, outside the
+			// manifest-update try, so every result path can carry it).
+			let ownerWarning = "";
 			try {
 				// v1.5 (DESIGN.md §17): record the resolved-schema provenance as a plain
 				// JSON manifest key — ManifestWorker now declares the field (quality fix
@@ -1325,6 +1355,33 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 					manifestStore.read(manifestDir)?.workers ?? [],
 				);
 				const orchestratorSessionPath = liveSessionFile(ctx);
+				// Watcher stage A (guideline §3.3): a spawn that could NOT read its
+				// session id must not go out silently — the delivery default is now
+				// fail-closed, so this worker's orchestrator would never be woken.
+				// Full fail-spawn is a separate decision (not this PR); per §3.3's
+				// "допустимо временно" shape the worker is registered (spawn stays
+				// successful) but the orchestrator gets an explicit warning in the
+				// result payload and the watcher's audit file gets a line.
+				// BUG_FIX_CONTEXT: symptom — after the fail-closed delivery flip, a
+				// degraded spawn (headless/throwing sessionManager) silently wrote a
+				// manifest entry with NO orchestratorSessionPath, and the worker's
+				// wake-ups were lost with zero signal to anyone. Why the old solution
+				// did not work: pre-stage-A the watcher failed OPEN on owner-less
+				// manifests, so the missing field cost nothing and went unreported.
+				// What was done: the unrecorded-owner case now returns an explicit
+				// warning to the orchestrator (ownerWarning in the result payload)
+				// and appends a line to the watcher audit file; the spawn itself
+				// still succeeds (full fail-spawn is a separate, larger decision).
+				if (!orchestratorSessionPath) {
+					ownerWarning =
+						"could not read this session's id — the worker is registered WITHOUT an owner session path; " +
+						"the watcher will NOT wake this session for its events (fail-closed default). " +
+						"watch.legacyFailOpen:true would restore legacy delivery but is unsafe on a multi-session machine.";
+					watchAudit(
+						`spawn worker=${params.name} — no owner session id recorded (sessionManager unavailable); ` +
+							"the watcher will not deliver wake-ups for this worker (fail-closed default)",
+					);
+				}
 				const manifestEntry: ManifestWorker = {
 					name: params.name,
 					placement,
@@ -1560,6 +1617,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 					`delegate_status recovers it on demand. End your turn instead of sleeping.` +
 						`${uniquified ? ` ${uniquified}` : ""}` +
 						`${manifestWarning ? ` Warning: ${manifestWarning}` : ""}` +
+						`${ownerWarning ? ` Warning: ${ownerWarning}` : ""}` +
 						b.line,
 					{
 						detached: true,
@@ -1567,6 +1625,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 						requestedName: params.name,
 						placement,
 						...(manifestWarning ? { warning: manifestWarning } : {}),
+						...(ownerWarning ? { ownerWarning } : {}),
 						...b.details,
 					},
 				);
@@ -1712,7 +1771,10 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 					// collect re-stamped the predecessor entry by name-only matching,
 					// silencing watcher events for an embodiment whose report was never
 					// delivered); legacy entries (no identity) keep the old name-only
-					// behavior (fail-open, unchanged).
+					// behavior (fail-open, unchanged — NOT wake-ownership: this stamp
+					// addresses which manifest entry the COLLECT write touches, not
+					// which session the watcher wakes; the wake-side owner rules live
+					// in src/watch-role.ts and are fail-closed since watcher stage A).
 					const collectedAt = new Date().toISOString();
 					await manifestStore.update(manifestDir, (m) => ({
 						...m,
@@ -1752,6 +1814,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 						teardownNoteLine +
 						`${uniquified ? `\n${uniquified}` : ""}` +
 						`${manifestWarning ? `\nWarning: ${manifestWarning}` : ""}` +
+						`${ownerWarning ? `\nWarning: ${ownerWarning}` : ""}` +
 						`${tierWarning ? `\nWarning: ${tierWarning}` : ""}` +
 						b.line,
 					{
@@ -1770,6 +1833,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 						...(teardownNote ? { teardownAfterCollect: teardownNote } : {}),
 						...(tierWarning ? { tierWarning } : {}),
 						...(manifestWarning ? { warning: manifestWarning } : {}),
+						...(ownerWarning ? { ownerWarning } : {}),
 						...b.details,
 					},
 				);

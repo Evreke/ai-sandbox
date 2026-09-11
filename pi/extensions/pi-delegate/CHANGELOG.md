@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Version numbers align with the iteration numbering in DESIGN.md (v1.x sections).
 
+## [Unreleased]
+
+### Changed
+
+- **Watcher wake-up delivery is fail-closed by default (watcher stage A).**
+  A manifest with no owner fields anywhere (legacy) no longer delivers
+  wake-ups to every mounted watcher; only a proven owner session is woken.
+  The single rollback is the explicit config key `watch.legacyFailOpen:
+  true`, which restores the old legacy delivery and is unsafe on a machine
+  with several sessions (bystander wakes return). A session that cannot read
+  its own identity delivers nothing unconditionally — this edge has no
+  configuration escape. Skipped deliveries are recorded in the watcher audit
+  file (`~/.pi/agent/delegate-watch.log`) with the reason; a spawn that
+  could not record an owner path warns the orchestrator explicitly.
+
 ## [1.16.1] — 2026-09-11
 
 ### Changed

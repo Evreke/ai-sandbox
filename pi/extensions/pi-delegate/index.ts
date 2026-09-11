@@ -103,6 +103,9 @@ interface ManifestExtras {
 	budgetTokens?: number;
 	model?: string;
 	orchestratorSessionPath?: string;
+	/** Watcher stage A: the manifest-level fleet owner (F1) — feeds the
+	 *  canonical display mapping so a known-foreign master renders foreign. */
+	masterSessionPath?: string;
 }
 
 async function readManifestExtras(dir: string, name: string): Promise<ManifestExtras> {
@@ -123,6 +126,11 @@ async function readManifestExtras(dir: string, name: string): Promise<ManifestEx
 		}
 		if (typeof w.orchestratorSessionPath === "string" && w.orchestratorSessionPath.length > 0) {
 			extras.orchestratorSessionPath = w.orchestratorSessionPath;
+		}
+		// Watcher stage A: the manifest-level fleet owner feeds the canonical
+		// display mapping (classifyOwnership → workerAudienceMatch).
+		if (typeof manifest.masterSessionPath === "string" && manifest.masterSessionPath.length > 0) {
+			extras.masterSessionPath = manifest.masterSessionPath;
 		}
 		return extras;
 	} catch {
@@ -216,7 +224,12 @@ export default function (pi: ExtensionAPI) {
 						outputTokens: usage.output,
 						budgetPct: contextPct(usage, window),
 						lastPing,
-						ownership: classifyOwnership(extras.orchestratorSessionPath, self, v.placement),
+						ownership: classifyOwnership(
+							extras.orchestratorSessionPath,
+							self,
+							v.placement,
+							extras.masterSessionPath,
+						),
 						task: basename(v.dir),
 					};
 					}),

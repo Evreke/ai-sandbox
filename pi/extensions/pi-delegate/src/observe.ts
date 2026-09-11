@@ -19,6 +19,9 @@
  * migration stage 3, audit step 10: usage.ts is the ONLY session-JSONL
  * parser (one-parser law); observe consumes parsed numbers/names),
  * archive exports of exchange.ts (resume hint),
+ * watch-role.ts (the CANONICAL ownership verdict — delivery, the mount gates
+ * and the UI all fold this one table; the module is a leaf with zero
+ * production imports),
  * fleet.ts (status-tool render helpers + buildWorkerView + fleet-UI
  * mount/overlay), ./host.ts (the Transport seam + gauge constants), typebox.
  * Never imports the transport implementation
@@ -63,6 +66,12 @@
  *     a failed send rolls the batch's keys back out of `seen` so events
  *     re-fire. One batch = one wake-up message (§21) — never one message
  *     per event.
+ *   - ownership fail-closed (watcher stage A): delivery answers the ONE
+ *     canonical verdict (src/watch-role.ts) — only a proven owner
+ *     ("mine") delivers; a legacy no-owner manifest delivers only under an
+ *     explicit watch.legacyFailOpen:true; a degraded self-id delivers
+ *     NOTHING unconditionally (no configuration escape); skipped deliveries
+ *     are auditable (onSkip → the watcher log sink).
  * External runtime dependencies (ZCS, ported from the bundle's watcher
  * contract): ~/.pi/agent/pi-delegate.config.json (watch/collect config —
  * readDelegateConfig); the worker session JSONL files on disk (gauges +
@@ -138,6 +147,7 @@ import {
 	WATCH_DEFAULT_STALE_AFTER_MS,
 } from "./usage.ts";
 import { stampRetireClockClear, stampRetireClockStart, stampRetired } from "./lifecycle.ts";
+import { sessionRole, workerAudienceMatch } from "./watch-role.ts";
 import {
 	BUDGET_CONFIG_PATH,
 	CONTEXT_CRITICAL_PCT,
@@ -477,6 +487,15 @@ export interface WatchConfig {
 	/** §23 master switch (default FALSE): when false, the retire pass is a
 	 *  no-op — panes NEVER close, no retirableSince is ever stamped. */
 	retire: boolean;
+	/** Watcher stage A rollback for the missing-owner edge ONLY (default
+	 *  FALSE): legacy manifests that carry no owner field anywhere (no
+	 *  worker-level orchestratorSessionPath, no manifest-level
+	 *  masterSessionPath) deliver NOTHING unless the operator explicitly sets
+	 *  this true — which is UNSAFE on a machine with several sessions
+	 *  (bystander wakes return). This flag NEVER touches the missing self-id
+	 *  edge: a session whose identity is unreadable delivers nothing with or
+	 *  without the flag (guideline §3.6 — no configuration escape). */
+	legacyFailOpen: boolean;
 }
 
 /** Shared tolerant config read (v1.12.1): null when absent/corrupt/not an
@@ -522,6 +541,7 @@ export function resolveWatchConfig(): WatchConfig {
 		releaseOn: "settle",
 		retireTtlMs: RETIRE_DEFAULT_TTL_MS,
 		retire: RETIRE_DEFAULT_ENABLED,
+		legacyFailOpen: false,
 	};
 	try {
 		const e = readDelegateConfig()?.watch;
@@ -550,6 +570,17 @@ export function resolveWatchConfig(): WatchConfig {
 				warnBadRetireSwitch(w.retire);
 			}
 		}
+		// Watcher stage A: absent key → false (fail-closed default); a present
+		// boolean is used as-is; a present non-boolean warns ONCE and stays
+		// false — a typo must never silently ENABLE the unsafe legacy delivery.
+		let legacyFailOpen = fallback.legacyFailOpen;
+		if (w.legacyFailOpen !== undefined) {
+			if (typeof w.legacyFailOpen === "boolean") {
+				legacyFailOpen = w.legacyFailOpen;
+			} else {
+				warnBadLegacyFailOpen(w.legacyFailOpen);
+			}
+		}
 		return {
 			intervalMs: num(w.intervalMs, fallback.intervalMs, WATCH_MIN_INTERVAL_MS),
 			settleGateMs: num(w.settleGateMs, fallback.settleGateMs, 1),
@@ -557,6 +588,7 @@ export function resolveWatchConfig(): WatchConfig {
 			releaseOn: w.releaseOn === "started" ? "started" : "settle",
 			retireTtlMs,
 			retire,
+			legacyFailOpen,
 		};
 	} catch {
 		return fallback; // defensive — readDelegateConfig already absorbs throws
@@ -582,6 +614,17 @@ function warnBadRetireSwitch(v: unknown): void {
 	console.error(
 		`[pi-delegate watch] bad watch.retire (${JSON.stringify(v) ?? "undefined"}) — ` +
 			"auto-teardown stays DISABLED (default false)",
+	);
+}
+
+/** Warn-once flag for a bad watch.legacyFailOpen (watcher stage A) — once per process. */
+let legacyFailOpenWarned = false;
+function warnBadLegacyFailOpen(v: unknown): void {
+	if (legacyFailOpenWarned) return;
+	legacyFailOpenWarned = true;
+	console.error(
+		`[pi-delegate watch] bad watch.legacyFailOpen (${JSON.stringify(v) ?? "undefined"}) — ` +
+			"legacy no-owner delivery stays DISABLED (default false; true is unsafe on multi-session)",
 	);
 }
 
@@ -696,8 +739,9 @@ export interface WatchWorker {
 	 *  by spawn at manifest-record time). Set + different from the watcher's own
 	 *  session → this worker belongs to ANOTHER session's fleet and
 	 *  detectWorkerEvents emits NOTHING for it (ownership, v1.11.x). Absent
-	 *  (legacy manifest) → legacy behavior. Reader-only: spawn writes the
-	 *  field, the watcher never does. */
+	 *  (legacy manifest) → the canonical no-owner verdict: fail-closed
+	 *  (watcher stage A) unless watch.legacyFailOpen is true. Reader-only:
+	 *  spawn writes the field, the watcher never does. */
 	orchestratorSessionPath?: string;
 	/** Manifest-level fleet owner (F1 field, written since 1.15.0 by spawn —
 	 *  the first delegate call hoists its own session path here; set-once).
@@ -706,7 +750,8 @@ export interface WatchWorker {
 	 *  watcher's own session still proves a KNOWN foreign owner →
 	 *  detectWorkerEvents emits NOTHING (a bystander session must not be woken
 	 *  by a foreign/legacy manifest in the shared exchange root). Absent →
-	 *  fail-open (true legacy, no owner field anywhere). Reader-only. */
+	 *  the canonical no-owner verdict (fail-closed since watcher stage A;
+	 *  watch.legacyFailOpen rolls it back). Reader-only. */
 	masterSessionPath?: string;
 	/** §23 retire inputs/outputs, threaded from the manifest (reader-only for
 	 *  the clock fields — the retire pass writes them, the snapshot stays a
@@ -749,38 +794,21 @@ export interface SelfIdentity {
 /**
  * Worker gate (v1.11.x): is THIS session one of the manifest's workers? A
  * worker session mounts no watcher — it is someone's fleet row, not an
- * audience. Same strictness as the `isSelf` match below — exact session JSONL
- * path, or a worktree worker's unique checkout path (tab workers share the
- * repo cwd, so cwd never identifies them; the checkoutPath branch also covers
- * the spawn race, where the manifest record predates the worker's
- * sessionPath) — but with NO lookback window: the gate asks about a SESSION,
- * which may outlive the 24 h fleet. Scans every manifest; garbage anywhere
- * degrades to false, never throws.
+ * audience. Watcher stage A: this gate is now a THIN WRAPPER over the
+ * canonical role table (sessionRole in src/watch-role.ts — one table shared
+ * by the mount gate and delivery, guideline §3.4). The worktree
+ * checkoutPath === cwd branch is preserved deliberately: it is the
+ * identity-equivalent FOR MOUNTING (checkout paths are per-worker; it also
+ * covers the spawn race, where the manifest record predates the worker's
+ * sessionPath; tab workers share the repo cwd, so cwd never identifies
+ * them) — but that equivalent is NOT recognized for DELIVERY: a session
+ * without a readable session id delivers nothing regardless of what the
+ * mount gate decided (guideline §3.6). No lookback window: the gate asks
+ * about a SESSION, which may outlive the 24 h fleet. Scans every manifest;
+ * garbage anywhere degrades to false, never throws.
  */
 export function isWorkerSession(self: SelfIdentity, manifests: ExchangeManifest[]): boolean {
-	for (const m of manifests) {
-		const workers = m?.workers;
-		if (!Array.isArray(workers)) continue;
-		for (const w of workers) {
-			if (w === null || typeof w !== "object") continue;
-			if (
-				self.sessionFile !== undefined &&
-				typeof w.sessionPath === "string" &&
-				w.sessionPath === self.sessionFile
-			) {
-				return true;
-			}
-			if (
-				w.placement?.kind === "worktree" &&
-				self.cwd !== undefined &&
-				typeof w.placement.checkoutPath === "string" &&
-				w.placement.checkoutPath === self.cwd
-			) {
-				return true;
-			}
-		}
-	}
-	return false;
+	return sessionRole(self, manifests).isWorker;
 }
 
 /**
@@ -790,7 +818,12 @@ export function isWorkerSession(self: SelfIdentity, manifests: ExchangeManifest[
  * off) while ALSO recording `orchestratorSessionPath` = its own session file in
  * every CHILD manifest it spawned. True when some manifest worker entry has
  * `orchestratorSessionPath === self.sessionFile` — such a session is an
- * AUDIENCE for its own children and must keep a watcher. Same tolerance style
+ * AUDIENCE for its own children and must keep a watcher. Watcher stage A:
+ * this gate is a THIN WRAPPER over the canonical role table (sessionRole in
+ * src/watch-role.ts). Direction is fail-closed and stays that way: a session
+ * whose self-id is degraded (no sessionFile) owns nothing — a tier-1 lead
+ * whose session getter throws does not mount a watcher and loses its child
+ * wake (a documented known behavior of the role table). Same tolerance style
  * as `isWorkerSession`: garbage anywhere degrades to false, never throws; plain
  * loops, no JSON parse. Matched by exact session JSONL path only (the same
  * strictness as the F1 ownership match in detectWorkerEvents).
@@ -806,22 +839,7 @@ export function isWorkerSession(self: SelfIdentity, manifests: ExchangeManifest[
  * Raises: never
  */
 export function ownsChildManifests(self: SelfIdentity, manifests: ExchangeManifest[]): boolean {
-	if (self.sessionFile === undefined) return false;
-	for (const m of manifests) {
-		const workers = m?.workers;
-		if (!Array.isArray(workers)) continue;
-		for (const w of workers) {
-			if (w === null || typeof w !== "object") continue;
-			if (
-				typeof w.orchestratorSessionPath === "string" &&
-				w.orchestratorSessionPath.length > 0 &&
-				w.orchestratorSessionPath === self.sessionFile
-			) {
-				return true;
-			}
-		}
-	}
-	return false;
+	return sessionRole(self, manifests).ownsChildren;
 }
 
 /**
@@ -960,11 +978,28 @@ export interface DetectOptions {
 	 *  standalone detectWorkerEvents call defaults to "statuses are known". */
 	statusesKnown?: boolean;
 	/** v1.11.x ownership: THIS watcher's session JSONL path (threaded from
-	 *  WatcherDeps.self). A worker whose orchestratorSessionPath is set and
-	 *  differs belongs to another session → zero events for it. Undefined
-	 *  (degraded self-id) → fail-open: ownership cannot be disproven, events
-	 *  fire as before. */
+	 *  WatcherDeps.self). A worker whose proven owner differs belongs to
+	 *  another session → zero events for it. Watcher stage A — FAIL-CLOSED:
+	 *  undefined (degraded self-id) → ZERO events for EVERY worker, with or
+	 *  without legacyFailOpen (guideline §3.6 gives this edge no
+	 *  configuration escape); each skip is auditable via onSkip (reason
+	 *  "no-self-id"). */
 	selfSessionFile?: string;
+	/** Watcher stage A: rollback for the "no owner field anywhere on the
+	 *  manifest" edge ONLY (threaded from watch.legacyFailOpen, default
+	 *  false). true restores the pre-stage-A delivery for legacy manifests —
+	 *  UNSAFE on a machine with several sessions (bystander wakes). NEVER
+	 *  extends to the "no self-id" edge: a degraded identity delivers nothing
+	 *  with or without this flag. */
+	legacyFailOpen?: boolean;
+	/** Audit hook (watcher stage A, guideline §9): called once per SKIPPED
+	 *  delivery with the skip reason — "no-owner" (legacy manifest without any
+	 *  owner field, skipped because legacyFailOpen is false) or "no-self-id"
+	 *  (this session's identity is unreadable; skipped unconditionally).
+	 *  Foreign-owner routing is NOT reported (it is the correct normal path,
+	 *  not a degraded edge). Optional so detectWorkerEvents stays a pure
+	 *  function; production threads a logger from createWatcher. */
+	onSkip?: (worker: string, reason: "no-owner" | "no-self-id") => void;
 	/** worker-stale threshold (§22): injectable for tests; production threads
 	 *  watch.staleAfterMs via startWatcher. Default WATCH_DEFAULT_STALE_AFTER_MS. */
 	staleAfterMs?: number;
@@ -997,32 +1032,41 @@ function isPlainRecord(v: unknown): v is Record<string, unknown> {
  * which outranks a deck, which outranks the gauges, which outrank death.
  */
 export function detectWorkerEvents(w: WatchWorker, opts: DetectOptions = {}): WatchEvent[] {
-	// 0. Ownership (v1.11.x): a worker spawned by a DIFFERENT session is that
-	//    session's fleet — emit nothing for it, or N mounted watchers would wake
-	//    N orchestrators for the same event. Exact session-path match only, and
-	//    fail-open on both edges: a legacy manifest carries no
-	//    orchestratorSessionPath, and a degraded self-id (no session file) must
-	//    never swallow a real wake-up — a lost report-ready is worse than a
-	//    duplicate.
-	if (
-		w.orchestratorSessionPath !== undefined &&
-		opts.selfSessionFile !== undefined &&
-		w.orchestratorSessionPath !== opts.selfSessionFile
-	) {
-		return [];
-	}
-	// B1 fallback ownership (diag-watch-crossfleet C1): a worker entry with NO
-	// orchestratorSessionPath on a manifest that carries masterSessionPath ≠ my
-	// session has a KNOWN owner and it is not me → silent. Fail-open only when
-	// NO owner field exists anywhere on the manifest (true legacy) or the
-	// self-id is degraded (a lost report-ready is worse than a duplicate).
-	if (
-		w.orchestratorSessionPath === undefined &&
-		w.masterSessionPath !== undefined &&
-		opts.selfSessionFile !== undefined &&
-		w.masterSessionPath !== opts.selfSessionFile
-	) {
-		return [];
+	// 0. Ownership (watcher stage A — the canonical fail-closed verdict):
+	//    deliver ONLY on a proven owner match ("mine"). A legacy manifest with
+	//    no owner field anywhere delivers only when legacyFailOpen is
+	//    explicitly true; a degraded self-id (no session file) delivers NEVER —
+	//    that edge is not flag-controlled (guideline §3.6). The old B1
+	//    narrowing (a manifest-level masterSessionPath of a known foreign
+	//    owner silences a bystander) lives INSIDE the "foreign" verdict and
+	//    keeps working with the flag on.
+	//    BUG_FIX_CONTEXT: symptom — bystander wakes on foreign/legacy fleets
+	//    (diag-watch-crossfleet): a bystander orchestrator was woken, in
+	//    imperative wording, for workers it never spawned. Why the old
+	//    solution did not work: the two inline filters here were fail-open on
+	//    BOTH undeliverable edges — a legacy manifest (no owner field) and a
+	//    degraded self-id both sailed through ("a lost report-ready is worse
+	//    than a duplicate"), so every mounted watcher heard every fleet. What
+	//    was done: one canonical verdict (workerAudienceMatch in
+	//    src/watch-role.ts) now shared by delivery, the mount gate and the UI;
+	//    delivery is fail-closed with an explicit opt-in rollback
+	//    (watch.legacyFailOpen) for the no-owner edge only, and skipped
+	//    deliveries are auditable via onSkip instead of being silent.
+	{
+		const verdict = workerAudienceMatch(
+			{ orchestratorSessionPath: w.orchestratorSessionPath, masterSessionPath: w.masterSessionPath },
+			{ sessionFile: opts.selfSessionFile },
+			{ legacyFailOpen: opts.legacyFailOpen === true },
+		);
+		if (verdict === "foreign") return [];
+		if (verdict === "no-self-id") {
+			opts.onSkip?.(w.name, "no-self-id");
+			return [];
+		}
+		if (verdict === "no-owner" && opts.legacyFailOpen !== true) {
+			opts.onSkip?.(w.name, "no-owner");
+			return [];
+		}
 	}
 	// §23 retire: a retired worker is HISTORY — the pane is already gone, so
 	// every event kind would be noise (worker-dead above all: the close itself
@@ -1649,11 +1693,23 @@ export function createWatcher(deps: WatcherDeps): WatcherHandle {
 	const seen = new Set<string>();
 	const log = deps.log ?? ((m: string) => console.error(`[pi-delegate watch] ${m}`));
 	let stopped = false;
-	// v1.11.x ownership: the live self identity (the session this watcher is
-	// mounted in) wins over an injected option; both absent → fail-open.
+	// v1.11.x ownership, watcher stage A: the live self identity (the session
+	// this watcher is mounted in) wins over an injected option; both absent →
+	// FAIL-CLOSED: the watcher delivers nothing (every worker skips with the
+	// "no-self-id" reason, audited below) — a mounted watcher without a proven
+	// identity never wakes anyone. The legacyFailOpen flag (if injected) only
+	// ever touches the no-owner edge — the verdict helper enforces that.
 	const detectOpts: DetectOptions = {
 		...(deps.detect ?? {}),
 		selfSessionFile: deps.self?.sessionFile ?? deps.detect?.selfSessionFile,
+		onSkip:
+			deps.detect?.onSkip ??
+			((worker, reason) =>
+				log(
+					reason === "no-owner"
+						? `skipped delivery worker=${worker} — no owner (legacy manifest; watch.legacyFailOpen is false)`
+						: `skipped delivery worker=${worker} — no self id (E_WATCH_NO_SELF_ID)`,
+				)),
 	};
 
 	const tick = async (): Promise<WatchEvent[]> => {
@@ -1835,7 +1891,13 @@ export function startWatcher(
 		// v1.12.1: the worker-stale threshold threads from watch.staleAfterMs
 		// (deps.detect can still override per-mount, e.g. in tests).
 		// §23: the retire TTL threads the same way.
-		detect: { staleAfterMs: cfg.staleAfterMs, retireTtlMs: cfg.retireTtlMs },
+		// Watcher stage A: the legacy fail-open rollback threads from
+		// watch.legacyFailOpen (default false — fail-closed delivery).
+		detect: {
+			staleAfterMs: cfg.staleAfterMs,
+			retireTtlMs: cfg.retireTtlMs,
+			legacyFailOpen: cfg.legacyFailOpen,
+		},
 	});
 	const stop = (): void => {
 		handle.stop();
