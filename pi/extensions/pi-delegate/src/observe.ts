@@ -864,14 +864,17 @@ export interface SelfIdentity {
  * worker session mounts no watcher — it is someone's fleet row, not an
  * audience. Watcher stage A: this gate is now a THIN WRAPPER over the
  * canonical role table (sessionRole in src/watch-role.ts — one table shared
- * by the mount gate and delivery, guideline §3.4). The worktree
- * checkoutPath === cwd branch is preserved deliberately: it is the
- * identity-equivalent FOR MOUNTING (checkout paths are per-worker; it also
- * covers the spawn race, where the manifest record predates the worker's
- * sessionPath; tab workers share the repo cwd, so cwd never identifies
- * them) — but that equivalent is NOT recognized for DELIVERY: a session
- * without a readable session id delivers nothing regardless of what the
- * mount gate decided (guideline §3.6). No lookback window: the gate asks
+ * by the mount gate and delivery, guideline §3.4). Stage C fix: worker
+ * identity is proven ONLY by the entry's OWN sessionPath
+ * (`sessionPath === self.sessionFile`); the former checkoutPath === cwd
+ * branch is REMOVED as ambiguous by construction — tab workers ALWAYS share
+ * the orchestrator's checkout, and a historical worker entry poisoned the
+ * gate for ANY future session started in that cwd (an orchestrator silently
+ * lost its watcher and its child wakes). A degraded self (no sessionFile)
+ * and an ownerless entry with a matching cwd both read as "not a worker" →
+ * the session MOUNTS (the composer invariant "fail-open toward MOUNTING",
+ * harmless since stage A: delivery is fail-closed, a spuriously mounted
+ * watcher never produces a wrong wake). No lookback window: the gate asks
  * about a SESSION, which may outlive the 24 h fleet. Scans every manifest;
  * garbage anywhere degrades to false, never throws.
  */
@@ -913,9 +916,11 @@ export function ownsChildManifests(self: SelfIdentity, manifests: ExchangeManife
 /**
  * Merge manifests + live statuses into the watcher's view. `statuses === null`
  * means herdr is unreachable (statusesKnown:false). Self-identification is
- * exact by session path, or — for worktree placements only — by the unique
- * per-worker checkout path (tab workers share the repo cwd, so they are never
- * muted on cwd alone).
+ * EXACT by session path only (stage C fix — the former worktree
+ * checkoutPath === cwd equivalent is removed as ambiguous: a historical
+ * entry must not mute a new session that merely shares its cwd). This `self`
+ * flag drives the self-event filter AND the in-loop leaf-worker suppression
+ * in createWatcher — both now match the entry's own sessionPath.
  */
 export function workersFromManifests(
 	manifests: ExchangeManifest[],
@@ -944,15 +949,15 @@ export function workersFromManifests(
 			if (typeof w?.name !== "string" || w.name.length === 0) continue;
 			const startedAtMs = Date.parse(w.startedAt ?? "");
 			if (Number.isFinite(startedAtMs) && nowMs - startedAtMs > WATCH_LOOKBACK_MS) continue;
-			const checkoutPath = w.placement?.checkoutPath;
+			// Self-identity (stage C fix): the entry's OWN sessionPath only.
+			// BUG_FIX_CONTEXT: the former worktree checkoutPath === cwd branch
+			// muted (and leaf-suppressed) any new session that merely started
+			// in a checkout where a worker once ran — identity by cwd is
+			// ambiguous (tab workers share the orchestrator's checkout too).
 			const isSelf =
-				(self.sessionFile !== undefined &&
-					typeof w.sessionPath === "string" &&
-					w.sessionPath === self.sessionFile) ||
-				(w.placement?.kind === "worktree" &&
-					self.cwd !== undefined &&
-					typeof checkoutPath === "string" &&
-					checkoutPath === self.cwd);
+				self.sessionFile !== undefined &&
+				typeof w.sessionPath === "string" &&
+				w.sessionPath === self.sessionFile;
 			workers.push({
 				name: w.name,
 				dir: manifest.dir,
@@ -1985,11 +1990,15 @@ export function createWatcher(deps: WatcherDeps): WatcherHandle {
 			// A worker never needs to be woken for its own events…
 			events = events.filter((e) => !snap.workers.some((w) => w.self && w.dir === e.dir && w.name === e.worker));
 			// …and a LEAF (worktree) worker session is not an orchestrator: its
-			// fleet is someone else's. F6 exception: a worktree worker that OWNS
-			// child manifests (a tier-1 worker-orchestrator) keeps its watcher —
-			// its own children fire (their orchestratorSessionPath equals its
-			// session file) while its PARENT's manifest stays silenced by the
-			// detectWorkerEvents ownership gate, so F1 scoping is intact.
+			// fleet is someone else's. Stage C fix: `self` is matched by the
+			// entry's own sessionPath only (workersFromManifests), so the
+			// suppression can no longer be triggered by a cwd/checkoutPath
+			// coincidence with a historical entry. F6 exception: a worktree
+			// worker that OWNS child manifests (a tier-1 worker-orchestrator)
+			// keeps its watcher — its own children fire (their
+			// orchestratorSessionPath equals its session file) while its
+			// PARENT's manifest stays silenced by the detectWorkerEvents
+			// ownership gate, so F1 scoping is intact.
 			const selfOwnsChildren =
 				detectOpts.selfSessionFile !== undefined &&
 				snap.workers.some(

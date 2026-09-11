@@ -647,7 +647,10 @@ archived tasks ("last task: <task> — N archived reports — ~/.pi/agent/delega
   mount gate (src/watch-role.ts, classifyOwnership → workerAudienceMatch) —
   the display-only degraded-self worktree fallback (checkoutPath === cwd →
   "mine") NEVER feeds delivery: a degraded self-id delivers nothing
-  unconditionally (§21.1 F1, stage-A update).
+  unconditionally (§21.1 F1, stage-A update). Stage C note: the MOUNT gate
+  dropped the same equivalent (its identity is the entry's own sessionPath
+  only) — the fallback survives as a display convenience for the
+  degraded-self-id worktree corner, documented in src/fleet.ts.
 - **Placed-count chip — REMOVED (v1.8, user decision)**: the global cross-session
   count + pessimistic burn were confusing. `ctx.ui.setFooter` itself is also banned
   (it REPLACES pi's native footer — context %, model, cost, cwd). Only the live-rows
@@ -848,12 +851,14 @@ write no report, §19.4), or when a report exists. Manifests older than the
 fleet.
 
 **Self-mute.** Every pi session runs this extension, workers included, so the
-watcher identifies *itself* in the manifests (session JSONL path, or the unique
-worktree checkout path) and (a) never delivers events about its own worker and
-(b) stays silent altogether when it is a leaf **worktree** worker — that fleet
+watcher identifies *itself* in the manifests by its own session JSONL path
+(stage C fix: the former worktree checkoutPath === cwd equivalent is gone —
+a historical entry must not mute a new session that merely shares its cwd)
+and (a) never delivers events about its own worker and (b) stays silent
+altogether when it is a leaf **worktree** worker — that fleet
 belongs to whoever spawned it. Sub-orchestrators (tab placements, per the skill)
-keep their watcher; tab workers are never muted on cwd alone, because a tab
-shares the orchestrator's checkout and cwd cannot tell them apart.
+keep their watcher; no session is ever identified by cwd alone, because a tab
+shares the orchestrator's checkout and cwd cannot tell sessions apart.
 
 **Delivery.** `pi.sendUserMessage(text, { deliverAs: "followUp" })` — it wakes
 an idle orchestrator and never interrupts a turn in flight. The tick AWAITED
@@ -955,9 +960,26 @@ none of them can corrupt a spawn or a collect result). One fix shape each:
   | Role | Definition | Mount local watcher? | Receives wake for worker W? |
   |------|------------|----------------------|------------------------------|
   | Pure orchestrator | Is not a worker entry in any live manifest; is the owner of its own workers | Yes | Yes, when the owner of W is this session |
-  | Pure worker | Is a worker entry; owns no child workers | No | No (not a fleet audience) |
+  | Pure worker | Is a worker entry (the entry's OWN `sessionPath` equals this session's JSONL path); owns no child workers | No | No (not a fleet audience) |
   | Worker-orchestrator (tier-1) | Is a worker entry of the parent AND the owner of its own child workers | Yes | Yes only for W whose owner is this session; never for the parent's other workers |
   | Foreign | Any other session | Does not matter | Never for W with a foreign owner |
+
+  Worker identity on the MOUNT side is the entry's OWN `sessionPath` only
+  (stage C fix). The former mounting equivalent `placement.checkoutPath ===
+  cwd` (worktree entries only) was REMOVED as ambiguous by construction:
+  tab workers ALWAYS share the orchestrator's checkout, and a HISTORICAL
+  worker entry poisoned the gate for ANY future session started in that cwd
+  — an orchestrator silently lost its watcher and every child wake. A cwd
+  coincidence proves nothing; unproven reads as "not a worker" and the
+  session MOUNTS — harmless since stage A, because delivery is fail-closed
+  (a mounted watcher without a proven identity never produces a wrong
+  wake). Consequence of the removal: during the spawn race (the manifest
+  record predates the worker's sessionPath) a worker session may briefly
+  mount a watcher — delivery stays silent, and the worker's own events are
+  filtered by the same sessionPath identity. The UI keeps ONE display-only
+  remnant of the equivalent (classifyOwnership: no owner field + degraded
+  self-id + worktree checkoutPath === cwd → glyph "mine"); it never feeds
+  delivery (§19.4).
 
   In natural language: a session either appears as a worker entry in some
   live manifest or it does not. A session that is nobody's worker is a pure
@@ -970,9 +992,11 @@ none of them can corrupt a spawn or a collect result). One fix shape each:
   Everything a session can neither prove as its own worker nor be proven
   the owner of is foreign: no wake. A session whose own identity is
   unreadable (degraded self-id) is delivery-silent regardless of role — it
-  owns nothing and receives nothing; a degraded tier-1 lead therefore loses
-  its child wakes (a documented known behavior, pinned in
-  test/composer-check.ts, check M7).
+  owns nothing and receives nothing. Since the stage C fix the identity is
+  the entry's own sessionPath only, so a degraded tier-1 lead MOUNTS a
+  watcher (it can no longer be classified a pure worker by its cwd) and
+  loses its child wakes on the DELIVERY side instead (a documented known
+  behavior, pinned in test/composer-check.ts, check M7).
 ### 21.1b The durable delivered-facts store (watcher stage B, guideline §5)
 
 Before stage B the dedup lived only in the memory of ONE watcher mount: a

@@ -31,10 +31,13 @@
  *     contracts;
  *   - degraded self-id (sessionManager throws) is passed through as-is —
  *     the gates decide with what is known (v1.11.x ownership contract).
- *     Known consequence (documented, deliberate): a DEGRADED tier-1 lead —
- *     a worktree worker session whose getSessionFile() throws — matches the
- *     worker gate by cwd but owns nothing (ownsChildren needs a proven
- *     sessionFile), so it mounts NO watcher and loses its child wakes;
+ *     Stage C fix: worker identity is the entry's OWN sessionPath only, so
+ *     a DEGRADED tier-1 lead (getSessionFile() throws) is no longer
+ *     classified a pure worker — it proves nothing, reads as "not a
+ *     worker" and MOUNTS a watcher (fail-open toward MOUNTING). Its child
+ *     wakes are still lost, but now on the DELIVERY side, where guideline
+ *     §3.6 requires the fail-closed edge: a session without a proven
+ *     session id delivers nothing (documented known behavior).
  * Error modes: none of its own — rethrows only what injected collaborators
  * throw (production collaborators never do).
  */
@@ -82,8 +85,11 @@ export interface SessionWatcherResult {
  * Input:
  *   - deps.pi / deps.transport: the composition root's binding (index.ts)
  *   - deps.self: this session's identity; a degraded sessionFile (undefined)
- *     mounts toward unknown roles (harmless — delivery is fail-closed), but
- *     a degraded tier-1 lead is classified a pure worker and mounts nothing
+ *     proves nothing — the role table reads "not a worker" and the session
+ *     MOUNTS (stage C: worker identity is the entry's own sessionPath only;
+ *     a degraded tier-1 lead therefore mounts a watcher, but delivery is
+ *     fail-closed so it still wakes for nothing — the child-wake loss moved
+ *     from the mount side to the delivery side, where §3.6 requires it)
  *   - injected collaborators default to the production ones (scan via
  *     manifestStore + the Transport's backend name)
  * Output: { mounted } — whether startWatcher ran

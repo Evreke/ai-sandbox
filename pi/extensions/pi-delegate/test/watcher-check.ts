@@ -946,9 +946,12 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 	const bySession = snapshotFor([w], [LIVE("w-self")], { sessionFile: w.sessionPath });
 	check("W11.1 self identified by session path", bySession.workers[0]?.self === true);
 	const byCwd = snapshotFor([w], [LIVE("w-self")], { cwd: "/tmp/wt/w-self" });
-	check("W11.2 self identified by worktree checkout path", byCwd.workers[0]?.self === true);
+	check(
+		"W11.2 cwd === checkoutPath alone is NOT self (stage C: identity is the entry's own sessionPath — a historical entry must not mute a new session in the same cwd)",
+		byCwd.workers[0]?.self === false,
+	);
 	const tab = snapshotFor([mkWorker(dir, "w-tab", { kind: "tab" })], [LIVE("w-tab")], { cwd: "/tmp/wt/w-tab" });
-	check("W11.3 tab worker is NOT muted on cwd (shared checkout is ambiguous)", tab.workers[0]?.self === false);
+	check("W11.3 tab entry + cwd match is NOT self either (shared checkout is ambiguous)", tab.workers[0]?.self === false);
 	check("W11.4 another session is not self", snapshotFor([w], [LIVE("w-self")], { cwd: "/elsewhere", sessionFile: "/elsewhere.jsonl" }).workers[0]?.self === false);
 
 	// Delivery-level mute lives in the loop: a leaf (worktree) worker session that
@@ -1046,17 +1049,32 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 	const gateManifest = manifestOf(gateDir, [gateWorker]);
 	check("W14.1 gate matches by worker sessionPath", isWorkerSession({ sessionFile: gateWorker.sessionPath }, [gateManifest]));
 	check(
-		"W14.2 gate matches by worktree checkoutPath (spawn race: record predates the worker sessionPath)",
-		isWorkerSession({ cwd: "/tmp/wt/w-gated" }, [gateManifest]),
+		"W14.2 cwd === checkoutPath of a worktree entry with a FOREIGN owner is NOT a worker (stage C: identity by sessionPath only — a historical entry must not poison the gate)",
+		!isWorkerSession({ sessionFile: ORCH_B, cwd: "/tmp/wt/w-gated" }, [gateManifest]),
 	);
-	const tabGate = manifestOf(gateDir, [mkWorker(gateDir, "w-gated-tab", { kind: "tab" })]);
 	check(
-		"W14.3 tab worker is NOT gated on cwd (shared checkout is ambiguous — same strictness as isSelf)",
-		!isWorkerSession({ cwd: "/tmp/wt/w-gated-tab" }, [tabGate]),
+		"W14.2b ownerless entry + cwd match → NOT a worker (unproven) → the session mounts",
+		(() => {
+			const ownerless = mkWorker(gateDir, "w-ownerless");
+			delete (ownerless as Partial<ManifestWorker>).sessionPath;
+			return !isWorkerSession({ sessionFile: ORCH_B, cwd: "/tmp/wt/w-ownerless" }, [manifestOf(gateDir, [ownerless])]);
+		})(),
+	);
+	check(
+		"W14.3 cwd match alone (no sessionFile) is NOT a worker — degraded self mounts",
+		!isWorkerSession({ cwd: "/tmp/wt/w-gated" }, [gateManifest]),
+	);
+	check(
+		"W14.3b tab entry + cwd match is not a worker either (shared checkout is ambiguous)",
+		(() => {
+			const tabW = mkWorker(gateDir, "w-gated-tab", { kind: "tab" });
+			delete (tabW as Partial<ManifestWorker>).sessionPath;
+			return !isWorkerSession({ cwd: "/tmp/wt/w-gated-tab" }, [manifestOf(gateDir, [tabW])]);
+		})(),
 	);
 	check(
 		"W14.4 an unrelated session (an orchestrator) is not gated",
-		!isWorkerSession({ sessionFile: ORCH_A, cwd: "/repo" }, [gateManifest, tabGate]),
+		!isWorkerSession({ sessionFile: ORCH_A, cwd: "/repo" }, [gateManifest]),
 	);
 	check("W14.5 no identity at all → not gated", !isWorkerSession({}, [gateManifest]));
 	check(
@@ -1261,6 +1279,137 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 				(e) => e.kind === "report-ready",
 			),
 	);
+}
+
+// ---------------------------------------------------------------------------
+// W14C. Stage C mount-gate fix — worker identity by sessionPath, NOT
+// checkoutPath (full-cycle regression of the live-acceptance incident: an
+// orchestrator that started in a checkout where a worker once ran silently
+// lost its watcher and every child wake)
+// ---------------------------------------------------------------------------
+
+{
+	const META = "/tmp/sessions/stage-c-meta.jsonl";
+	const SELF = "/tmp/sessions/stage-c-self.jsonl";
+	const HIST_CWD = "/tmp/wt/historical-worker"; // the cwd a worker once ran in
+
+	// The historical manifest: a worker entry whose worktree checkoutPath
+	// equals THIS session's cwd, but whose sessionPath and owner are FOREIGN
+	// (the incident's impl-c shape).
+	const histDir = taskDir("stage-c-hist");
+	const historical = mkWorker(histDir, "w-historical");
+	historical.sessionPath = "/tmp/sessions/stage-c-hist-worker.jsonl";
+	historical.orchestratorSessionPath = META;
+	writeValidReport(histDir, "w-historical");
+	const histManifest = manifestOf(histDir, [historical]);
+
+	// This session's OWN worker (its owner is THIS session).
+	const ownDir = taskDir("stage-c-own");
+	const own = mkWorker(ownDir, "w-own", { orchestratorSessionPath: SELF });
+	own.sessionPath = "/tmp/sessions/stage-c-own-worker.jsonl";
+	writeValidReport(ownDir, "w-own");
+
+	// Gate level: the cwd coincidence with the historical entry does NOT make
+	// this session a worker; its own sessionPath still does.
+	check(
+		"W14C.1 cwd matches a historical worktree entry with a FOREIGN owner → NOT a worker (the gate no longer matches by checkoutPath)",
+		!isWorkerSession({ sessionFile: SELF, cwd: HIST_CWD }, [histManifest]),
+	);
+	check(
+		"W14C.2 the entry's OWN sessionPath still gates (pure-worker identity intact)",
+		isWorkerSession({ sessionFile: historical.sessionPath, cwd: HIST_CWD }, [histManifest]),
+	);
+
+	// Full cycle: the session in the worker's old cwd MOUNTS a watcher
+	// (composer rule: not a proven pure worker → mount) and RECEIVES its own
+	// worker's wake; the historical entry stays foreign-silent.
+	{
+		const sent: string[] = [];
+		const handle = createWatcher({
+			transport: { listStatuses: async () => [LIVE("w-historical"), LIVE("w-own")] } as unknown as Transport,
+			intervalMs: 3_600_000,
+			send: (t: string) => {
+				sent.push(t);
+			},
+			snapshot: async () =>
+				snapshotFor([historical, own], [LIVE("w-historical"), LIVE("w-own")], { sessionFile: SELF, cwd: HIST_CWD }),
+			self: { sessionFile: SELF, cwd: HIST_CWD },
+			log: () => {},
+		});
+		const batch = await handle.tick();
+		check(
+			"W14C.3 full cycle: an orchestrator in a worker's old cwd gets ITS OWN worker's wake-up",
+			batch.some((e) => e.kind === "report-ready" && e.worker === "w-own") && sent.length === 1,
+			`${kindsOf(batch)} ${JSON.stringify(sent)}`,
+		);
+		check(
+			"W14C.4 the historical entry (foreign owner, cwd-coincident) never wakes it",
+			!batch.some((e) => e.worker === "w-historical"),
+			`${kindsOf(batch)} ${JSON.stringify(batch.map((e) => e.worker))}`,
+		);
+		handle.stop();
+	}
+
+	// In-loop leaf suppression now matches by sessionPath too: a worktree
+	// worker session (its own sessionPath IS the entry's) is suppressed even
+	// when delivery would otherwise fire (legacy no-owner + legacyFailOpen);
+	// and a session that merely shares the cwd is NOT suppressed.
+	{
+		const leafDir = taskDir("stage-c-leaf");
+		const leaf = mkWorker(leafDir, "w-leaf"); // no orchestratorSessionPath → legacy no-owner
+		leaf.sessionPath = "/tmp/sessions/stage-c-leaf-worker.jsonl";
+		const sibling = mkWorker(leafDir, "w-leaf-sib"); // same legacy manifest
+		sibling.sessionPath = "/tmp/sessions/stage-c-leaf-sib.jsonl";
+		writeValidReport(leafDir, "w-leaf-sib");
+		const leafSnap = snapshotFor(
+			[leaf, sibling],
+			[LIVE("w-leaf"), LIVE("w-leaf-sib")],
+			{ sessionFile: leaf.sessionPath, cwd: "/tmp/wt/w-leaf" },
+		);
+		const sentLeaf: string[] = [];
+		const leafHandle = createWatcher({
+			transport: { listStatuses: async () => [LIVE("w-leaf"), LIVE("w-leaf-sib")] } as unknown as Transport,
+			intervalMs: 3_600_000,
+			send: (t: string) => {
+				sentLeaf.push(t);
+			},
+			snapshot: async () => leafSnap,
+			self: { sessionFile: leaf.sessionPath, cwd: "/tmp/wt/w-leaf" },
+			detect: { legacyFailOpen: true },
+			log: () => {},
+		});
+		const leafBatch = await leafHandle.tick();
+		check(
+			"W14C.5 in-loop: a leaf worktree worker session (matched by sessionPath) receives NOTHING from its fleet even with legacyFailOpen",
+			leafBatch.length === 0 && sentLeaf.length === 0,
+			`${kindsOf(leafBatch)} ${JSON.stringify(sentLeaf)}`,
+		);
+		leafHandle.stop();
+
+		// Contrast: a DIFFERENT session in the same cwd (the historical-entry
+		// coincidence) is not leaf-suppressed — with the flag open it hears
+		// the legacy fleet exactly as the fail-open contract says.
+		const sentBystander: string[] = [];
+		const bystanderHandle = createWatcher({
+			transport: { listStatuses: async () => [LIVE("w-leaf"), LIVE("w-leaf-sib")] } as unknown as Transport,
+			intervalMs: 3_600_000,
+			send: (t: string) => {
+				sentBystander.push(t);
+			},
+			snapshot: async () =>
+				snapshotFor([leaf, sibling], [LIVE("w-leaf"), LIVE("w-leaf-sib")], { sessionFile: SELF, cwd: "/tmp/wt/w-leaf" }),
+			self: { sessionFile: SELF, cwd: "/tmp/wt/w-leaf" },
+			detect: { legacyFailOpen: true },
+			log: () => {},
+		});
+		const bystanderBatch = await bystanderHandle.tick();
+		check(
+			"W14C.6 contrast: a session that merely shares the leaf's cwd is NOT leaf-suppressed (legacyFailOpen delivery intact)",
+			bystanderBatch.some((e) => e.kind === "report-ready" && e.worker === "w-leaf-sib") && sentBystander.length === 1,
+			`${kindsOf(bystanderBatch)} ${JSON.stringify(sentBystander)}`,
+		);
+		bystanderHandle.stop();
+	}
 }
 
 // ---------------------------------------------------------------------------

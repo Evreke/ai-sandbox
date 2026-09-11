@@ -98,10 +98,14 @@ import {
  * never render as "mine" (●) in either direction of missing data:
  *   - manifest edge: no `orchestratorSessionPath` → UNKNOWN (legacy).
  *   - self edge: no session file → exact comparison impossible → UNKNOWN,
- *     with ONE fallback mirroring observe.ts isSelf: a worktree worker whose
- *     unique `placement.checkoutPath` equals this session's cwd is MINE
- *     (checkout paths are per-worker; tab workers share the repo cwd and are
- *     NEVER matched by it — they stay UNKNOWN).
+ *     with ONE fallback mirroring the (removed) observe.ts mount equivalent:
+ *     a worktree worker whose unique `placement.checkoutPath` equals this
+ *     session's cwd is MINE (checkout paths are per-worker; tab workers
+ *     share the repo cwd and are NEVER matched by it — they stay UNKNOWN).
+ *     Stage C note: the MOUNT gate no longer accepts this equivalent (its
+ *     identity is the entry's own sessionPath only) — this fallback remains
+ *     DISPLAY-ONLY for the degraded-self-id worktree corner and never feeds
+ *     delivery.
  *
  * Pure function: no fs, no transport, no theme — unit-tested in
  * test/ownership-check.ts.
@@ -152,10 +156,11 @@ export interface OwnershipOptions {
  * - "no-owner" / "no-self-id" → "unknown", EXCEPT one DISPLAY-ONLY
  *   fallback: no owner field + no self.sessionFile + worktree placement
  *   whose checkoutPath === cwd → "mine". This fallback is a display
- *   convenience for the degraded-self-id worktree corner (the same
- *   equivalent the mount gate accepts); it NEVER feeds delivery — a
- *   degraded self-id delivers nothing in observe.ts, unconditionally
- *   (guideline §3.6). Tab workers are never matched by cwd → "unknown".
+ *   convenience for the degraded-self-id worktree corner (the mount gate
+ *   dropped the same equivalent in the stage C fix — identity by cwd is
+ *   ambiguous); it NEVER feeds delivery — a degraded self-id delivers
+ *   nothing in observe.ts, unconditionally (guideline §3.6). Tab workers
+ *   are never matched by cwd → "unknown".
  */
 export function classifyOwnership(
 	orchestratorSessionPath: string | undefined,
