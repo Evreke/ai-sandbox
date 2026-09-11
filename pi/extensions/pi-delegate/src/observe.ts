@@ -1106,6 +1106,35 @@ function truncate(s: string, max = 220): string {
 	return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
 }
 
+/**
+ * Re-read the manifest's collectedAt for one worker straight from disk
+ * (Wave 2 — the watcher-vs-collect race).
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input:
+ *   - dir: the exchange task dir (manifest.json is read from it)
+ *   - worker: the canonical worker name
+ * Output: true when the manifest NOW records a collectedAt for the worker
+ * Guarantees:
+ *   - tolerant: absent/corrupt manifest or entry → false (an unreadable
+ *     manifest never blocks a wake — advisory by contract)
+ *   - read-only; called immediately before a report-kind batch is sent, so a
+ *     collect that stamped BETWEEN the tick's snapshot and the send still
+ *     suppresses the wake (the collect already delivered the report)
+ * Raises: never
+ * EXTERNAL_DEPENDENCY: exchange manifest on disk at <dir>/manifest.json
+ *   (via the manifestStore port).
+ */
+function becameCollectedOnDisk(dir: string, worker: string): boolean {
+	try {
+		const m = manifestStore.read(dir);
+		const w = m?.workers.find((x) => x.name === worker);
+		return typeof w?.collectedAt === "string" && w.collectedAt.length > 0;
+	} catch {
+		return false;
+	}
+}
+
 function fileMtimeMs(path: string): number | null {
 	try {
 		return statSync(path).mtimeMs;
@@ -2040,6 +2069,26 @@ export function createWatcher(deps: WatcherDeps): WatcherHandle {
 				return records[deliveryRecordKey(e.worker, e.kind, e.fingerprint ?? "")] === undefined;
 			});
 		}
+		if (events.length === 0) return [];
+		// Wave 2 (the watcher-vs-collect race): report-kind suppression reads
+		// collectedAt in the TICK SNAPSHOT — a collect that stamps between the
+		// snapshot and the send produced a duplicate report-ready wake for a
+		// fresh session (empty memory dedup, empty durable store).
+		// BUG_FIX_CONTEXT: symptom — a fresh orchestrator session received the
+		// report-ready wake even though the report had just been collected. Why
+		// the old solution did not work: the collectedAt check ran against the
+		// snapshot taken at tick start, and the stamp landed inside the tick.
+		// What was done: collectedAt is RE-READ from the manifest immediately
+		// before the batch is sent; report-kind events for a worker that became
+		// collected are dropped (other kinds are unaffected — collect only ever
+		// means "the report was delivered"). Residual (documented): a stamp
+		// landing between this re-read and the actual send still races — the
+		// window is now a single atomic-rename scale, and the durable store
+		// records the wake for cross-restart dedup.
+		events = events.filter((e) => {
+			if (e.kind !== "report-ready" && e.kind !== "report-invalid") return true;
+			return !becameCollectedOnDisk(e.dir, e.worker);
+		});
 		if (events.length === 0) return [];
 		// ONE send per batch, INSIDE the error guard, its outcome AWAITED (the
 		// pre-stage-B code ignored the returned value — a silent no-op sender

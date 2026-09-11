@@ -2368,6 +2368,79 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 	}
 }
 
+// ---------------------------------------------------------------------------
+// W20. The watcher-vs-collect race (Wave 2): report-kind suppression reads
+// collectedAt in the tick snapshot — a collect that stamps between the
+// snapshot and the send must NOT produce a duplicate report-ready wake for a
+// fresh session. The fix re-reads collectedAt from the manifest immediately
+// before the batch is sent.
+// ---------------------------------------------------------------------------
+
+{
+	const dir = taskDir("collect-race");
+	const w = mkWorker(dir, "w-race");
+	writeValidReport(dir, "w-race");
+	// The on-disk manifest starts WITHOUT the stamp (what collect writes only
+	// at the END of its flow — the snapshot below predates it).
+	const writeManifestOnDisk = (collected: boolean) =>
+		writeFileSync(
+			join(dir, "manifest.json"),
+			JSON.stringify({
+				task: "collect-race",
+				dir,
+				workers: [collected ? { ...w, collectedAt: new Date().toISOString() } : w],
+			}),
+		);
+	writeManifestOnDisk(false);
+	// The tick snapshot: built BEFORE the stamp lands (no collectedAt on the
+	// worker object the detection sees).
+	const staleSnap = snapshotFor([w], [LIVE("w-race")]);
+	const sent: string[] = [];
+	const h = createWatcher({
+		transport: { listStatuses: async () => [LIVE("w-race")] } as unknown as Transport,
+		intervalMs: 3_600_000,
+		send: (t: string) => {
+			sent.push(t);
+		},
+		snapshot: async () => {
+			// The collect stamp lands AFTER the snapshot resolved but BEFORE the
+			// send — the exact audit race window.
+			writeManifestOnDisk(true);
+			return staleSnap;
+		},
+		self: { sessionFile: TEST_SELF },
+		detect: { legacyFailOpen: true },
+		log: () => {},
+	});
+	const ev = await h.tick();
+	check("W20.1 collect stamped between snapshot and send → the report-ready wake is DROPPED", ev.length === 0 && sent.length === 0, `${kindsOf(ev)} sent=${JSON.stringify(sent)}`);
+	check("W20.2 the dropped wake does not re-fire either (memory keys stay, next snapshot reads the stamp)", (await h.tick()).length === 0 && sent.length === 0, JSON.stringify(sent));
+	h.stop();
+
+	// Regression guard: WITHOUT the stamp the report-ready still fires (the
+	// re-read must only drop events the stamp genuinely covers).
+	{
+		const dir2 = taskDir("collect-race-clean");
+		const w2 = mkWorker(dir2, "w-race2");
+		writeValidReport(dir2, "w-race2");
+		const sent2: string[] = [];
+		const h2 = createWatcher({
+			transport: { listStatuses: async () => [LIVE("w-race2")] } as unknown as Transport,
+			intervalMs: 3_600_000,
+			send: (t: string) => {
+				sent2.push(t);
+			},
+			snapshot: async () => snapshotFor([w2], [LIVE("w-race2")]),
+			self: { sessionFile: TEST_SELF },
+			detect: { legacyFailOpen: true },
+			log: () => {},
+		});
+		const ev2 = await h2.tick();
+		check("W20.3 no stamp → report-ready still fires (regression)", ev2.some((e) => e.kind === "report-ready") && sent2.length === 1, `${kindsOf(ev2)} sent=${JSON.stringify(sent2)}`);
+		h2.stop();
+	}
+}
+
 rmSync(FIX, { recursive: true, force: true });
 console.log(failures === 0 ? "\nALL WATCHER CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
