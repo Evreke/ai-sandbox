@@ -45,8 +45,12 @@ import {
 } from "../src/observe.ts";
 import {
 	answerPathFor,
+	mergeRetireStamps,
 	questionPathFor,
+	readWatchStampLayers,
 	releasePathFor,
+	updateWatchStamps,
+	watcherKeyFor,
 	writeRelease,
 	type ExchangeManifest,
 	type ManifestWorker,
@@ -319,6 +323,35 @@ function workerView(w: ManifestWorker, statuses: AgentStatus[] | null = [DONE(w.
 		jv.reportSchemaFragment === undefined && jv.retirableSince === undefined && jv.retiredAt === undefined && jv.placement === undefined,
 		JSON.stringify(jv),
 	);
+
+	// Migration stage 3 (audit steps 6/10): the watcher's stamps live in its
+	// satellite file — the merge layers onto the threaded view (manifest legacy
+	// layer + satellite; earliest stamp wins) and a satellite-only retiredAt
+	// silences/threads exactly like a manifest-layer one.
+	const satDir = taskDir("thread-sat");
+	const ws = mkWorker(satDir, "r-sat");
+	writeManifestOnDisk(satDir, [ws]);
+	const since = new Date(NOW - 120_000).toISOString();
+	const closed = new Date(NOW - 60_000).toISOString();
+	const anonKey = watcherKeyFor(undefined);
+	await updateWatchStamps(satDir, anonKey, "r-sat", { retirableSince: since, retiredAt: closed });
+	const satLayer = readWatchStampLayers(satDir);
+	check(
+		"R3.10 satellite layer written by updateWatchStamps, read back by readWatchStampLayers",
+		satLayer.length === 1 && satLayer[0]?.stamps["r-sat"]?.retirableSince === since && satLayer[0]?.stamps["r-sat"]?.retiredAt === closed,
+		JSON.stringify(satLayer),
+	);
+	const sv = snapshotFor([ws], [DONE("r-sat")]).workers[0]!;
+	check("R3.11 satellite-only stamps merge onto the worker view (earliest wins)", sv.retirableSince === since && sv.retiredAt === closed, JSON.stringify(sv));
+	// Manifest layer + satellite: the earliest stamp per field wins.
+	const legacySince = new Date(NOW - 300_000).toISOString();
+	writeManifestOnDisk(satDir, [{ ...ws, retirableSince: legacySince }]);
+	const mv = snapshotFor([{ ...ws, retirableSince: legacySince }], [DONE("r-sat")]).workers[0]!;
+	check("R3.12 manifest legacy layer + satellite merged: earliest retirableSince wins", mv.retirableSince === legacySince && mv.retiredAt === closed, JSON.stringify(mv));
+	check(
+		"R3.13 fleet's retired flag reads the MERGED layer (satellite-only retiredAt counts)",
+		mergeRetireStamps(undefined, satLayer, "r-sat").retiredAt === closed,
+	);
 }
 
 // ---------------------------------------------------------------------------
@@ -354,7 +387,7 @@ function workerView(w: ManifestWorker, statuses: AgentStatus[] | null = [DONE(w.
 	const dOff = await retirePass(tOff, snapshotFor([w], [DONE("r-off")]), { nowMs: NOW, retireEnabled: false, retireTtlMs: 900_000 });
 	check("R0.1 disabled → the pass is a no-op (no decisions)", dOff.length === 0);
 	check("R0.2 disabled → panes NEVER close, even on ACK/TTL", tOff.teardownCalls.length === 0);
-	check("R0.3 disabled → the manifest never gains stamps", manifestFromDisk(dir).workers[0]?.retiredAt === undefined, JSON.stringify(manifestFromDisk(dir).workers[0]));
+	check("R0.3 disabled → the manifest never gains stamps (no satellite layer either)", manifestFromDisk(dir).workers[0]?.retiredAt === undefined && stampsFromDisk(dir, "r-off").retiredAt === undefined, JSON.stringify(manifestFromDisk(dir).workers[0]));
 	check("R0.4 disabled → an existing release marker is left unconsumed (mailbox deletes it)", existsSync(releasePathFor(dir, "r-off")));
 
 	// An unstamped retirable worker under a DISABLED pass: no retirableSince either.
@@ -363,7 +396,7 @@ function workerView(w: ManifestWorker, statuses: AgentStatus[] | null = [DONE(w.
 	writeManifestOnDisk(dir2, [w2]);
 	writeValidReport(dir2, "r-off2");
 	await retirePass(tOff, snapshotFor([w2], [DONE("r-off2")]), { nowMs: NOW, retireEnabled: false, retireTtlMs: 900_000 });
-	check("R0.5 disabled → no retirableSince stamped (byte-identical to pre-§23)", manifestFromDisk(dir2).workers[0]?.retirableSince === undefined && tOff.teardownCalls.length === 0);
+	check("R0.5 disabled → no retirableSince stamped (byte-identical to pre-§23)", manifestFromDisk(dir2).workers[0]?.retirableSince === undefined && stampsFromDisk(dir2, "r-off2").retirableSince === undefined && tOff.teardownCalls.length === 0);
 
 	// The default resolution flows from the config resolver (hermetic: explicit).
 	const tDefault = fakeTransport();
@@ -403,6 +436,23 @@ function manifestFromDisk(dir: string): ExchangeManifest {
 	return JSON.parse(readFileSync(`${dir}/manifest.json`, "utf8")) as ExchangeManifest;
 }
 
+/**
+ * Effective retire stamps for a worker across ALL layers (manifest legacy
+ * fields + the watcher's satellite files) — migration stage 3 (audit steps
+ * 6/10): the watcher's stamps live in the satellite layer, readers merge.
+ */
+function stampsFromDisk(dir: string, name: string): { retirableSince?: string; retiredAt?: string } {
+	const w = manifestFromDisk(dir).workers.find((x) => x.name === name);
+	return mergeRetireStamps(
+		{
+			retirableSince: typeof w?.retirableSince === "string" && w.retirableSince.length > 0 ? w.retirableSince : undefined,
+			retiredAt: typeof w?.retiredAt === "string" && w.retiredAt.length > 0 ? w.retiredAt : undefined,
+		},
+		readWatchStampLayers(dir),
+		name,
+	);
+}
+
 function dOwnCheckLegacy(t: FakeTransport): boolean {
 	return t.teardownCalls[0]?.name === "r-legacy";
 }
@@ -416,8 +466,9 @@ function dOwnCheckLegacy(t: FakeTransport): boolean {
 
 	// Tick 1: retirable, no stamp yet → stamp the clock, NO close.
 	let decisions = await retirePass(t, snapshotFor([w], [DONE("r-pass")]), { nowMs: NOW, retireEnabled: true, retireTtlMs: 900_000 });
-	const stamped = manifestFromDisk(dir).workers.find((x) => x.name === "r-pass");
-	check("R5.1 first retirable tick → retirableSince stamped in the manifest", typeof stamped?.retirableSince === "string", JSON.stringify(stamped));
+	const stamped = stampsFromDisk(dir, "r-pass");
+	check("R5.1 first retirable tick → retirableSince stamped (satellite layer, merged read)", typeof stamped?.retirableSince === "string", JSON.stringify(stamped));
+	check("R5.1c the manifest layer itself stays untouched (watcher never writes it)", manifestFromDisk(dir).workers.find((x) => x.name === "r-pass")?.retirableSince === undefined);
 	check("R5.1b no teardown on the stamping tick", t.teardownCalls.length === 0 && decisions.length === 0);
 
 	// Tick 2 (TTL not elapsed): still waiting, stamp unchanged.
@@ -428,8 +479,8 @@ function dOwnCheckLegacy(t: FakeTransport): boolean {
 	decisions = await retirePass(t, snapshotFor([{ ...w, retirableSince: stamped!.retirableSince }], [DONE("r-pass")]), { nowMs: NOW + 900_001, retireEnabled: true, retireTtlMs: 900_000 });
 	check("R5.3 TTL elapsed → exactly one teardown with the recorded placement", t.teardownCalls.length === 1 && t.teardownCalls[0]?.name === "r-pass" && t.teardownCalls[0]?.placement.paneId === w.placement.paneId, JSON.stringify(t.teardownCalls));
 	check("R5.3b the decision reason is ttl", decisions[0]?.reason === "ttl");
-	const retired = manifestFromDisk(dir).workers.find((x) => x.name === "r-pass");
-	check("R5.4 retiredAt stamped in the manifest", typeof retired?.retiredAt === "string", JSON.stringify(retired));
+	const retired = stampsFromDisk(dir, "r-pass");
+	check("R5.4 retiredAt stamped (satellite layer, merged read)", typeof retired?.retiredAt === "string", JSON.stringify(retired));
 	check("R5.4b the manifest entry is NEVER deleted (history stays)", manifestFromDisk(dir).workers.length === 1 && manifestFromDisk(dir).workers[0]?.name === "r-pass");
 
 	// Tick 4: already retired → never re-closed.
@@ -437,15 +488,22 @@ function dOwnCheckLegacy(t: FakeTransport): boolean {
 	check("R5.5 retired worker is never re-closed (exactly once)", t.teardownCalls.length === 1);
 
 	// State broke after stamping → the clock clears (drained → re-asked).
+	// Migration stage 3: the stamp is seeded by the PASS ITSELF (satellite
+	// layer) — a manifest-layer legacy stamp cannot be cleared by the satellite
+	// writer (the watcher never writes the manifest), so the scenario stamps
+	// through the new path first.
 	const dirB = taskDir("pass-reset");
-	const wB = mkWorker(dirB, "r-reset", { retirableSince: new Date(NOW - 60_000).toISOString() });
+	const wB = mkWorker(dirB, "r-reset");
 	writeManifestOnDisk(dirB, [wB]);
 	writeValidReport(dirB, "r-reset");
-	await retirePass(t, snapshotFor([wB], [WORKING("r-reset")]), { nowMs: NOW, retireEnabled: true, retireTtlMs: 900_000 });
-	check("R5.6 conditions broke → the persisted clock clears (TTL restarts)", manifestFromDisk(dirB).workers[0]?.retirableSince === undefined, JSON.stringify(manifestFromDisk(dirB).workers[0]));
+	await retirePass(t, snapshotFor([wB], [DONE("r-reset")]), { nowMs: NOW, retireEnabled: true, retireTtlMs: 900_000 });
+	const clock1 = stampsFromDisk(dirB, "r-reset").retirableSince;
+	check("R5.6a first retirable tick → clock stamped in the satellite (merged read)", typeof clock1 === "string", JSON.stringify(stampsFromDisk(dirB, "r-reset")));
+	await retirePass(t, snapshotFor([{ ...wB, retirableSince: clock1 }], [WORKING("r-reset")]), { nowMs: NOW + 1000, retireEnabled: true, retireTtlMs: 900_000 });
+	check("R5.6 conditions broke → the persisted clock clears (TTL restarts)", stampsFromDisk(dirB, "r-reset").retirableSince === undefined, JSON.stringify(stampsFromDisk(dirB, "r-reset")));
 	writeFileSync(questionPathFor(dirB, "r-reset"), JSON.stringify({ worker: "r-reset", ts: "T", question: "again?" }));
-	await retirePass(t, snapshotFor([{ ...wB, retirableSince: new Date(NOW - 60_000).toISOString() }], [DONE("r-reset")]), { nowMs: NOW, retireEnabled: true, retireTtlMs: 900_000 });
-	check("R5.6b a pending question also clears the stamp (never retirable)", manifestFromDisk(dirB).workers[0]?.retirableSince === undefined);
+	await retirePass(t, snapshotFor([{ ...wB, retirableSince: clock1 }], [DONE("r-reset")]), { nowMs: NOW + 2000, retireEnabled: true, retireTtlMs: 900_000 });
+	check("R5.6b a pending question also clears the stamp (never retirable)", stampsFromDisk(dirB, "r-reset").retirableSince === undefined, JSON.stringify(stampsFromDisk(dirB, "r-reset")));
 
 	// Teardown throws → advisory: no retiredAt, retried next tick.
 	const dirC = taskDir("pass-throw");
@@ -456,10 +514,10 @@ function dOwnCheckLegacy(t: FakeTransport): boolean {
 	tFail.failTeardown = true;
 	const logs: string[] = [];
 	const dFail = await retirePass(tFail, snapshotFor([wC], [DONE("r-throw")]), { nowMs: NOW, retireEnabled: true, retireTtlMs: 900_000 }, (m) => logs.push(m));
-	check("R5.7 teardown throw → no decision, no retiredAt, advisory log", dFail.length === 0 && manifestFromDisk(dirC).workers[0]?.retiredAt === undefined && logs.some((l) => /retire pass error/.test(l)), JSON.stringify(logs));
+	check("R5.7 teardown throw → no decision, no retiredAt, advisory log", dFail.length === 0 && stampsFromDisk(dirC, "r-throw").retiredAt === undefined && logs.some((l) => /retire pass error/.test(l)), JSON.stringify(logs));
 	tFail.failTeardown = false;
 	await retirePass(tFail, snapshotFor([wC], [DONE("r-throw")]), { nowMs: NOW, retireEnabled: true, retireTtlMs: 900_000 });
-	check("R5.7b next tick retries and succeeds", manifestFromDisk(dirC).workers[0]?.retiredAt !== undefined);
+	check("R5.7b next tick retries and succeeds", stampsFromDisk(dirC, "r-throw").retiredAt !== undefined);
 
 	// Teardown reports the structured ALREADY-GONE signal → the pane is ALREADY
 	// gone (closed by herdr, the user, or another session): IDEMPOTENT close —
@@ -478,13 +536,13 @@ function dOwnCheckLegacy(t: FakeTransport): boolean {
 	check(
 		"R5.8 teardown result alreadyGone:true → idempotent retire: decision + retiredAt + no error log",
 		dGone.length === 1 &&
-			manifestFromDisk(dirGone).workers[0]?.retiredAt !== undefined &&
+			stampsFromDisk(dirGone, "r-gone").retiredAt !== undefined &&
 			!logsGone.some((l) => /retire pass error/.test(l)),
 		JSON.stringify(logsGone),
 	);
 	const goneAfter = await retirePass(
 		tGone,
-		snapshotFor([{ ...wGone, retiredAt: manifestFromDisk(dirGone).workers[0]?.retiredAt }], [DONE("r-gone")]),
+		snapshotFor([{ ...wGone, retiredAt: stampsFromDisk(dirGone, "r-gone").retiredAt }], [DONE("r-gone")]),
 		{ nowMs: NOW + 10_000, retireEnabled: true, retireTtlMs: 900_000 },
 	);
 	check("R5.8b already-retired → silent on every later tick (no spam)", goneAfter.length === 0 && tGone.teardownCalls.length === 0);
@@ -497,7 +555,7 @@ function dOwnCheckLegacy(t: FakeTransport): boolean {
 	writeFileSync(releasePathFor(dirD, "r-ack"), JSON.stringify({ from: "orchestrator", ts: "T" }));
 	const tAck = fakeTransport();
 	const dAck = await retirePass(tAck, snapshotFor([wD], [DONE("r-ack")]), { nowMs: NOW, retireEnabled: true, retireTtlMs: 900_000 });
-	check("R5.8 ACK → immediate close + retiredAt", tAck.teardownCalls.length === 1 && dAck[0]?.reason === "ack" && manifestFromDisk(dirD).workers[0]?.retiredAt !== undefined, JSON.stringify(dAck));
+	check("R5.8 ACK → immediate close + retiredAt", tAck.teardownCalls.length === 1 && dAck[0]?.reason === "ack" && stampsFromDisk(dirD, "r-ack").retiredAt !== undefined, JSON.stringify(dAck));
 	check(
 		"R5.8b the ACK marker is CONSUMED on close (a same-name retry must not inherit it)",
 		!existsSync(releasePathFor(dirD, "r-ack")),
@@ -522,7 +580,7 @@ function dOwnCheckLegacy(t: FakeTransport): boolean {
 	writeManifestOnDisk(probeDir, [pw]);
 	const tProbe = fakeTransport();
 	const dProbe = await retirePass(tProbe, snapshotFor([pw], [DONE("r-probe-pass")]), { nowMs: NOW, retireEnabled: true, retireTtlMs: 900_000 });
-	check("R5.9 settled probe → immediate close, no stamp", tProbe.teardownCalls.length === 1 && dProbe[0]?.reason === "probe" && manifestFromDisk(probeDir).workers[0]?.retiredAt !== undefined, JSON.stringify(dProbe));
+	check("R5.9 settled probe → immediate close, no stamp", tProbe.teardownCalls.length === 1 && dProbe[0]?.reason === "probe" && stampsFromDisk(probeDir, "r-probe-pass").retiredAt !== undefined, JSON.stringify(dProbe));
 
 	// Ownership: a declared owner other than THIS watcher never mutates.
 	const dirE = taskDir("pass-own");

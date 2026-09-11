@@ -50,7 +50,9 @@
  *   - retire-ack-consume: release-<name>.json is CONSUMED (deleted) on
  *     successful retire, else a leftover ACK would instantly close a fresh
  *     same-name retry on its first retirable tick; retirableSince/retiredAt
- *     persist in the manifest, never in memory only.
+ *     persist in the watcher's satellite file (watch-<key>.json in the task
+ *     dir; readers merge layers with the manifest's legacy fields) — never in
+ *     memory only.
  *   - F1 fleet usage (delegate_status): the aggregate line comes from
  *     aggregateTaskUsage WITHOUT persist — delegate_status stays read-only
  *     by contract; the usage snapshot cache is written only by writers
@@ -74,8 +76,9 @@
  * Migration stage 2 (audit step 6): the retire stamps (retirableSince /
  * retiredAt) are lifecycle REDUCER transitions (lifecycle.ts stamp
  * adapters) — an illegal stamp is refused and logged, never a silent
- * corrupt. The observer-stamp relocation to a satellite file (audit step
- * 6/10) is consciously DEFERRED — see the stage-2 report leftovers.
+ * corrupt. Migration stage 3 (audit steps 6/10, done): the observer stamps
+ * live in the watcher's satellite file (exchange.ts watch-stamp section) —
+ * the manifest is never written by the watcher; readers merge layers.
  * Error modes: none thrown to callers — observation degrades (unknown
  * statuses, empty event batches, logged-and-retried retire stamps); the E_*
  * error taxonomy lives in transport.ts.
@@ -104,13 +107,18 @@ import {
 	readLastProgress,
 	readNudgeFailedMarker,
 	readQuestion,
+	readWatchStampLayers,
 	releasePathFor,
 	manifestStore,
+	mergeRetireStamps,
 	TEARDOWN_LOG_NAME,
 	teardownLogLine,
+	updateWatchStamps,
 	validateReport,
 	validateReportAgainstSchema,
+	watcherKeyFor,
 	type ExchangeManifest,
+	type RetireStamps,
 } from "./exchange.ts";
 import {
 	buildWorkerView,
@@ -841,6 +849,11 @@ export function workersFromManifests(
 	);
 	const workers: WatchWorker[] = [];
 	for (const manifest of manifests) {
+		// Migration stage 3 (audit steps 6/10): the watcher's stamps (retirableSince
+		// / retiredAt) live in per-watcher satellite files — merge the manifest
+		// layer with every satellite layer here (readers merge layers; earliest
+		// stamp wins). One tolerant read per manifest dir per scan.
+		const stampLayers = readWatchStampLayers(manifest.dir);
 		for (const w of manifest.workers) {
 			if (typeof w?.name !== "string" || w.name.length === 0) continue;
 			const startedAtMs = Date.parse(w.startedAt ?? "");
@@ -886,10 +899,19 @@ export function workersFromManifests(
 					: {}),
 				...(isPlainRecord(w.placement) ? { placement: w.placement as unknown as Placement } : {}),
 				...(statusByName.has(w.name) ? { status: statusByName.get(w.name) } : {}),
-				...(typeof w.retirableSince === "string" && w.retirableSince.length > 0
-					? { retirableSince: w.retirableSince }
-					: {}),
-				...(typeof w.retiredAt === "string" && w.retiredAt.length > 0 ? { retiredAt: w.retiredAt } : {}),
+				// §23 retire stamps, MERGED across layers (manifest + satellite
+				// files): the effective values drive the retire decisions.
+				...((): RetireStamps => {
+					const eff = mergeRetireStamps(
+						{
+							retirableSince: typeof w.retirableSince === "string" && w.retirableSince.length > 0 ? w.retirableSince : undefined,
+							retiredAt: typeof w.retiredAt === "string" && w.retiredAt.length > 0 ? w.retiredAt : undefined,
+						},
+						stampLayers,
+						w.name,
+					);
+					return eff;
+				})(),
 			});
 		}
 	}
@@ -1245,7 +1267,9 @@ export function detectEvents(
 // (watch.retireTtlMs since retirable). EXCEPTIONS: invalid/missing report,
 // pending worker question — never close; probes close IMMEDIATELY once
 // settled (they never write reports). The clock (retirableSince) and the
-// close stamp (retiredAt) live in the manifest, never in memory only.
+// close stamp (retiredAt) persist in the watcher's satellite file (watch-
+// <key>.json in the task dir — single writer per file; readers merge the
+// manifest's legacy layer with all satellite layers), never in memory only.
 // ---------------------------------------------------------------------------
 
 export type RetireReason = "ack" | "ttl" | "probe";
@@ -1338,49 +1362,72 @@ export interface RetirePassOptions {
 	selfSessionFile?: string;
 }
 
-async function stampWorkerField(
-	w: WatchWorker,
-	patch: (x: ExchangeManifest["workers"][number]) => ExchangeManifest["workers"][number],
-): Promise<void> {
-	await manifestStore.update(w.dir, (m) => ({
-		...m,
-		workers: m.workers.map((x) => (x.name === w.name ? patch(x) : x)),
-	}));
-}
-
 /**
- * Migration stage 2 (audit step 6): every retire stamp is now a REDUCER
- * transition (lifecycle.ts owns the state machine) — the stamp helper
- * validates against the entry's derived state and, on refusal, keeps the
- * entry unchanged and logs (the pass is advisory; a refused stamp is
- * retried/advised next tick, never a silent corrupt).
+ * Migration stage 3 (audit steps 6/10): the watcher's stamps leave the
+ * manifest — they are written to THIS watcher's satellite file
+ * (watch-<watcherKey>.json in the task dir; key = FNV-1a of the watcher's
+ * session JSONL path). BUG_FIX_CONTEXT (lost-update class, audit §3.2 item 3):
+ * symptom — a watcher stamp (manifestStore.update) racing a concurrent
+ * owner-side manifest write (spawn append / collect stamp) could silently
+ * drop one side's fields (read-modify-write over the whole manifest from two
+ * processes). Why the old solution did not work: the manifest is the
+ * SPAWNING session's artifact, and every mounted watcher was a second writer.
+ * What was done: each watcher session owns exactly one satellite file per
+ * task dir (single writer per file — the lost update is impossible by
+ * construction); readers (workersFromManifests, fleet's buildWorkerView)
+ * merge the manifest layer with all satellite layers, earliest stamp wins.
+ * The lifecycle reducer still adjudicates legality: it is fed the manifest
+ * entry MERGED with the effective (snapshot) stamps — the same state the
+ * retire decisions were made from — and only the verdict's stamp fields are
+ * written to the satellite; the manifest entry is never modified here.
+ * A degraded self-id (no session file) falls back to the shared "anon"
+ * satellite — strictly no worse than the old shared-manifest race.
  * <p>
  * FUNCTION_CONTRACT:
  * Input:
- *   - w: the watched worker
+ *   - w: the watched worker (its retirableSince/retiredAt are the MERGED
+ *     effective stamps the snapshot computed)
  *   - stamp: the lifecycle stamp adapter (pure validate-then-patch)
  *   - what: short label for the refusal log line
- * Output: resolves when the (possibly refused) stamp attempt settled
+ *   - watcherKey: this watcher's satellite key
+ * Output: resolves when the (possibly refused/skipped) stamp attempt settled
  * Guarantees:
- *   - an illegal stamp NEVER corrupts the entry (refusal → entry unchanged)
- *   - refusals are logged, not thrown — the retire pass stays advisory
- * Raises: never (manifest write failures propagate as before)
+ *   - an illegal stamp NEVER corrupts anything (refusal → logged, no write)
+ *   - the manifest is NEVER written by the watcher
+ *   - a vanished worker (manifest read after the snapshot) → no-op
+ *   - idempotent: an unchanged satellite layer costs no IO
+ * Raises:
+ *   - propagates filesystem errors (the retire pass treats them as advisory
+ *     tick failures and retries next tick)
  */
-async function stampWorkerViaLifecycle(
+async function stampWorkerViaSatellite(
 	w: WatchWorker,
 	stamp: (x: ExchangeManifest["workers"][number]) =>
 		| { ok: true; entry: ExchangeManifest["workers"][number] }
 		| { ok: false; error: string },
 	what: string,
 	log: (m: string) => void,
+	watcherKey: string,
 ): Promise<void> {
-	await stampWorkerField(w, (x) => {
-		const r = stamp(x);
-		if (!r.ok) {
+	const manifest = manifestStore.read(w.dir);
+	const entry = manifest?.workers.find((x) => x.name === w.name);
+	if (!entry) return; // worker vanished between snapshot and stamp — nothing to stamp
+	// Validate against the MERGED state (manifest layer + satellite layers).
+	const synthetic = {
+		...entry,
+		...(w.retirableSince !== undefined ? { retirableSince: w.retirableSince } : {}),
+		...(w.retiredAt !== undefined ? { retiredAt: w.retiredAt } : {}),
+	} as ExchangeManifest["workers"][number];
+	const r = stamp(synthetic);
+	if (!r.ok) {
 		log(`retire stamp refused (${what}) for worker ${w.name}: ${r.error}`);
-		return x; // advisory — keep the entry, the pass re-evaluates next tick
-		}
-		return r.entry;
+		return; // advisory — the pass re-evaluates next tick
+	}
+	const pickStamp = (v: unknown): string | undefined =>
+		typeof v === "string" && v.length > 0 ? v : undefined;
+	await updateWatchStamps(w.dir, watcherKey, w.name, {
+		retirableSince: pickStamp(r.entry.retirableSince),
+		retiredAt: pickStamp(r.entry.retiredAt),
 	});
 }
 
@@ -1411,12 +1458,16 @@ export async function retirePass(
 	log: (m: string) => void = () => {},
 ): Promise<RetireDecision[]> {
 	// §23 MASTER SWITCH (default FALSE): with the feature off the pass is a
-	// NO-OP — panes never close, the manifest never gains retirableSince, and
+	// NO-OP — panes never close, no retirableSince is ever stamped (manifest
+	// or satellite), and
 	// behavior is byte-identical to pre-§23. evaluateRetire stays pure; the
 	// gate lives here (and in the mailbox release action).
 	const enabled = opts.retireEnabled ?? resolveWatchConfig().retire;
 	if (!enabled) return [];
 	const nowMs = opts.nowMs ?? Date.now();
+	// Satellite key for THIS watcher (undefined self-id → shared "anon" — the
+	// degraded corner keeps persisting stamps, just as the shared manifest did).
+	const watcherKey = watcherKeyFor(opts.selfSessionFile);
 	const decisions: RetireDecision[] = [];
 	for (const w of snap.workers) {
 		try {
@@ -1450,11 +1501,12 @@ export async function retirePass(
 			if (outcome.retirable && !outcome.decision && w.retirableSince === undefined) {
 				// Became retirable THIS tick — start the TTL clock, persisted.
 				// Migration stage 2: the stamp goes through the lifecycle reducer.
-				await stampWorkerViaLifecycle(
+				await stampWorkerViaSatellite(
 					w,
 					(x) => stampRetireClockStart(x, new Date(nowMs).toISOString()),
 					"retire clock start",
 					log,
+					watcherKey,
 				);
 				continue;
 			}
@@ -1463,7 +1515,7 @@ export async function retirePass(
 				// working…) — clear the clock; the next retirable transition
 				// restarts the TTL from that moment. Migration stage 2: reducer-
 				// validated (a clock clear is refused when no clock runs).
-				await stampWorkerViaLifecycle(w, (x) => stampRetireClockClear(x), "retire clock clear", log);
+				await stampWorkerViaSatellite(w, (x) => stampRetireClockClear(x), "retire clock clear", log, watcherKey);
 				continue;
 			}
 			if (outcome.decision) {
@@ -1492,11 +1544,12 @@ export async function retirePass(
 				// Migration stage 2: the retiredAt stamp is a reducer transition
 				// (closed, explicit watcher force) — an already-closed entry can
 				// never be re-stamped into rewritten history.
-				await stampWorkerViaLifecycle(
+				await stampWorkerViaSatellite(
 					w,
 					(x) => stampRetired(x, new Date(nowMs).toISOString()),
 					"retired close stamp",
 					log,
+					watcherKey,
 				);
 				// Archive at retire (diag-retire-msg Q3 item 1): a TTL close of an
 				// UNCOLLECTED report must not orphan it — without this, the report

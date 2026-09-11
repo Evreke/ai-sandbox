@@ -355,10 +355,9 @@ check(
 	"T4.4 the teardown command treats an already-gone close as a structured idempotent no-op success (migration stage 1: the alreadyGone field replaces the 'not found' message regex)",
 	/res\?\.alreadyGone[\s\S]{0,300}?already closed, no-op/.test(observeSrcAll),
 );
-check(
-	"T4.5 WorkerView carries the retired flag (manifest history marker)",
-	readFileSync(resolve(ROOT, "src/fleet.ts"), "utf8").includes("retired: typeof worker.retiredAt"),
-);
+// T4.5 (WorkerView retired flag) was a fleet.ts source-text pin — DELETED in
+// migration stage 3 (audit step 10): the flag's merged-layer semantics are
+// behaviorally covered in test/retire-check.ts (R3.11/R3.13).
 
 // ---------------------------------------------------------------------------
 // 6. F6 review-fix pin — same-name spawn clears a stale nudge-failed marker

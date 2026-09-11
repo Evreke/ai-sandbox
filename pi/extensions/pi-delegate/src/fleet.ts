@@ -61,7 +61,14 @@
 
 import { stat } from "node:fs/promises";
 import type { ExtensionCommandContext, ExtensionContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
-import { answerPathFor, exchangeRoot, manifestStore, questionPathFor } from "./exchange.ts";
+import {
+	answerPathFor,
+	exchangeRoot,
+	manifestStore,
+	mergeRetireStamps,
+	questionPathFor,
+	readWatchStampLayers,
+} from "./exchange.ts";
 import { taskSlug } from "./expaths.ts";
 import { taskSlug } from "./expaths.ts";
 import { contextPct, parseSessionUsage, resolveContextWindow, WATCH_DEFAULT_STALE_AFTER_MS } from "./usage.ts";
@@ -1647,6 +1654,10 @@ async function fileExists(path: string): Promise<boolean> {
  */
 export async function buildWorkerView(transport: Transport): Promise<WorkerView[]> {
 	const manifests = manifestStore.scan(transport.backendName());
+	// Migration stage 3 (audit steps 6/10): the watcher's stamps (retiredAt)
+	// live in per-watcher satellite files — merge the manifest layer with every
+	// satellite layer (readers merge layers, earliest stamp wins). One tolerant
+	// read per manifest dir per sweep.
 
 	let statuses: Awaited<ReturnType<Transport["listStatuses"]>> = [];
 	try {
@@ -1661,6 +1672,7 @@ export async function buildWorkerView(transport: Transport): Promise<WorkerView[
 	const views: WorkerView[] = [];
 	const seen = new Set<string>();
 	for (const manifest of manifests) {
+		const stampLayers = readWatchStampLayers(manifest.dir);
 		for (const worker of manifest.workers) {
 			const key = `${manifest.dir}#${worker.name}`;
 			if (seen.has(key)) continue;
@@ -1681,7 +1693,13 @@ export async function buildWorkerView(transport: Transport): Promise<WorkerView[
 				// EXTERNAL_DEPENDENCY: report file existence check on disk at
 				// worker.reportPath (under /tmp/exchange/<task>/).
 				reportExists: await fileExists(worker.reportPath),
-				retired: typeof worker.retiredAt === "string" && worker.retiredAt.length > 0,
+				retired: mergeRetireStamps(
+					{
+						retiredAt: typeof worker.retiredAt === "string" && worker.retiredAt.length > 0 ? worker.retiredAt : undefined,
+					},
+					stampLayers,
+					worker.name,
+				).retiredAt !== undefined,
 				startedAt: worker.startedAt,
 				elapsedMs: Number.isFinite(startedMs) ? Math.max(0, Date.now() - startedMs) : 0,
 			});

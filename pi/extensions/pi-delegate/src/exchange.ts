@@ -228,14 +228,22 @@ export interface ManifestWorker {
 	 *  inherits no wake-ups. Written only by spawn; the watcher is a reader. */
 	orchestratorSessionPath?: string;
 	/** §23 retire: ISO 8601 — set by the WATCHER the first tick all three
-	 *  retirable conditions hold. Persisted (never memory-only) so a watcher
-	 *  restart cannot lose the TTL clock; cleared again when the worker leaves
-	 *  the retirable state (the clock restarts on the next transition). */
+	 *  retirable conditions hold. Migration stage 3 (audit steps 6/10): the
+	 *  watcher stamps live in ITS satellite file (watch-<key>.json in the task
+	 *  dir) — this manifest field is the LEGACY layer, still read (readers
+	 *  merge layers; earliest stamp wins) and still written only in the
+	 *  degraded-self-id "anon" corner. Persisted (never memory-only) so a
+	 *  watcher restart cannot lose the TTL clock; cleared again when the
+	 *  worker leaves the retirable state (the clock restarts on the next
+	 *  transition). */
 	retirableSince?: string;
 	/** §23 retire: ISO 8601 — set by the WATCHER after a successful close
-	 *  (ACK or TTL, or immediate for probes). The entry itself is NEVER
-	 *  deleted — history stays — and a retired entry silences every watcher
-	 *  event kind (the close is the expected cause of any herdr absence). */
+	 *  (ACK or TTL, or immediate for probes). Same satellite relocation as
+	 *  retirableSince: the watcher's close stamp lives in its satellite file;
+	 *  this field is the legacy layer, merged by readers. The entry itself is
+	 *  NEVER deleted — history stays — and a retired entry silences every
+	 *  watcher event kind (the close is the expected cause of any herdr
+	 *  absence). */
 	retiredAt?: string;
 	/** Migration stage 2 (audit step 6) — the ONLY manifest format extension:
 	 *  identity of THIS embodiment of the worker name (run ordinal + opaque
@@ -1150,6 +1158,173 @@ export function writeAnswer(path: string, answer: string): Promise<void> {
 	return withFileMutationQueue(path, async () => {
 		mkdirSync(dirname(path), { recursive: true });
 		atomicWriteFileSync(path, JSON.stringify(envelope, null, "\t") + "\n");
+	});
+}
+
+// ---------------------------------------------------------------------------
+// Observer stamps — the watcher's satellite file (migration stage 3, audit
+// steps 6/10). The stamps the WATCHER writes (retirableSince — the persisted
+// retire-TTL clock; retiredAt — the successful close marker) leave the
+// manifest: the manifest stays the SPAWNING session's artifact (single writer
+// per file — the lost-update hazard between a watcher stamp and a concurrent
+// owner-side manifest write becomes impossible BY CONSTRUCTION). Each watcher
+// session owns exactly one satellite file per task dir (watch-<watcherKey>.json,
+// watcherKey = FNV-1a of the watcher's session JSONL path; "anon" for a
+// degraded self-id — shared, but strictly no worse than the old shared
+// manifest). Readers MERGE the layers: manifest fields first, then every
+// satellite file in the dir; the earliest stamp per field wins (the earliest
+// clock start / the first close is the truth). The manifest FORMAT for
+// external consumers is unchanged — the satellite is the agreed exception.
+// ---------------------------------------------------------------------------
+
+/** The retire stamps as they live in a layer (manifest fields or satellite
+ *  entries). Shape mirrors the manifest worker fields. */
+export interface RetireStamps {
+	retirableSince?: string;
+	retiredAt?: string;
+}
+
+/** One satellite layer: which watcher wrote it and its per-worker stamps. */
+export interface WatchStampLayer {
+	watcherKey: string;
+	stamps: Record<string, RetireStamps>;
+}
+
+/** FNV-1a 32-bit over a UTF-8 string, hex-encoded (8 chars) — the watcher
+ *  satellite key: stable per session, unique across sessions, readable in a
+ *  dir listing without leaking the session path. */
+export function watcherKeyFor(sessionFile: string | undefined): string {
+	if (!sessionFile) return "anon";
+	let hash = 0x811c9dc5;
+	for (let i = 0; i < sessionFile.length; i++) {
+		hash ^= sessionFile.charCodeAt(i);
+		hash = Math.imul(hash, 0x01000193) >>> 0;
+	}
+	return hash.toString(16).padStart(8, "0");
+}
+
+/** Conventional satellite path for one watcher session's stamps in a task
+ *  dir. */
+export function watchStampsPathFor(dir: string, watcherKey: string): string {
+	return join(dir, `watch-${watcherKey}.json`);
+}
+
+/**
+ * Read ALL satellite stamp layers in a task dir, tolerantly and
+ * deterministically ordered (sorted by file name).
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: dir — the task's exchange dir
+ * Output: every watch-*.json layer as {watcherKey, stamps}; worker names map
+ *   to {retirableSince?, retiredAt?} with only non-empty string stamps kept
+ * Guarantees:
+ *   - tolerant: no dir, unreadable/corrupt/partial layer files are skipped
+ *     (a torn read costs at most a re-fire, never a throw)
+ * Raises: never
+ * EXTERNAL_DEPENDENCY: filesystem — watch-*.json files in the task dir.
+ */
+export function readWatchStampLayers(dir: string): WatchStampLayer[] {
+	let entries: string[];
+	try {
+		entries = readdirSync(dir).filter((f) => /^watch-([0-9a-f]{8}|anon)\.json$/.test(f)).sort();
+	} catch {
+		return []; // no dir / unreadable → no satellite layers
+	}
+	const layers: WatchStampLayer[] = [];
+	for (const f of entries) {
+		const watcherKey = f.slice("watch-".length, -".json".length);
+		try {
+			const parsed: unknown = JSON.parse(readFileSync(join(dir, f), "utf8"));
+			if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) continue;
+			const stamps: Record<string, RetireStamps> = {};
+			for (const [name, v] of Object.entries(parsed as Record<string, unknown>)) {
+				if (typeof v !== "object" || v === null) continue;
+				const o = v as Record<string, unknown>;
+				const s: RetireStamps = {};
+				if (typeof o.retirableSince === "string" && o.retirableSince.length > 0) s.retirableSince = o.retirableSince;
+				if (typeof o.retiredAt === "string" && o.retiredAt.length > 0) s.retiredAt = o.retiredAt;
+				if (s.retirableSince !== undefined || s.retiredAt !== undefined) stamps[name] = s;
+			}
+			layers.push({ watcherKey, stamps });
+		} catch {
+			// corrupt/partial layer → skip (advisory read, never throw)
+		}
+	}
+	return layers;
+}
+
+/**
+ * Merge the manifest layer with satellite layers into one effective stamp
+ * pair (pure — the readers' side of the layer merge).
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input:
+ *   - base: the manifest worker entry's own stamps (may be absent)
+ *   - layers: satellite layers read by readWatchStampLayers
+ *   - workerName: the worker to merge for
+ * Output: the effective {retirableSince?, retiredAt?}
+ * Guarantees:
+ *   - earliest non-empty stamp per field wins across ALL layers (the earliest
+ *     clock start / the first close is the truth; deterministic regardless of
+ *     file order)
+ *   - pure; never throws
+ * Raises: never
+ */
+export function mergeRetireStamps(
+	base: RetireStamps | undefined,
+	layers: WatchStampLayer[],
+	workerName: string,
+): RetireStamps {
+	const out: RetireStamps = {};
+	for (const cand of [base, ...layers.map((l) => l.stamps[workerName])]) {
+		if (!cand) continue;
+		if (cand.retirableSince !== undefined && (out.retirableSince === undefined || cand.retirableSince < out.retirableSince)) {
+			out.retirableSince = cand.retirableSince;
+		}
+		if (cand.retiredAt !== undefined && (out.retiredAt === undefined || cand.retiredAt < out.retiredAt)) {
+			out.retiredAt = cand.retiredAt;
+		}
+	}
+	return out;
+}
+
+/**
+ * Update THIS watcher's satellite layer for one worker (the writer's side).
+ * The file is owned exclusively by this watcher session — no cross-process
+ * lost update is possible; the write is atomic (tmp+rename) and skipped
+ * entirely when it would not change anything.
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input:
+ *   - dir: the task's exchange dir
+ *   - watcherKey: this watcher's satellite key (watcherKeyFor(selfSessionFile))
+ *   - workerName: the worker whose stamps change
+ *   - stamps: the FULL new stamp pair for the worker (undefined field = no
+ *     such stamp in this layer — a clear is expressed by omitting the field)
+ * Output: resolves when the (possibly skipped) write settled
+ * Guarantees:
+ *   - idempotent: identical layer content → no write at all (a repeated
+ *     clear/refresh costs no IO)
+ *   - creates the dir on demand; atomic write
+ * Raises:
+ *   - propagates filesystem errors (the retire pass treats them as advisory
+ *     tick failures and retries next tick)
+ */
+export async function updateWatchStamps(
+	dir: string,
+	watcherKey: string,
+	workerName: string,
+	stamps: RetireStamps,
+): Promise<void> {
+	const path = watchStampsPathFor(dir, watcherKey);
+	await withFileMutationQueue(path, async () => {
+		mkdirSync(dir, { recursive: true });
+		const current = readWatchStampLayers(dir).find((l) => l.watcherKey === watcherKey)?.stamps ?? {};
+		const next: Record<string, RetireStamps> = { ...current };
+		if (stamps.retirableSince === undefined && stamps.retiredAt === undefined) delete next[workerName];
+		else next[workerName] = stamps;
+		if (JSON.stringify(current) === JSON.stringify(next)) return; // idempotent — no write
+		atomicWriteFileSync(path, JSON.stringify(next, null, "\t") + "\n");
 	});
 }
 
