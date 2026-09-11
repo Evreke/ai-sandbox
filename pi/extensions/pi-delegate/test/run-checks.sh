@@ -17,7 +17,7 @@ cd "$(dirname "$0")/.." || exit 2
 OUT="${1:-/tmp/checks-results.txt}"
 : > "$OUT"
 pass=0; fail=0; envfail=0
-run_once() { timeout 120 bun run "$1" 2>&1; }
+run_once() { timeout "${CHECK_TIMEOUT:-30}" bun run "$1" 2>&1; }
 for t in test/*.ts; do
   case "$t" in *driver*|*fixture*|*goldens*) continue ;; esac
   out=$(run_once "$t"); rc=$?
