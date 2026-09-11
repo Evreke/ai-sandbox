@@ -4,8 +4,11 @@
  * Run with: bun test/static-check.ts   (from repo root)
  *
  * Checks:
- *   1. Dependency rule: no module under src/ may import the transport
- *      IMPLEMENTATION (transport/herdr) — only index.ts binds it.
+ *   1. Package boundary (migration stage 3, audit step 9): the herdr adapter
+ *      is published ONLY as the separate export subpath "./herdr" — module
+ *      resolution, not a source-text regex, enforces the import rule (the
+ *      old T1.1/T1.1c text pins are deleted; only index.ts binds the
+ *      adapter, pinned positively by T1.1b).
  *   2. src/observe.ts (delegate_status tool section) contains no mutating herdr calls.
  *   3. WORKER_NAME_RE rejects "Bad-Name", "-x", 33-char names; accepts valid ones.
  *   4. validateReport() error strings for 6 invalid shapes + 1 valid report.
@@ -17,7 +20,7 @@
  * Exit 0 only if all checks pass.
  */
 
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import {
 	WORKER_NAME_RE,
@@ -40,60 +43,29 @@ function check(name: string, ok: boolean, detail = "") {
 }
 
 // ---------------------------------------------------------------------------
-// 1. Dependency rule
+// 1. Package boundary (migration stage 3, audit step 9)
 // ---------------------------------------------------------------------------
 
-function listTsFiles(dir: string): string[] {
-	const out: string[] = [];
-	for (const e of readdirSync(dir, { withFileTypes: true })) {
-		const p = resolve(dir, e.name);
-		if (e.isDirectory()) out.push(...listTsFiles(p));
-		else if (e.name.endsWith(".ts")) out.push(p);
-	}
-	return out;
+// The old T1.1/T1.1c TEXT pins (regex scans for herdr imports across src/)
+// are GONE: the rule "the adapter is reachable only through its export
+// subpath, bound once by the composition root" is now enforced by module
+// RESOLUTION — package.json's exports map exposes "." → index.ts and the
+// adapter at the separate subpath "./herdr", nothing else. The check below
+// pins the boundary itself (fail-closed: a removed/renamed subpath or a
+// re-widened exports map fails here).
+interface PackageExports {
+	exports?: Record<string, string>;
 }
-
-const restricted = listTsFiles(resolve(ROOT, "src"));
-// Match actual import statements (from "...transport/herdr(.ts)" / "...herdr/host(.ts)"),
-// not doc-comment mentions. Path updated for the workerhost seam split (PoC):
-// the herdr implementation moved to src/herdr/host.ts; the legacy
-// transport/herdr path stays in the matcher so a revert cannot pass vacuously.
-// NOTE: trailing [^"']* before the closing quote — extensioned imports
-// ("./herdr/host.ts") must match too. The pre-split regex required the path to
-// END at transport/herdr, so it matched NOTHING on extensioned imports and
-// passed vacuously (found by this PoC's efficacy proof — the positive pin
-// T1.1c below was what caught the offender).
-const IMPORT_HERDR_RE = /(import[\s\S]*?from\s*["']|\bimport\s*["'])([^"']*(transport\/herdr|herdr\/host))[^"']*["']/;
-const offenders = restricted
-	.filter((f) => IMPORT_HERDR_RE.test(readFileSync(f, "utf8")));
+const pkg = JSON.parse(readFileSync(resolve(ROOT, "package.json"), "utf8")) as PackageExports;
 check(
-	"T1.1 dependency rule: no src/ module ever imports the herdr implementation (src/herdr/host.ts; only index.ts binds it)",
-	offenders.length === 0,
-	offenders.join(", "),
+	"T1.1e package boundary: exports map exposes only '.' (index.ts) and './herdr' (the adapter subpath) — the import rule is module-resolution, not text",
+	pkg.exports?.["."] === "./index.ts" && pkg.exports?.["./herdr"] === "./src/herdr/host.ts",
+	JSON.stringify(pkg.exports ?? null),
 );
 
-// Positive pin (workerhost split PoC, design §6 risk 1): the herdr adapter file
-// EXISTS and is imported ONLY by index.ts (the composition root / binding
-// point, workerhost migration steps 5–6) — a tool module importing the
-// adapter directly (or the file going missing) fails here. Direction note:
-// this pin is fail-CLOSED on the file (existence is asserted, unlike the
-// vacuous-pass risk of a no-offender regex after a rename).
-const herdrHostPath = resolve(ROOT, "src/herdr/host.ts");
-let herdrHostExists = false;
-try {
-	statSync(herdrHostPath);
-	herdrHostExists = true;
-} catch {
-	herdrHostExists = false;
-}
-const herdrHostImporters = [...restricted, resolve(ROOT, "index.ts")]
-	.filter((f) => f !== herdrHostPath)
-	.filter((f) => /from\s*["'][^"']*herdr\/host\.ts["']/.test(readFileSync(f, "utf8")) || /import\s*["'][^"']*herdr\/host\.ts["']/.test(readFileSync(f, "utf8")));
-check(
-	"T1.1c src/herdr/host.ts exists and is imported ONLY by index.ts (positive pin — the composition root is the sole adapter importer)",
-	herdrHostExists && herdrHostImporters.every((f) => f === resolve(ROOT, "index.ts")),
-	`exists=${herdrHostExists} importers=${herdrHostImporters.join(", ")}`,
-);
+// Positive pin (composition root, workerhost migration steps 5–6): index.ts
+// DOES bind the adapter — kept as a text pin because it asserts the POSITIVE
+// (the binding exists), which the exports map alone cannot prove.
 
 const indexImportsHerdr = readFileSync(resolve(ROOT, "index.ts"), "utf8").includes(
 	"./src/herdr/host.ts",
@@ -115,6 +87,16 @@ check(
 // ---------------------------------------------------------------------------
 // 1.5 No hardcoded worker tier in src/ (v1.9.2)
 // ---------------------------------------------------------------------------
+
+function listTsFiles(dir: string): string[] {
+	const out: string[] = [];
+	for (const e of readdirSync(dir, { withFileTypes: true })) {
+		const p = resolve(dir, e.name);
+		if (e.isDirectory()) out.push(...listTsFiles(p));
+		else if (e.name.endsWith(".ts")) out.push(p);
+	}
+	return out;
+}
 
 const tierOffenders = listTsFiles(resolve(ROOT, "src")).filter((f) =>
 	readFileSync(f, "utf8").includes("llm-platform-alpha"),

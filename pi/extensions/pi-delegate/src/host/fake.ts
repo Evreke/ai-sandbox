@@ -94,6 +94,12 @@ export class FakeWorkerHost implements Transport {
 		return { worktrees: false, authority: "root" };
 	}
 
+	/** Migration stage 3 (audit step 9): must match the `backend: "fake"`
+	 *  spelling place() writes into fake placements. */
+	backendName(): string {
+		return "fake";
+	}
+
 	async place(req: PlacementReq): Promise<Placement> {
 		if (req.mode === "worktree") {
 			// Authority model (seam contract): worktrees:false → place() rejects.

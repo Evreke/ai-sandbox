@@ -103,6 +103,7 @@ const transport = (opts: { teardownShouldThrow: boolean; startShouldThrow: boole
 			return { alreadyGone: false }; // structured seam result (migration stage 1)
 		},
 		capabilities: () => ({ worktrees: true, authority: "root" }),
+		backendName: () => "herdr",
 	}) as Transport;
 
 // --- drive the real tool -----------------------------------------------------

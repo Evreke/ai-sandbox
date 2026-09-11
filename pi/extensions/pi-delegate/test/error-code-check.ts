@@ -206,6 +206,7 @@ try {
 		listStatuses: async () => [],
 		teardown: async () => ({ alreadyGone: false }),
 		capabilities: () => ({ worktrees: true, authority: "root" }),
+		backendName: () => "herdr",
 	};
 
 	let captured: { execute: (...a: unknown[]) => Promise<{ details: Record<string, unknown> }> };

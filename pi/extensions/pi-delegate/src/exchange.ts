@@ -475,8 +475,10 @@ export function updateManifest(
  *   - append(dir, entry) — add one worker entry (the append-before-start
  *     write); implemented as an update fold on both implementations
  *   - scan() — every readable manifest under the store's root, with foreign-
- *     backend worker entries filtered (the ACTIVE_HOST rule — behavior
- *     unchanged from scanAllManifests)
+ *     backend worker entries filtered (the foreign-backend rule — behavior
+ *     unchanged from scanAllManifests; migration stage 3, audit step 9: the
+ *     active backend comes in as a scan PARAMETER — callers read it from the
+ *     bound transport's backendName(); the old ACTIVE_HOST constant is gone)
  * Two implementations ship: createFileManifestStore (the production
  * behavior, byte-identical to the pre-port read/update/scan functions) and
  * createMemoryManifestStore (in-memory Map — makes the previously
@@ -490,7 +492,7 @@ export interface ManifestStore {
 		mutate: (m: ExchangeManifest) => ExchangeManifest,
 	): Promise<ExchangeManifest>;
 	append(dir: string, entry: ManifestWorker): Promise<ExchangeManifest>;
-	scan(): ExchangeManifest[];
+	scan(backendName: string): ExchangeManifest[];
 }
 
 /**
@@ -514,7 +516,7 @@ export function createFileManifestStore(): ManifestStore {
 		update: (dir, mutate) => updateManifest(dir, mutate),
 		append: (dir, entry) =>
 			updateManifest(dir, (m) => ({ ...m, workers: [...m.workers, entry] })),
-		scan: () => scanAllManifests(),
+		scan: (backendName) => scanAllManifests(backendName),
 	};
 }
 
@@ -536,7 +538,8 @@ export function createFileManifestStore(): ManifestStore {
  *     store's internal state through a read result
  *   - a fresh dir gets the same base the file impl would write
  *     ({ task: basename, dir: resolved, workers: [] })
- *   - scan() applies the same foreign-backend filter as the file impl
+ *   - scan() applies the same foreign-backend filter as the file impl (the
+ *     active backend comes in as the scan parameter — audit step 9)
  * Raises: never (no fs access)
  */
 export function createMemoryManifestStore(): ManifestStore {
@@ -557,8 +560,8 @@ export function createMemoryManifestStore(): ManifestStore {
 		append(dir, entry) {
 			return store.update(dir, (m) => ({ ...m, workers: [...m.workers, entry] }));
 		},
-		scan() {
-			return [...manifests.values()].map(filterForeignBackendWorkers);
+		scan(backendName) {
+			return [...manifests.values()].map((m) => filterForeignBackendWorkers(m, backendName));
 		},
 	};
 	return store;
@@ -878,18 +881,23 @@ function baseValidate(
  * Scan all /tmp/exchange/<task>/manifest.json — the delegate_status data source.
  * <p>
  * FUNCTION_CONTRACT:
- * Input: none
- * Output: every readable manifest found under /tmp/exchange (one per task dir)
+ * Input: activeBackend — the caller's backend name (the transport seam's
+ *   backendName(), bound at the composition root — migration stage 3, audit
+ *   step 9; the old module-local ACTIVE_HOST constant is gone)
+ * Output: every readable manifest found under /tmp/exchange (one per task
+ *   dir), with foreign-backend worker entries filtered out
  * Guarantees:
  *   - tolerant: a missing exchange root or unreadable dir → empty array;
  *     corrupt manifests are skipped individually
+ *   - legacy entries (no/blank placement.backend) fail open (kept); a
+ *     non-empty backend different from activeBackend is dropped
  *   - order follows directory listing order (not sorted)
  * Raises: never
  * EXTERNAL_DEPENDENCY: the exchange root (exchangeRoot() — /tmp/exchange by
  *   default, $PI_DELEGATE_EXCHANGE_ROOT override for sandboxed tests;
  *   must exist or the scan returns nothing).
  */
-export function scanAllManifests(): ExchangeManifest[] {
+export function scanAllManifests(activeBackend: string): ExchangeManifest[] {
 	const root = exchangeRoot();
 	let entries: string[];
 	try {
@@ -903,37 +911,37 @@ export function scanAllManifests(): ExchangeManifest[] {
 	for (const task of entries) {
 		const m = readManifest(resolve(root, task));
 		if (!m) continue;
-		manifests.push(filterForeignBackendWorkers(m));
+		manifests.push(filterForeignBackendWorkers(m, activeBackend));
 	}
 	return manifests;
 }
 
-/** The backend this build binds (index.ts createConfiguredHost — "herdr" is
- *  the only production adapter). Legacy manifests (no backend) fail OPEN:
- *  every pre-workerhost entry is herdr by definition. */
-const ACTIVE_HOST = "herdr";
-
 /**
- * Drop manifest worker entries whose placement declares a backend this
- * session's host cannot see (field lesson 2026-09-10, workerhost migration
- * step 4: a test fixture with backend:"fake" in the LIVE exchange root woke
- * a bystander orchestrator — the legacy scan was fail-open on ANY entry).
- * Legacy entries (no/blank backend) are kept unchanged. Tolerant: a garbage
- * placement reads as legacy (no backend) → kept, never throws.
+ * Drop manifest worker entries whose placement declares a backend the caller's
+ * host cannot see (field lesson 2026-09-10, workerhost migration step 4: a
+ * test fixture with backend:"fake" in the LIVE exchange root woke a bystander
+ * orchestrator — the legacy scan was fail-open on ANY entry). Migration stage
+ * 3 (audit step 9): the active backend comes in as a PARAMETER — the caller
+ * reads it from the bound transport's backendName() (composition root,
+ * index.ts); the old module-local ACTIVE_HOST constant is gone, so no module
+ * can scan with an implicit backend. Legacy entries (no/blank backend) are
+ * kept unchanged. Tolerant: a garbage placement reads as legacy (no backend)
+ * → kept, never throws.
  * <p>
  * FUNCTION_CONTRACT:
- * Input: m — a parsed manifest
+ * Input: m — a parsed manifest; activeBackend — the caller's backend name
+ *   (the transport seam's backendName() spelling)
  * Output: the same manifest with foreign-backend worker entries removed
  * Guarantees:
- *   - backend === ACTIVE_HOST or absent → entry kept (legacy fail-open)
+ *   - backend === activeBackend or absent → entry kept (legacy fail-open)
  *   - a different non-empty backend → entry skipped (never wakes this host)
  *   - the manifest object is not mutated in place when nothing is dropped
  * Raises: never
  */
-function filterForeignBackendWorkers(m: ExchangeManifest): ExchangeManifest {
+function filterForeignBackendWorkers(m: ExchangeManifest, activeBackend: string): ExchangeManifest {
 	const kept = m.workers.filter((w) => {
 		const backend = (w as { placement?: { backend?: unknown } } | null)?.placement?.backend;
-		return !(typeof backend === "string" && backend.length > 0 && backend !== ACTIVE_HOST);
+		return !(typeof backend === "string" && backend.length > 0 && backend !== activeBackend);
 	});
 	return kept.length === m.workers.length ? m : { ...m, workers: kept };
 }

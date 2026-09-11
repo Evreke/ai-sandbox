@@ -236,6 +236,12 @@ export interface TransportCapabilities {
  * herdr op in flight at a time) — see DESIGN.md §9.
  */
 export interface Transport {
+	/** The backend name this adapter serves — the exact `placement.backend`
+	 *  spelling its place() writes into manifests. Migration stage 3 (audit
+	 *  step 9): the ONE source of the active-backend name — the manifest-scan
+	 *  foreign-backend filter reads it from here (composition-root bound via
+	 *  index.ts), the old exchange.ts ACTIVE_HOST constant is gone. */
+	backendName(): string;
 	place(req: PlacementReq): Promise<Placement>;
 	startAgent(req: StartReq): Promise<StartResult>;
 	/** Submit a prompt. Returns after submission is accepted, without waiting

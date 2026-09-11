@@ -148,14 +148,16 @@ import {
 
 /** Budget governor display data (DESIGN.md §14), read-only: name → session
  *  JSONL path and recorded effective budget from every manifest, plus the
- *  resolved default budget for workers without a recorded one. */
-function usageSource(): {
+ *  resolved default budget for workers without a recorded one. Migration
+ *  stage 3 (audit step 9): the scan takes the active backend name from the
+ *  bound transport (composition root) — no implicit global. */
+function usageSource(transport: Transport): {
 	sessionPathByName: Map<string, string>;
 	modelByName: Map<string, string>;
 } {
 	const sessionPathByName = new Map<string, string>();
 	const modelByName = new Map<string, string>();
-	for (const manifest of manifestStore.scan()) {
+	for (const manifest of manifestStore.scan(transport.backendName())) {
 		for (const w of manifest.workers) {
 			if (w.sessionPath) sessionPathByName.set(w.name, w.sessionPath);
 			if (typeof w.model === "string") modelByName.set(w.name, w.model);
@@ -305,7 +307,7 @@ export function registerStatusTool(pi: import("@earendil-works/pi-coding-agent")
 		},
 		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
 			const views = await buildWorkerView(transport);
-			const { sessionPathByName, modelByName } = usageSource();
+			const { sessionPathByName, modelByName } = usageSource(transport);
 			const selected = params.name
 				? views.filter((v) => v.name === params.name)
 				: views;
@@ -912,7 +914,7 @@ export async function collectSnapshot(
 	self: SelfIdentity = {},
 	nowMs: number = Date.now(),
 ): Promise<WatchSnapshot> {
-	return workersFromManifests(manifestStore.scan(), await readStatusesTolerant(transport), self, nowMs);
+	return workersFromManifests(manifestStore.scan(transport.backendName()), await readStatusesTolerant(transport), self, nowMs);
 }
 
 // ---------------------------------------------------------------------------
@@ -1967,7 +1969,11 @@ export function registerCommands(pi: import("@earendil-works/pi-coding-agent").E
 					const advice = de?.guidance
 						? ` — ${de.guidance}`
 						// No structured guidance: fall back to the generic recovery recipe.
-						: " — reconcile via /delegate-teardown; for a not_linked_worktree answer, recover via the host workspace listing/close.";
+						// Migration stage 3 (audit step 9): no herdr token in the hint —
+						// the wt-directory refusal itself is the structured E_PLACE signal
+						// raised at the segment boundary (expaths.isDirUnder, Windows fix);
+						// backend-specific CLI tokens never reach the model-facing text.
+						: " — reconcile via /delegate-teardown; for a worktree-link failure, recover via the host workspace listing/close.";
 					outcomes.push(`✗ ${v.name}: ${errText(err)}${advice}`);
 				}
 			}

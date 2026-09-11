@@ -4,8 +4,10 @@
  * Run with: bun test/watcher-check.ts   (from the extension dir)
  *
  * Checks:
- *   W1  Dependency rule: src/observe.ts must NOT import the transport
- *       implementation (transport/herdr); only index.ts binds it;
+ *   W1  Package boundary (migration stage 3, audit step 9): the herdr adapter
+ *       is published ONLY as the separate export subpath "./herdr" — module
+ *       resolution enforces the import rule (the old W1.1/W1.1c text pins are
+ *       gone; the boundary itself is pinned by static-check T1.1e);
  *       index.ts mounts the watcher (session_start) and stops it
  *       (session_shutdown) WITHOUT a ctx.hasUI guard; delegate resolves the
  *       settle gate from watch config and its E_TIMEOUT text carries the
@@ -52,7 +54,7 @@
  * Exit 0 only if all checks pass.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
@@ -102,22 +104,16 @@ const NOW = Date.parse("2026-09-06T12:00:00.000Z");
 // W1. Dependency rule + lifecycle wiring + delegate texts (static)
 // ---------------------------------------------------------------------------
 
-// Same matcher as static-check T1.1: real import statements, not doc comments.
-// Path updated for the workerhost seam split (PoC): the herdr implementation
-// moved to src/herdr/host.ts; the legacy transport/herdr path stays matched so
-// a revert cannot pass vacuously.
-const IMPORT_HERDR_RE = /(import[\s\S]*?from\s*["']|\bimport\s*["'])([^"']*(transport\/herdr|herdr\/host))[^"']*["']/; // trailing [^"']*: extensioned imports must match (see static-check T1.1 note)
+// Migration stage 3 (audit step 9): the old W1.1/W1.1c TEXT pins (regex scans
+// for herdr imports) are GONE — the import rule is enforced by module
+// resolution now (package.json exports map: "." → index.ts, the adapter at
+// the separate "./herdr" subpath); the boundary itself is pinned by
+// static-check T1.1e. Kept: W1.1b (observe.ts takes the seam from host.ts).
 const watchSrc = readFileSync(resolve(ROOT, "src/observe.ts"), "utf8");
-check("W1.1 observe.ts (watcher) does not import the herdr implementation (src/herdr/host.ts; dependency rule)", !IMPORT_HERDR_RE.test(watchSrc));
 check(
 	"W1.1b observe.ts takes the Transport seam from host.ts",
 	/from\s+["']\.\/host\.ts["']/.test(watchSrc),
 );
-const toolOffenders = readdirSync(resolve(ROOT, "src"), { withFileTypes: true })
-	.filter((e) => e.isFile() && e.name.endsWith(".ts"))
-	.map((e) => resolve(ROOT, "src", e.name))
-	.filter((f) => IMPORT_HERDR_RE.test(readFileSync(f, "utf8")));
-check("W1.1c no src/ module imports the herdr implementation (src/herdr/host.ts; only index.ts binds it)", toolOffenders.length === 0, toolOffenders.join(", "));
 
 const indexSrc = readFileSync(resolve(ROOT, "index.ts"), "utf8");
 check(
@@ -168,7 +164,9 @@ function watchConfigInHome(configJson: string): { intervalMs: number; settleGate
 	mkdirSync(configDir, { recursive: true });
 	if (configJson !== "") writeFileSync(join(configDir, "pi-delegate.config.json"), configJson);
 	const src = `import {resolveWatchConfig} from ${JSON.stringify(WATCH_MOD)}; console.log(JSON.stringify(resolveWatchConfig()))`;
-	const res = spawnSync("bun", ["-e", src], { env: { ...process.env, HOME: home }, encoding: "utf8" });
+	// Fail-fast: a hung bun -e child (seen in shared-VM environments) must
+	// surface as SPAWN FAILED, not freeze the whole check run forever.
+	const res = spawnSync("bun", ["-e", src], { env: { ...process.env, HOME: home }, encoding: "utf8", timeout: 20_000 });
 	rmSync(home, { recursive: true, force: true });
 	const raw = res.stdout.toString().trim();
 	try {
@@ -590,6 +588,7 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 
 	// Unreachable herdr: no throw, no dead-worker invention.
 	const blindTransport = {
+		backendName: () => "herdr",
 		listStatuses: async () => {
 			throw new Error("herdr unreachable");
 		},
@@ -694,7 +693,7 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 		JSON.stringify(delivered),
 	);
 
-	const transportFor = (statuses: AgentStatus[]): Transport => ({ listStatuses: async () => statuses }) as unknown as Transport;
+	const transportFor = (statuses: AgentStatus[]): Transport => ({ backendName: () => "herdr", listStatuses: async () => statuses }) as unknown as Transport;
 	const fakePi = { sendUserMessage: () => {} } as never;
 	const stop1 = startWatcher(fakePi, transportFor([]), { cwd: FIX });
 	const stop2 = startWatcher(fakePi, transportFor([]), { cwd: FIX }); // double start replaces
@@ -769,7 +768,7 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 	check("W12.3 unparseable startedAt is kept (tolerant, never dropped silently)", snapshotFor([noStart], NO_STATUS).workers.length === 1);
 
 	// Real entry point smoke: whatever herdr state this host has, it must not throw.
-	const s = await collectSnapshot({ listStatuses: async () => [] } as unknown as Transport, { cwd: FIX });
+	const s = await collectSnapshot({ backendName: () => "herdr", listStatuses: async () => [] } as unknown as Transport, { cwd: FIX });
 	check("W12.4 collectSnapshot returns a usable snapshot", Array.isArray(s.workers) && typeof s.statusesKnown === "boolean");
 }
 
