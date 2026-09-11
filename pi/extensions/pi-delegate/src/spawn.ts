@@ -821,6 +821,19 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				);
 			}
 
+			// placementRef-only end state (Law 4, Wave 4): the ref is the ONLY
+			// required handle. A compliant adapter always returns one; a placement
+			// without it is an adapter contract violation — refuse with E_PLACE
+			// instead of threading `undefined` into startAgent/embodiment keys.
+			if (!placement.placementRef) {
+				return fail(
+					"E_PLACE",
+					`E_PLACE — ${mode} placement for ${params.name} returned no placementRef (adapter contract violation).`,
+					{ name: params.name, mode },
+				);
+			}
+			const placementRef: string = placement.placementRef;
+
 			//    BUG_FIX_CONTEXT: symptom — a failed start left an orphaned pane/
 			//    worktree invisible to teardown because the manifest entry was only
 			//    written after a successful start. Why the old order did not work:
@@ -878,7 +891,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				// are distinguishable by construction.
 				const embodiment = nextEmbodiment(
 					params.name,
-					placement.placementRef ?? placement.paneId,
+					placementRef,
 					manifestStore.read(manifestDir)?.workers ?? [],
 				);
 				const orchestratorSessionPath = liveSessionFile(ctx);
@@ -954,10 +967,10 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			}
 
 			// 4. Start the agent; read back the canonical name.
-			step(`Starting agent in placement ${placement.placementRef ?? placement.paneId} (provider=${provider}, model=${model}, thinking=${thinking})…`, {
+			step(`Starting agent in placement ${placementRef} (provider=${provider}, model=${model}, thinking=${thinking})…`, {
 				phase: "start",
 				name: params.name,
-				placementRef: placement.placementRef ?? placement.paneId,
+				placementRef,
 			});
 			let start;
 			try {
@@ -965,7 +978,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 					name: params.name,
 					// Workerhost inversion (design §3): StartReq keyed by the opaque ref;
 					// legacy pane id as fallback so pre-ref placement records still start.
-					placementRef: placement.placementRef ?? placement.paneId,
+					placementRef,
 					provider: provider as string,
 					model: model as string,
 					thinking: thinking as string,
@@ -1223,7 +1236,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				}
 				await logTeardownAudit(
 					manifestDir,
-					`plan: teardown worker=${canonical} kind=${placement.kind} workspace=${placement.workspaceId} pane=${placement.paneId} (auto-after-collect)`,
+					`plan: teardown worker=${canonical} kind=${placement.kind} workspace=${placement.workspaceId ?? "-"} pane=${placement.paneId ?? "-"} (auto-after-collect)`,
 				);
 				try {
 					// Migration stage 1 (extensibility-defect 1): the close result says

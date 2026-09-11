@@ -80,14 +80,14 @@ async function liveWorkspaceIds(): Promise<Set<string>> {
 async function forceCleanup(p: Placement) {
 	logOp(`herdr worktree remove --workspace ${p.workspaceId} --force  (cleanup fallback)`);
 	try {
-		await execFileP("herdr", ["worktree", "remove", "--workspace", p.workspaceId, "--force"], { encoding: "utf8", timeout: 30_000 });
+		await execFileP("herdr", ["worktree", "remove", "--workspace", p.workspaceId!, "--force"], { encoding: "utf8", timeout: 30_000 });
 	} catch {
 		/* fall through — the workspace-close fallback below handles shells (O2). */
 	}
 	// herdr may keep a non-linked workspace shell after worktree remove — always close.
 	logOp(`herdr workspace close ${p.workspaceId}  (cleanup fallback)`);
 	try {
-		await execFileP("herdr", ["workspace", "close", p.workspaceId], { encoding: "utf8", timeout: 30_000 });
+		await execFileP("herdr", ["workspace", "close", p.workspaceId!], { encoding: "utf8", timeout: 30_000 });
 	} catch {
 		// Only a failure of BOTH paths leaves state behind — verify before alarming.
 		const still = await execFileP("herdr", ["workspace", "list"], { encoding: "utf8", timeout: 30_000 }).then((r) => String(r)).catch(() => "");
@@ -145,7 +145,7 @@ try {
 			typeof p1.isLinkedWorktree === "boolean",
 		JSON.stringify(p1),
 	);
-	check("T2.2b placement created a NEW herdr workspace", !before.has(p1.workspaceId), p1.workspaceId);
+	check("T2.2b placement created a NEW herdr workspace", !before.has(p1.workspaceId!), p1.workspaceId);
 
 	// T2.2c — TAB placement round-trip (herdr drift pin, 2026-09-10): the tab
 	// id MUST come from the herdr result's tab.tab_id — never the paneId
@@ -178,7 +178,7 @@ try {
 			// harmless: no agent was ever started in it).
 			async () => {
 				logOp(`herdr tab close ${tabId}  (cleanup fallback)`);
-				await execFileP("herdr", ["tab", "close", tabId], { encoding: "utf8", timeout: 30_000 });
+				await execFileP("herdr", ["tab", "close", tabId!], { encoding: "utf8", timeout: 30_000 });
 			},
 		);
 		check("T2.2d tab teardown with the parsed tabId succeeds", true);
@@ -187,7 +187,7 @@ try {
 	logOp(`herdr agent start qa-probe --kind pi --pane ${p1.paneId} --timeout 120000 -- --provider ${MODEL.provider} --model ${MODEL.model} --thinking ${MODEL.thinking}`);
 	const probeName = `qa-probe-${Date.now().toString(36)}`;
 	logOp(`herdr agent start ${probeName} (unique suffix avoids collision with live agents)`);
-	const s1 = await t.startAgent({ name: probeName, placementRef: p1.placementRef ?? p1.paneId, timeoutMs: 120_000, ...MODEL });
+	const s1 = await t.startAgent({ name: probeName, placementRef: p1.placementRef!, timeoutMs: 120_000, ...MODEL });
 	check("T2.2c startAgent returns canonical name", !!s1.name, JSON.stringify(s1));
 
 	logOp(`herdr agent prompt ${s1.name} "Reply with exactly: OK"  (submit, no --wait)`);
@@ -218,7 +218,7 @@ try {
 	logOp(`herdr worktree remove --workspace ${p1.workspaceId} --force  (teardown)`);
 	await t.teardown({ name: s1.name, placement: p1, force: true });
 	const after = await liveWorkspaceIds();
-	check("T2.2g placement gone from herdr workspace list after teardown", !after.has(p1.workspaceId), p1.workspaceId);
+	check("T2.2g placement gone from herdr workspace list after teardown", !after.has(p1.workspaceId!), p1.workspaceId);
 	created.splice(created.indexOf(p1), 1);
 
 	// -----------------------------------------------------------------------
@@ -242,11 +242,11 @@ try {
 	// CONTRACT (types.ts StartReq): "herdr auto-uniquifies on collision" → canonical
 	// name must differ. OBSERVED herdr behavior: rejects with agent_name_taken.
 	logOp(`herdr agent start qa-probe (workspace A) ... -- --provider ${MODEL.provider} --model ${MODEL.model} --thinking ${MODEL.thinking}`);
-	const sA = await t.startAgent({ name: "qa-probe", placementRef: pA.placementRef ?? pA.paneId, timeoutMs: 120_000, ...MODEL });
+	const sA = await t.startAgent({ name: "qa-probe", placementRef: pA.placementRef!, timeoutMs: 120_000, ...MODEL });
 	logOp(`herdr agent start qa-probe (workspace B, colliding with live ${sA.name}) ...`);
 	let collErr: unknown;
 	try {
-		await t.startAgent({ name: "qa-probe", placementRef: pB.placementRef ?? pB.paneId, timeoutMs: 120_000, ...MODEL });
+		await t.startAgent({ name: "qa-probe", placementRef: pB.placementRef!, timeoutMs: 120_000, ...MODEL });
 	} catch (e) {
 		collErr = e;
 	}
@@ -270,11 +270,11 @@ try {
 	await new Promise((r) => setTimeout(r, 1500));
 	for (const p of [pA, pB]) {
 		const ids = await liveWorkspaceIds();
-		if (ids.has(p.workspaceId)) await forceCleanup(p);
+		if (ids.has(p.workspaceId!)) await forceCleanup(p);
 	}
 	created.length = 0;
 	const afterConc = await liveWorkspaceIds();
-	check("T2.5b both concurrent workspaces gone after teardown", !afterConc.has(pA.workspaceId) && !afterConc.has(pB.workspaceId));
+	check("T2.5b both concurrent workspaces gone after teardown", !afterConc.has(pA.workspaceId!) && !afterConc.has(pB.workspaceId!));
 
 	// -----------------------------------------------------------------------
 	// T2.3 — sub-mode rejection (LAST: leaves cwd changed). A real sub-orchestrator

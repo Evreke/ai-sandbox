@@ -121,7 +121,7 @@ export class FakeWorkerHost implements Transport {
 			backend: "fake",
 			placementRef,
 		};
-		this.placements.set(placement.placementRef ?? placement.paneId, placement);
+		this.placements.set(placementRef, placement);
 		return placement;
 	}
 

@@ -119,7 +119,7 @@ export function registerCommands(pi: import("@earendil-works/pi-coding-agent").E
 				// Pre-log the planned mutating op BEFORE executing it (audit trail).
 				await logTo(
 					v.dir,
-					`plan: teardown worker=${v.name} kind=${v.kind} workspace=${v.placement.workspaceId} pane=${v.placement.paneId}`,
+					`plan: teardown worker=${v.name} kind=${v.kind} workspace=${v.placement.workspaceId ?? "-"} pane=${v.placement.paneId ?? "-"}`,
 				);
 				try {
 					// EXTERNAL_DEPENDENCY: herdr teardown via the injected transport

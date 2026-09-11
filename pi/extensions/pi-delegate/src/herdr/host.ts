@@ -1352,6 +1352,12 @@ export class HerdrTransport implements Transport {
 
 		if (req.placement.kind === "worktree") {
 			const workspaceId = req.placement.workspaceId;
+			// placementRef-only end state (Law 4, Wave 4): legacy herdr ids are now
+			// OPTIONAL on the seam type. This adapter always stamps workspaceId on
+			// the placements IT creates, so an absent id means the placement did not
+			// come from this adapter — there is no herdr workspace to remove, and
+			// the teardown contract ("already-gone → idempotent no-op") applies.
+			if (!workspaceId) return { alreadyGone: true };
 			try {
 				const args = ["worktree", "remove", "--workspace", workspaceId];
 				if (req.force !== false) args.push("--force");
@@ -1402,11 +1408,17 @@ export class HerdrTransport implements Transport {
 		let tabId = recordedTabId;
 		if (recordedTabId === req.placement.paneId) {
 			const live = await this.resolveLiveTabId(req.name);
-			const reconciled = reconcileTabClose(recordedTabId, live);
-			if (reconciled !== recordedTabId) {
-				tabId = reconciled; // manifest recorded a pane id — close the REAL tab
+			if (live !== null && live !== recordedTabId) {
+				tabId = live; // manifest recorded a pane id — close the REAL tab
 			}
 		}
+		// placementRef-only end state (Law 4, Wave 4): legacy herdr ids are now
+		// OPTIONAL on the seam type. This adapter always stamps paneId/tabId on
+		// the placements IT creates; an absent id means the placement did not
+		// come from this adapter — nothing herdr-side to close, and the teardown
+		// contract ("already-gone → idempotent no-op") applies. Symmetric with
+		// the worktree branch above.
+		if (!tabId) return { alreadyGone: true };
 		try {
 			await runHerdr(["tab", "close", tabId]);
 		} catch (err) {

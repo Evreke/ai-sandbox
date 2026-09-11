@@ -86,10 +86,15 @@ export interface PlacementReq {
 
 export interface Placement {
 	kind: PlacementMode;
-	/** herdr workspace id (always present for worktree; present for tab). */
-	workspaceId: string;
-	/** Pane the agent will be started in. */
-	paneId: string;
+	/** Legacy herdr workspace id. OPTIONAL since the placementRef-only end
+	 *  state (Law 4): `placementRef` is the only required handle — a second
+	 *  backend (tmux) must not fake herdr-shaped ids. herdr adapter keeps
+	 *  populating both alongside placementRef (version-skew rule: never delete
+	 *  legacy fields while any 1.15.x cohort reads). Consumers must treat both
+	 *  as possibly-absent and prefer `placementRef ?? paneId`. */
+	workspaceId?: string;
+	/** Legacy herdr pane id — see workspaceId above. */
+	paneId?: string;
 	/** Branch created (worktree mode only). */
 	branch?: string;
 	/** Absolute checkout path the agent will run in. */
@@ -101,7 +106,9 @@ export interface Placement {
 	 *  the seam only ever does opaque equality matching). The fake synthesizes
 	 *  "fake:<n>"; the herdr adapter "herdr:pane:<paneId>" and always writes
 	 *  the legacy id fields ALONGSIDE it (version-skew rule, design §4:
-	 *  never delete legacy fields while any 1.15.x cohort reads). */
+	 *  never delete legacy fields while any 1.15.x cohort reads). A placement
+	 *  WITHOUT the legacy fields is fully valid from Wave 4 on — every seam
+	 *  consumer keys off placementRef (Law 4). */
 	placementRef?: string;
 	/** Backend that created this placement ("herdr" | "fake" | …). Written into
 	 *  manifest records ALONGSIDE the legacy id fields (version-skew rule,

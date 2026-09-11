@@ -246,9 +246,9 @@ try {
 	const { FakeWorkerHost } = await import("../src/host/fake.ts");
 	const fake = new FakeWorkerHost({ repoPath: rootCwd });
 	const p = await fake.place({ mode: "tab", repoPath: rootCwd, branch: "b", label: "l" });
-	await fake.startAgent({ name: "dup", placementRef: p.placementRef ?? p.paneId, provider: "p", model: "m", thinking: "low", timeoutMs: 1000 });
+	await fake.startAgent({ name: "dup", placementRef: p.placementRef!, provider: "p", model: "m", thinking: "low", timeoutMs: 1000 });
 	try {
-		await fake.startAgent({ name: "dup", placementRef: p.placementRef ?? p.paneId, provider: "p", model: "m", thinking: "low", timeoutMs: 1000 });
+		await fake.startAgent({ name: "dup", placementRef: p.placementRef!, provider: "p", model: "m", thinking: "low", timeoutMs: 1000 });
 		check("E7 fake collision guidance = dictionary base + detail", false, "no throw");
 	} catch (e) {
 		const g = (e as DelegateErrorImpl).guidance ?? "";
