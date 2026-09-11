@@ -151,10 +151,9 @@ check(
 	/promptGuidelines[\s\S]*END YOUR TURN[\s\S]*\]/.test(delegateSrc),
 );
 const observeSrcFull = readFileSync(resolve(ROOT, "src/observe.ts"), "utf8");
-const statusSrc = observeSrcFull.slice(
-	observeSrcFull.indexOf("SECTION 1/3"),
-	observeSrcFull.indexOf("SECTION 2/3"),
-);
+// Wave 3 decomposition: the `delegate_status` tool lives in src/status-tool.ts
+// now — the pin reads the module that owns the code.
+const statusSrc = readFileSync(resolve(ROOT, "src/status-tool.ts"), "utf8") || observeSrcFull;
 check(
 	"W1.6 delegate_status guideline: no polling loop, the watcher wakes you",
 	/promptGuidelines[\s\S]*do NOT poll it in a loop[\s\S]*\]/.test(statusSrc),
