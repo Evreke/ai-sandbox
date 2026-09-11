@@ -248,6 +248,8 @@ export type DelegateErrorCode =
 	| "E_START"
 	| "E_PROMPT_STALLED"
 	| "E_TIMEOUT"
+	| "E_TEARDOWN"
+	| "E_STATUS"
 	| "E_REPORT_MISSING"
 	| "E_REPORT_INVALID"
 	| "E_BUDGET"
@@ -512,6 +514,10 @@ const GUIDANCE: Record<DelegateErrorCode, string> = {
 	E_START: "Check pane readiness (pane must sit at an interactive shell prompt); retry is a new delegate call.",
 	E_PROMPT_STALLED: "Worker pane not at prompt; inspect via delegate_status.",
 	E_TIMEOUT: "Worker still running; poll delegate_status.",
+	E_TEARDOWN:
+		"Teardown (worktree remove / tab close / workspace reconcile) failed; backend stderr is attached — reconcile manually via /delegate-teardown or the host workspace listing, then retry the close.",
+	E_STATUS:
+		"Status read from the backend failed (worker may have exited or the backend is unreachable) — reconcile via the host's status listing before trusting any lifecycle decision.",
 	E_REPORT_MISSING: "Settled but no report file — treat as failed spawn; diagnosed retry is the orchestrator's move.",
 	E_REPORT_INVALID: "Report exists but fails the JSON schema; attach validator output; treated identically to missing.",
 	E_BUDGET:

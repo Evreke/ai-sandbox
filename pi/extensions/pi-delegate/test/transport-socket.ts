@@ -9,7 +9,7 @@
  *        unix socket; the stub one-shots the connection like the real server).
  *   TS.2 getStatus found → mapped AgentStatus; TS.3 unknown → null (structured
  *        not_found error code, no message regex).
- *   TS.4 Unreachable server: listStatuses rejects fast with E_START DelegateError
+ *   TS.4 Unreachable server: listStatuses rejects fast with E_STATUS DelegateError
  *        and spawns ZERO herdr processes (canary stub on PATH stays silent).
  *   TS.5 Black-hole server (accepts, never answers): request rejects at ~
  *        requestTimeoutMs with request_timeout — bounded, no hang, no spawn.
@@ -175,7 +175,7 @@ try {
 			errCode = String((err as { code?: string }).code ?? "");
 		}
 		const dt = Date.now() - t0;
-		check("TS.4 unreachable server → E_START DelegateError (per-call error, watcher degrades)", errCode === "E_START", `${errCode} ${errMsg}`);
+		check("TS.4 unreachable server → E_STATUS DelegateError (per-call error, watcher degrades; migration stage 1: was a borrowed E_START)", errCode === "E_STATUS", `${errCode} ${errMsg}`);
 		check("TS.4 unreachable server → fast (<1000ms, no hang)", dt < 1000, `${dt}ms`);
 		check("TS.4 unreachable server → ZERO herdr processes spawned", canaryCount() === 0, `canary=${canaryCount()}`);
 	}

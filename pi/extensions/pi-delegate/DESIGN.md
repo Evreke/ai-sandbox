@@ -209,13 +209,20 @@ orchestrator model inherits the discipline without having read the skill.
 | `E_START` | agent start failed | check pane readiness; retry is a new `delegate` call |
 | `E_PROMPT_STALLED` | no state change within 5 s of submit | worker pane not at prompt; inspect via status |
 | `E_TIMEOUT` | settle wait exceeded | worker still running; poll `delegate_status` |
+| `E_TEARDOWN` | teardown operation failed (worktree remove / tab close / workspace reconcile); the authority rejection stays `E_PLACE` | backend stderr attached — reconcile manually via `/delegate-teardown` or the host listing, then retry the close |
+| `E_STATUS` | status read from the backend failed (worker may have exited / backend unreachable) | reconcile via the host's status listing before trusting a lifecycle decision |
 | `E_REPORT_MISSING` | settled but no report file | treat as failed spawn; diagnosed retry is the orchestrator's move |
 | `E_REPORT_INVALID` | report exists but fails JSON schema | attach validator output; treated identically to missing |
 
-Note (taxonomy backlog, deferred 2026-09-05): dedicated codes for teardown failures
-(`E_TEARDOWN`) and for the read-status failure shapes currently surfaced as status
-`unknown` are a documented backlog item — today they degrade into existing codes /
-unknown-status rather than first-class taxonomy entries.
+Note (migration stage 1, 2026-09-11): the deferred backlog item below is
+CLOSED — `E_TEARDOWN` and `E_STATUS` are first-class taxonomy entries, and
+intercepts read the code off the typed error (DelegateErrorImpl.code) instead
+of re-flattening it positionally:
+
+> Note (taxonomy backlog, deferred 2026-09-05): dedicated codes for teardown failures
+> (`E_TEARDOWN`) and for the read-status failure shapes currently surfaced as status
+> `unknown` are a documented backlog item — today they degrade into existing codes /
+> unknown-status rather than first-class taxonomy entries.
 
 ## 8. Testing strategy (Phase QA)
 

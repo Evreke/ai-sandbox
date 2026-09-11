@@ -12,7 +12,8 @@
  *       (real herdr call, fails immediately on the name-taken check)
  *   O2  teardown reconciliation, PATH-stubbed herdr:
  *       - worktree remove ok + workspace shell survives → close → re-verify → success
- *       - unclosable shell → E_PLACE "still present after herdr workspace close"
+ *       - unclosable shell → E_TEARDOWN "still present after herdr workspace close"
+ *         (migration stage 1: was E_PLACE — teardown failures own their code)
  *       - sub-authority worktree teardown rejected with E_PLACE before any herdr call
  */
 
@@ -202,7 +203,8 @@ echo "{\\"error\\":{\\"code\\":\\"stub_unhandled\\",\\"message\\":\\"$*\\"}}" >&
 			calls.join(" | "),
 		);
 
-		// Unclosable shell → must surface E_PLACE instead of silent success.
+		// Unclosable shell → must surface E_TEARDOWN instead of silent success
+		// (migration stage 1: teardown failures carry their own code; was E_PLACE).
 		writeFileSync(
 			resolve(stubDir, "state.json"),
 			JSON.stringify({ shell: "true", close_target: "wSTUCK", closed: "false", unclosable: "true" }),
@@ -219,8 +221,8 @@ echo "{\\"error\\":{\\"code\\":\\"stub_unhandled\\",\\"message\\":\\"$*\\"}}" >&
 		}
 		const se = errShape(stuckErr);
 		check(
-			"O2b unclosable workspace shell → E_PLACE 'still present after herdr workspace close'",
-			se.code === "E_PLACE" && /still present/.test(se.message ?? ""),
+			"O2b unclosable workspace shell → E_TEARDOWN 'still present after herdr workspace close'",
+			se.code === "E_TEARDOWN" && /still present/.test(se.message ?? ""),
 			`code=${se.code} msg=${(se.message ?? "").slice(0, 120)}`,
 		);
 

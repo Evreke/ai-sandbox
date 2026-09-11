@@ -139,8 +139,10 @@ import {
 	DEFAULT_BUDGET_TOKENS,
 	WORKER_NAME_RE,
 	briefPrompt,
+	DelegateErrorImpl,
 	type AgentStatusName,
 	type DelegateError,
+	type DelegateErrorCode,
 	type Placement,
 	type PlacementMode,
 	type QuestionEnvelope,
@@ -196,8 +198,28 @@ function errText(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
 }
 
-function fail(code: string, text: string, extra: Record<string, unknown> = {}): ToolResult {
+function fail(code: DelegateErrorCode, text: string, extra: Record<string, unknown> = {}): ToolResult {
 	return { content: [{ type: "text", text }], details: { ok: false, code, ...extra } };
+}
+
+/**
+ * Migration stage 1 (audit, errors-defect 1): the ERROR CODE is the error's
+ * OWN property — an intercept reads the typed code off a DelegateErrorImpl
+ * the adapter raised and substitutes the positional (call-site) code ONLY
+ * when the failure carried none (plain Error). Before this, the start catch
+ * re-flattened the adapter's distinct E_NAME back into E_START, so the
+ * adapter's differentiation never reached the tool result.
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: err — anything caught around a transport call; fallback — the
+ *   call-site positional code
+ * Output: err.code when err is a typed DelegateErrorImpl, else fallback
+ * Guarantees: pure; never throws; no message-text parsing (the code is read
+ *   from the typed field, never matched out of the message)
+ * Raises: never
+ */
+function typedCode(err: unknown, fallback: DelegateErrorCode): DelegateErrorCode {
+	return err instanceof DelegateErrorImpl ? err.code : fallback;
 }
 
 function textResult(text: string, details: Record<string, unknown>): ToolResult {
@@ -1011,9 +1033,13 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 					base: params.base,
 				});
 			} catch (err) {
+				// Migration stage 1: read the typed code the adapter raised (e.g. the
+				// name-taken refusal is E_NAME and STAYS E_NAME — no text parsing, no
+				// re-flattening); only a plain Error falls back to the positional code.
+				const code = typedCode(err, "E_PLACE");
 				return fail(
-					"E_PLACE",
-					`E_PLACE — ${mode} placement failed for ${params.name}: ${errText(err)}\n` +
+					code,
+					`${code} — ${mode} placement failed for ${params.name}: ${errText(err)}\n` +
 						"Reconcile via /delegate-teardown or the host workspace listing, then retry with a fresh delegate call.",
 					{ name: params.name, mode, stderr: errText(err) },
 				);
@@ -1103,6 +1129,9 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 					timeoutMs: START_TIMEOUT_MS,
 				});
 			} catch (err) {
+				// Migration stage 1: the adapter's typed code passes through intact —
+				// E_NAME (name taken) is no longer re-flattened into E_START. A plain
+				// Error (no code) still falls back to the positional E_START.
 				// The manifest entry was appended BEFORE startAgent (step 3, deliberate
 				// teardown-safety invariant — do not move the append). A refused start
 				// would leave a phantom entry with no sessionPath, so roll back ONLY the
@@ -1127,9 +1156,10 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 					// Best-effort rollback — the failure text below already points at
 					// manual reconciliation via /delegate-teardown.
 				}
+				const code = typedCode(err, "E_START");
 				return fail(
-					"E_START",
-					`E_START — agent start failed for ${params.name}: ${errText(err)}\n` +
+					code,
+					`${code} — agent start failed for ${params.name}: ${errText(err)}\n` +
 						"Check pane readiness; a retry is a new delegate call. " +
 						(manifestWarning
 							? `Placement NOT tracked in manifest (${manifestWarning}) — clean it up manually via /delegate-teardown or the host workspace listing.`
@@ -1543,9 +1573,12 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 					timeoutMs: SUBMIT_TIMEOUT_MS,
 				});
 			} catch (err) {
+				// Migration stage 1: typed code from the adapter passes through; the
+				// positional E_PROMPT_STALLED is only the fallback.
+				const code = typedCode(err, "E_PROMPT_STALLED");
 				return fail(
-					"E_PROMPT_STALLED",
-					`E_PROMPT_STALLED — prompt for ${canonical} was not accepted: ${errText(err)}\n` +
+					code,
+					`${code} — prompt for ${canonical} was not accepted: ${errText(err)}\n` +
 						"The worker pane may not be at a prompt; inspect via delegate_status, then answer or re-brief." +
 						`${uniquified ? ` ${uniquified}` : ""}`,
 					{ canonical, placement, stderr: errText(err) },
@@ -1711,9 +1744,12 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			} catch (err) {
 				if (signal?.aborted) return detach();
 				const b = gaugeSummary();
+				// Migration stage 1: typed code from the adapter passes through; the
+				// positional E_TIMEOUT is only the fallback.
+				const code = typedCode(err, "E_TIMEOUT");
 				return fail(
-					"E_TIMEOUT",
-					`E_TIMEOUT — settle observation for ${canonical} failed: ${errText(err)}\n` +
+					code,
+					`${code} — settle observation for ${canonical} failed: ${errText(err)}\n` +
 						"Status unknown (worker may have exited or the host is unreachable) — the watcher reports " +
 						"worker-dead if it truly died; check delegate_status, never repeat delegate." +
 						b.line,
