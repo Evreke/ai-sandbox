@@ -1434,16 +1434,13 @@ async function stampWorkerField(
 }
 
 /**
- * A teardown that reports "not found" means the pane/workspace is ALREADY
- * gone (herdr dropped it, another session closed it, the user closed the
- * pane) — an IDEMPOTENT close, not a failure. Matched on the message text:
- * herdr's error JSON carries code "tab_not_found"/"workspace_not_found" and
- * the transport wraps it verbatim into the DelegateError message; there is
- * no dedicated E_* code for it.
+ * Migration stage 1 (extensibility-defect 1): the regex helper is GONE — the
+ * seam's teardown result carries the structured `alreadyGone` field and the
+ * callers read the FIELD, never the message text. History note (kept for the
+ * record): this module used to hold TWO copies of the "not found" message
+ * regex (one here, one in the herdr adapter) that had to be kept in sync by
+ * hand; the structured field removes the class of bug.
  */
-function isAlreadyGone(err: unknown): boolean {
-	return /not[\s_-]?found/i.test(err instanceof Error ? err.message : String(err));
-}
 
 /**
  * One retire pass over a snapshot (§23): stamp/clear `retirableSince` on
@@ -1514,7 +1511,12 @@ export async function retirePass(
 			if (outcome.decision) {
 				let alreadyGone = false;
 				try {
-					await transport.teardown({ name: w.name, placement: w.placement, force: true });
+					// Migration stage 1 (extensibility-defect 1): an ALREADY-GONE
+					// placement closes as { alreadyGone: true } — an idempotent retire,
+					// read from the structured field (before this: a thrown "not found"
+					// error matched by message regex).
+					const res = await transport.teardown({ name: w.name, placement: w.placement, force: true });
+					alreadyGone = res?.alreadyGone === true;
 				} catch (err) {
 					// BUG_FIX_CONTEXT: symptom — the retire pass spammed "retire pass
 					// error … tab_not_found" every tick when the pane had ALREADY been
@@ -1523,10 +1525,11 @@ export async function retirePass(
 					// Why not fixed in the transport: teardown is also the interactive
 					// /delegate-teardown path, where a genuinely misconfigured placement
 					// must stay a visible error; only the autonomous pass needs the
-					// idempotent semantics. What was done: "not found" from the close is
-					// treated as a successful retire (stamp retiredAt, log the variance).
-					if (!isAlreadyGone(err)) throw err;
-					alreadyGone = true;
+					// idempotent semantics. What was done: the "not found" shape moved
+					// INTO the transport as the structured alreadyGone result (migration
+					// stage 1) — a thrown error is now ALWAYS a genuine failure and is
+					// re-thrown (advisory retry next tick).
+					throw err;
 				}
 				await stampWorkerField(w, (x) => ({ ...x, retiredAt: new Date(nowMs).toISOString() }));
 				// Archive at retire (diag-retire-msg Q3 item 1): a TTL close of an
@@ -1889,18 +1892,20 @@ export function registerCommands(pi: import("@earendil-works/pi-coding-agent").E
 				try {
 					// EXTERNAL_DEPENDENCY: herdr teardown via the injected transport
 					// (mutating pane/workspace IPC — the only mutating call here).
-					await transport.teardown({ name: v.name, placement: v.placement, force: true });
-					await logTo(v.dir, `done: teardown worker=${v.name} ok`);
-					outcomes.push(`✓ ${v.name} (${v.kind}) torn down`);
-				} catch (err) {
-					// Idempotent close (parity with the retire pass): a "not found"
-					// teardown means the pane/workspace is ALREADY gone — a success for
-					// bookkeeping, not an error. Only genuine failures stay ✗.
-					if (isAlreadyGone(err)) {
+					// Migration stage 1 (extensibility-defect 1): the "already gone"
+					// case is the structured alreadyGone field on the RESULT (before
+					// this: a thrown error matched by the isAlreadyGone message regex).
+					const res = await transport.teardown({ name: v.name, placement: v.placement, force: true });
+					if (res?.alreadyGone) {
 						await logTo(v.dir, `done: teardown worker=${v.name} no-op (already gone)`);
 						outcomes.push(`✓ ${v.name} (${v.kind}) — already closed, no-op`);
 						continue;
 					}
+					await logTo(v.dir, `done: teardown worker=${v.name} ok`);
+					outcomes.push(`✓ ${v.name} (${v.kind}) torn down`);
+				} catch (err) {
+					// A throw is now ALWAYS a genuine failure (not-found shapes resolve
+					// as alreadyGone inside the adapters) — parity with the retire pass.
 					await logTo(v.dir, `error: teardown worker=${v.name} failed: ${errText(err)}`);
 					const de = asDelegateError(err);
 					const advice = de?.guidance

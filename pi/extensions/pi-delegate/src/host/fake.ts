@@ -40,6 +40,7 @@ import {
 	type StartReq,
 	type StartResult,
 	type TeardownReq,
+	type TeardownResult,
 	type Transport,
 	type TransportCapabilities,
 } from "../host.ts";
@@ -205,17 +206,27 @@ export class FakeWorkerHost implements Transport {
 		return out;
 	}
 
-	async teardown(req: TeardownReq): Promise<void> {
+	async teardown(req: TeardownReq): Promise<TeardownResult> {
 		this.teardownCalls++;
 		// Idempotent by seam semantics: an unknown/already-torn-down placement is
-		// a no-op success (herdr not-found → idempotent; the fake mirrors it).
+		// a no-op success — and since migration stage 1 it is reported
+		// STRUCTURED: alreadyGone=true when nothing matched (the placement was
+		// already gone), false when this call deleted a live placement.
 		const ref = req.placement.placementRef ?? req.placement.paneId;
+		let matched = false;
 		for (const [paneId, p] of this.placements) {
-			if ((p.placementRef ?? paneId) === ref) this.placements.delete(paneId);
+			if ((p.placementRef ?? paneId) === ref) {
+				this.placements.delete(paneId);
+				matched = true;
+			}
 		}
 		for (const [name, a] of this.agents) {
 			const aRef = a.placement.placementRef ?? a.placement.paneId;
-			if (aRef === ref || name === req.name) this.agents.delete(name);
+			if (aRef === ref || name === req.name) {
+				this.agents.delete(name);
+				matched = true;
+			}
 		}
+		return { alreadyGone: !matched };
 	}
 }

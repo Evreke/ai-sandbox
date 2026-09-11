@@ -370,8 +370,8 @@ check(
 		/actionable = views\.filter\(\(v\) => v\.retired !== true\)/.test(observeSrcAll),
 );
 check(
-	"T4.4 the teardown command treats a not-found close as an idempotent no-op success",
-	/isAlreadyGone\(err\)[\s\S]{0,200}?already closed, no-op/.test(observeSrcAll),
+	"T4.4 the teardown command treats an already-gone close as a structured idempotent no-op success (migration stage 1: the alreadyGone field replaces the 'not found' message regex)",
+	/res\?\.alreadyGone[\s\S]{0,300}?already closed, no-op/.test(observeSrcAll),
 );
 check(
 	"T4.5 WorkerView carries the retired flag (manifest history marker)",

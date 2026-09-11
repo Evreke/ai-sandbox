@@ -150,9 +150,14 @@ check("A9 scripted waitSettle settles done, no timeout, started (two-phase D3 sh
 const status = await fake.getStatus(NAME);
 check("A10 getStatus: not-found → null contract + scripted head", status !== null && status.status === "done" && status.placementRef === placement.placementRef, JSON.stringify(status));
 
-await fake.teardown({ name: NAME, placement, force: true });
-await fake.teardown({ name: NAME, placement, force: true }); // second close
+const t1 = await fake.teardown({ name: NAME, placement, force: true });
+const t2 = await fake.teardown({ name: NAME, placement, force: true }); // second close
 check("A11 teardown idempotency: second teardown resolves ok (no-op success), both calls counted", fake.teardownCalls === 2);
+check(
+	"A11b alreadyGone field (migration stage 1): first close = false, second = true (structured idempotent no-op)",
+	t1?.alreadyGone === false && t2?.alreadyGone === true,
+	`first=${t1?.alreadyGone} second=${t2?.alreadyGone}`,
+);
 
 // Ref-based dedup — replicate the spawn.ts manifest-dedup identity with refs:
 // "the entry THIS call appended" = (name, placementRef) match.

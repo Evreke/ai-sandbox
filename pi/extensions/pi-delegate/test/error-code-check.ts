@@ -204,7 +204,7 @@ try {
 		waitSettle: async () => ({ status: "idle", timedOut: false }),
 		getStatus: async () => null,
 		listStatuses: async () => [],
-		teardown: async () => {},
+		teardown: async () => ({ alreadyGone: false }),
 		capabilities: () => ({ worktrees: true, authority: "root" }),
 	};
 

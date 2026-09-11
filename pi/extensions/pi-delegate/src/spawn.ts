@@ -1372,8 +1372,17 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 					`plan: teardown worker=${canonical} kind=${placement.kind} workspace=${placement.workspaceId} pane=${placement.paneId} (auto-after-collect)`,
 				);
 				try {
-					await transport.teardown({ name: canonical, placement, force: true });
-					await logTeardownAudit(manifestDir, `done: teardown worker=${canonical} ok (auto-after-collect)`);
+					// Migration stage 1 (extensibility-defect 1): the close result says
+					// whether the pane was ALREADY gone (structured field, no message
+					// parsing) — the audit trail keeps the distinction without the
+					// tool layer ever regexing "not found".
+					const res = await transport.teardown({ name: canonical, placement, force: true });
+					await logTeardownAudit(
+						manifestDir,
+						res?.alreadyGone
+							? `done: teardown worker=${canonical} no-op (already gone) (auto-after-collect)`
+							: `done: teardown worker=${canonical} ok (auto-after-collect)`,
+					);
 					return `Auto-teardown: worker ${canonical} torn down after collect (advisory — /delegate-teardown stays available).`;
 				} catch (err) {
 					await logTeardownAudit(

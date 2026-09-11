@@ -1154,7 +1154,10 @@ layer. The seam interface keeps its historical type name `Transport`
    `StartReq` is keyed by `placementRef`; the read model `AgentStatus`
    exposes only `{name, status, placementRef?}`.
 3. **Not-found → idempotent** — teardown of an already-gone placement is a
-   no-op SUCCESS (pinned on both adapters by test/host-parity-check.ts).
+   no-op SUCCESS reported as the structured `{ alreadyGone: true }` result
+   field (migration stage 1; pinned on both adapters by test/host-parity-
+   check.ts P3b). Callers read the FIELD — matching "not found" out of the
+   error message text is gone from the tool layer.
 4. **Version-skew manifests** — new placements write `backend` +
    `placementRef` ALONGSIDE the legacy id fields (workspaceId/paneId/tabId);
    legacy fields are never deleted while any 1.15.x cohort may read/close.

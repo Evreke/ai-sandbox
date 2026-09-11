@@ -184,6 +184,22 @@ export interface TeardownReq {
 	force?: boolean;
 }
 
+/** Result of a teardown operation (migration stage 1, audit extensibility
+ *  defect 1): "teardown of an already-gone placement" is NOT an error — it is
+ *  an idempotent success the CALLER can see (DESIGN.md §24.2 invariant 3).
+ *  Before this the seam had no way to say it: the herdr adapter swallowed
+ *  not-found on the worktree branch but threw on the tab branch, and the
+ *  tool layer re-parsed "not found" out of the error MESSAGE text at every
+ *  call site (three unsynchronized copies of the same regex).
+ *  alreadyGone is optional-in-type so older test doubles (which return
+ *  undefined) keep working; both real adapters always set it. */
+export interface TeardownResult {
+	/** True when the placement was ALREADY gone (herdr dropped it, another
+	 *  session closed it, the user closed the pane) — the close was a no-op.
+	 *  False when this call actually closed something. */
+	alreadyGone?: boolean;
+}
+
 export interface TransportCapabilities {
 	/** False in sub-orchestrator mode: place() must reject worktree requests. */
 	worktrees: boolean;
@@ -232,7 +248,11 @@ export interface Transport {
 	 *  readback may reject — callers must fall back to status-based verdicts. */
 	readPane?(name: string, opts?: { maxChars?: number }): Promise<string>;
 	listStatuses(): Promise<AgentStatus[]>;
-	teardown(req: TeardownReq): Promise<void>;
+	/** Close the placement (worktree removal + workspace reconcile, or tab
+	 *  close). Idempotent by seam semantics: an ALREADY-GONE placement resolves
+	 *  with { alreadyGone: true } instead of throwing — callers read the field,
+	 *  never the message text. Genuine close failures still throw (E_TEARDOWN). */
+	teardown(req: TeardownReq): Promise<TeardownResult>;
 	capabilities(): TransportCapabilities;
 }
 

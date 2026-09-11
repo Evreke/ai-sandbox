@@ -377,9 +377,11 @@ function workerView(w: ManifestWorker, statuses: AgentStatus[] | null = [DONE(w.
 interface FakeTransport extends Transport {
 	teardownCalls: Array<{ name: string; placement: Placement }>;
 	failTeardown?: boolean;
-	/** When set, teardown throws an Error with this message (simulates herdr
-	 *  error shapes surfaced verbatim through the transport wrapper). */
-	failTeardownMsg?: string;
+	/** When set, teardown resolves with { alreadyGone: true } — the structured
+	 *  idempotent-close signal (migration stage 1: the pane was ALREADY gone;
+	 *  before this step the mock THREW a herdr "not found" message and the
+	 *  retire pass re-parsed the text — the contract this migration removes). */
+	alreadyGoneTeardown?: boolean;
 }
 
 function fakeTransport(): FakeTransport {
@@ -387,9 +389,10 @@ function fakeTransport(): FakeTransport {
 		teardownCalls: [],
 		failTeardown: false,
 		teardown: async (req: TeardownReq) => {
-			if (t.failTeardownMsg !== undefined) throw new Error(t.failTeardownMsg);
+			if (t.alreadyGoneTeardown) return { alreadyGone: true };
 			if (t.failTeardown) throw new Error("herdr down");
 			t.teardownCalls.push({ name: req.name, placement: req.placement });
+			return { alreadyGone: false };
 		},
 	} as unknown as FakeTransport;
 	return t;
@@ -457,20 +460,22 @@ function dOwnCheckLegacy(t: FakeTransport): boolean {
 	await retirePass(tFail, snapshotFor([wC], [DONE("r-throw")]), { nowMs: NOW, retireEnabled: true, retireTtlMs: 900_000 });
 	check("R5.7b next tick retries and succeeds", manifestFromDisk(dirC).workers[0]?.retiredAt !== undefined);
 
-	// Teardown says "not found" → the pane is ALREADY gone (closed by herdr,
-	// the user, or another session): IDEMPOTENT close — retiredAt stamped THIS
-	// tick, no error log, and every later tick is silent (no spam).
+	// Teardown reports the structured ALREADY-GONE signal → the pane is ALREADY
+	// gone (closed by herdr, the user, or another session): IDEMPOTENT close —
+	// retiredAt stamped THIS tick, no error log, and every later tick is silent
+	// (no spam). Migration stage 1: the signal is the teardown RESULT's
+	// alreadyGone field — a thrown "not found" error is no longer a thing the
+	// retire pass parses.
 	const dirGone = taskDir("pass-gone");
 	const wGone = mkWorker(dirGone, "r-gone", { retirableSince: new Date(NOW - 900_000).toISOString() });
 	writeManifestOnDisk(dirGone, [wGone]);
 	writeValidReport(dirGone, "r-gone");
 	const tGone = fakeTransport();
-	tGone.failTeardownMsg =
-		'herdr tab close wKD:p2 failed: herdr tab close failed {"error":{"code":"tab_not_found","message":"tab wKD:p2 not found"},"id":"cli:tab:close"}';
+	tGone.alreadyGoneTeardown = true;
 	const logsGone: string[] = [];
 	const dGone = await retirePass(tGone, snapshotFor([wGone], [DONE("r-gone")]), { nowMs: NOW, retireEnabled: true, retireTtlMs: 900_000 }, (m) => logsGone.push(m));
 	check(
-		"R5.8 teardown 'not found' → idempotent retire: decision + retiredAt + no error log",
+		"R5.8 teardown result alreadyGone:true → idempotent retire: decision + retiredAt + no error log",
 		dGone.length === 1 &&
 			manifestFromDisk(dirGone).workers[0]?.retiredAt !== undefined &&
 			!logsGone.some((l) => /retire pass error/.test(l)),

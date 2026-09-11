@@ -39,6 +39,7 @@ import {
 	type StartReq,
 	type StartResult,
 	type TeardownReq,
+	type TeardownResult,
 	type Transport,
 	type TransportCapabilities,
 } from "../host.ts";
@@ -756,7 +757,7 @@ export class HerdrTransport implements Transport {
 		return this.enqueue(() => this.submitPromptInner(req));
 	}
 
-	teardown(req: TeardownReq): Promise<void> {
+	teardown(req: TeardownReq): Promise<TeardownResult> {
 		return this.enqueue(() => this.teardownInner(req));
 	}
 
@@ -1300,23 +1301,28 @@ export class HerdrTransport implements Transport {
 	/**
 	 * FUNCTION_CONTRACT:
 	 * Input: TeardownReq — name, placement, force (worktree removal flag)
-	 * Output: resolves when the placement is gone (worktree removed + workspace
-	 *   reconciled, or tab closed)
+	 * Output: TeardownResult — alreadyGone: true when the placement was ALREADY
+	 *   gone (idempotent no-op), false when this call closed something
 	 * Guarantees:
 	 *   - worktree teardown is ROOT-only (sub-orchestrator → E_PLACE): a
 	 *     sub-orchestrator enumerating globally-scanned manifests must never be
 	 *     able to remove a root orchestrator's worktrees
 	 *   - not_linked_worktree removal errors are tolerated and reconciled via
 	 *     closeWorkspaceIfPresent
+	 *   - migration stage 1 (extensibility-defect 1): not-found-shaped failures
+	 *     (worktree removal OR tab close) resolve with { alreadyGone: true } —
+	 *     the structured "already gone" signal; callers read the FIELD, never
+	 *     the message text (the old unsynchronized isAlreadyGone regexes at
+	 *     every call site are gone)
 	 * Raises:
 	 *   - DelegateErrorImpl E_TEARDOWN for CLI failures / surviving workspaces /
-	 *     failed tab close (migration stage 1: dedicated code, was E_PLACE)
+	 *     failed tab close that is NOT not-found-shaped
 	 *   - DelegateErrorImpl E_PLACE for the authority rejection (policy guard,
 	 *     mirrors placeInner)
 	 * EXTERNAL_DEPENDENCY: `herdr worktree remove`, `herdr workspace list/close`,
 	 *   `herdr tab close` subprocesses.
 	 */
-	private async teardownInner(req: TeardownReq): Promise<void> {
+	private async teardownInner(req: TeardownReq): Promise<TeardownResult> {
 		const p = req.placement as Placement & { tabId?: string };
 
 		// Authority guard (mirrors placeInner): worktree teardown is root-only.
@@ -1343,15 +1349,14 @@ export class HerdrTransport implements Transport {
 				} else if (/not[\s_-]?found/i.test(msg)) {
 					// BUG_FIX_CONTEXT (parity pin, workerhost impl 2026-09-10): the seam
 					// contract is "teardown of an already-gone placement → idempotent
-					// no-op success" (pinned by the fake and the host-parity-check P3;
-					// the tool layer already mirrored it via observe.ts isAlreadyGone).
+					// no-op success" (pinned by the fake and the host-parity-check P3).
 					// Symptom: the SECOND worktree teardown failed E_PLACE with herdr's
 					// `workspace_not_found` — only the tab path was idempotent. Why the
 					// old guard did not work: it tolerated only not_linked_worktree.
 					// What was done: not-found-shaped removal errors are a no-op success
-					// too (the placement is verifiably absent — the reconcile below is
-					// then also a no-op via closeWorkspaceIfPresent).
-					return;
+					// too; migration stage 1 additionally reports it STRUCTURED
+					// (alreadyGone: true) so callers no longer regex the message text.
+					return { alreadyGone: true };
 				} else {
 					// Migration stage 1 (audit, errors-defect 1): teardown-operation
 					// failures are E_TEARDOWN, not a borrowed E_PLACE. The authority
@@ -1369,7 +1374,7 @@ export class HerdrTransport implements Transport {
 			// removes — verify against `workspace list`, close if still present,
 			// and re-verify before reporting success.
 			await this.closeWorkspaceIfPresent(workspaceId);
-			return;
+			return { alreadyGone: false };
 		}
 
 		// kind === "tab"
@@ -1390,14 +1395,22 @@ export class HerdrTransport implements Transport {
 		try {
 			await runHerdr(["tab", "close", tabId]);
 		} catch (err) {
-			// Migration stage 1: E_TEARDOWN — the close operation itself failed
-			// (was a borrowed E_PLACE; DESIGN.md §7 backlog item closed).
+			const msg = (err as Error).message ?? "";
+			// Migration stage 1 (extensibility-defect 1): the tab branch used to
+			// THROW on not-found (only the worktree branch was idempotent) and the
+			// tool layer re-parsed the message text at every call site. Now: a
+			// not-found-shaped close is the structured alreadyGone signal — the
+			// placement is verifiably absent, an idempotent no-op, not an error.
+			if (/not[\s_-]?found/i.test(msg)) return { alreadyGone: true };
+			// Genuine close failure → E_TEARDOWN (was a borrowed E_PLACE; DESIGN.md
+			// §7 backlog item closed in step 2).
 			throw delegateError(
 				"E_TEARDOWN",
-				`herdr tab close ${tabId} failed: ${(err as Error).message}`,
+				`herdr tab close ${tabId} failed: ${msg}`,
 				err,
 			);
 		}
+		return { alreadyGone: false };
 	}
 
 	/** Resolve the LIVE herdr tab id for a named agent (herdr drift guard):
