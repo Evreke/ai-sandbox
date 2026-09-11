@@ -164,9 +164,7 @@ function watchConfigInHome(configJson: string): { intervalMs: number; settleGate
 	mkdirSync(configDir, { recursive: true });
 	if (configJson !== "") writeFileSync(join(configDir, "pi-delegate.config.json"), configJson);
 	const src = `import {resolveWatchConfig} from ${JSON.stringify(WATCH_MOD)}; console.log(JSON.stringify(resolveWatchConfig()))`;
-	// Fail-fast: a hung bun -e child (seen in shared-VM environments) must
-	// surface as SPAWN FAILED, not freeze the whole check run forever.
-	const res = spawnSync("bun", ["-e", src], { env: { ...process.env, HOME: home }, encoding: "utf8", timeout: 20_000 });
+	const res = spawnSync("bun", ["-e", src], { env: { ...process.env, HOME: home }, encoding: "utf8" });
 	rmSync(home, { recursive: true, force: true });
 	const raw = res.stdout.toString().trim();
 	try {

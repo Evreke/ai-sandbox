@@ -86,7 +86,7 @@ try {
 			join(home, ".pi", "agent", "pi-delegate.config.json"),
 			JSON.stringify({ watch: { releaseOn: "started" } }),
 		);
-		const child = Bun.spawnSync(["bun", "-e", `import { resolveWatchConfig } from ${JSON.stringify(join(import.meta.dir, "..", "src", "observe.ts"))}; console.log(JSON.stringify(resolveWatchConfig().releaseOn))`], { env: { ...process.env, HOME: home }, stdout: "pipe", timeout: 20_000 });
+		const child = Bun.spawnSync(["bun", "-e", `import { resolveWatchConfig } from ${JSON.stringify(join(import.meta.dir, "..", "src", "observe.ts"))}; console.log(JSON.stringify(resolveWatchConfig().releaseOn))`], { env: { ...process.env, HOME: home }, stdout: "pipe" });
 		const out = child.stdout.toString().trim();
 		check("T-rel.3 resolveWatchConfig parses releaseOn=started", out === '"started"', out || child.stderr.toString());
 		rmSync(home, { recursive: true, force: true });

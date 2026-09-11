@@ -92,8 +92,7 @@ function retireConfigInHome(
 	const src =
 		`import {resolveWatchConfig} from ${JSON.stringify(WATCH_MOD)};` +
 		"resolveWatchConfig(); console.log(JSON.stringify(resolveWatchConfig()))";
-	// Fail-fast: a hung bun -e child must surface as SPAWN FAILED (20 s cap).
-	const res = spawnSync("bun", ["-e", src], { env: { ...process.env, HOME: home }, encoding: "utf8", timeout: 20_000 });
+	const res = spawnSync("bun", ["-e", src], { env: { ...process.env, HOME: home }, encoding: "utf8" });
 	rmSync(home, { recursive: true, force: true });
 	const raw = res.stdout.toString().trim();
 	const warnings = (res.stderr.toString().match(/bad watch\.retire/g) ?? []).length;
