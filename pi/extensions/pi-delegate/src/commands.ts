@@ -23,7 +23,9 @@ import { join } from "node:path";
 import { TEARDOWN_LOG_NAME } from "./expaths.ts";
 import { teardownLogLine } from "./exchange.ts";
 import { buildWorkerView, disposeFleetUI, openFleetOverlay } from "./fleet.ts";
-import { errText } from "./watcher.ts";
+// Wave 3 decomposition (step 4): errText lives in src/tool-result.ts — the
+// commands copy is deleted (audit finding 7, one definition per helper).
+import { asDelegateError, errText } from "./tool-result.ts";
 import { type DelegateError, type Transport } from "./host.ts";
 
 // ===========================================================================
@@ -40,13 +42,6 @@ import { type DelegateError, type Transport } from "./host.ts";
  * transport). Every planned op is pre-logged to <exchange dir>/teardown.log
  * before it runs. Never runs on its own — user-invoked command only.
  */
-
-function asDelegateError(err: unknown): DelegateError | null {
-	if (err instanceof Error && typeof (err as DelegateError).code === "string") {
-		return err as DelegateError;
-	}
-	return null;
-}
 
 async function logTo(dir: string, line: string): Promise<void> {
 	try {

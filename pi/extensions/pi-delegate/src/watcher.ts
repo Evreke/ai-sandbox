@@ -146,9 +146,9 @@ export interface WatcherHandle {
 	stop: () => void;
 }
 
-export function errText(err: unknown): string {
-	return err instanceof Error ? err.message : String(err);
-}
+// Wave 3 decomposition (step 4): errText moved to src/tool-result.ts (the
+// structural kill of the byte-identical copies — audit finding 7).
+import { errText } from "./tool-result.ts";
 
 /**
  * Build the poller. Never throws; every cycle is wrapped so a bad manifest, an

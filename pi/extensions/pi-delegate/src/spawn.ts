@@ -208,42 +208,10 @@ const NUDGE_RETRY_DELAY_MS = 500;
 const NUDGE_TEXT = (name: string) =>
 	`Mailbox update posted: read a-${name}.json next to your brief and continue accordingly.`;
 
-type ToolResult = {
-	content: { type: "text"; text: string }[];
-	details: Record<string, unknown>;
-};
-
-function errText(err: unknown): string {
-	return err instanceof Error ? err.message : String(err);
-}
-
-function fail(code: DelegateErrorCode, text: string, extra: Record<string, unknown> = {}): ToolResult {
-	return { content: [{ type: "text", text }], details: { ok: false, code, ...extra } };
-}
-
-/**
- * Migration stage 1 (audit, errors-defect 1): the ERROR CODE is the error's
- * OWN property — an intercept reads the typed code off a DelegateErrorImpl
- * the adapter raised and substitutes the positional (call-site) code ONLY
- * when the failure carried none (plain Error). Before this, the start catch
- * re-flattened the adapter's distinct E_NAME back into E_START, so the
- * adapter's differentiation never reached the tool result.
- * <p>
- * FUNCTION_CONTRACT:
- * Input: err — anything caught around a transport call; fallback — the
- *   call-site positional code
- * Output: err.code when err is a typed DelegateErrorImpl, else fallback
- * Guarantees: pure; never throws; no message-text parsing (the code is read
- *   from the typed field, never matched out of the message)
- * Raises: never
- */
-function typedCode(err: unknown, fallback: DelegateErrorCode): DelegateErrorCode {
-	return err instanceof DelegateErrorImpl ? err.code : fallback;
-}
-
-function textResult(text: string, details: Record<string, unknown>): ToolResult {
-	return { content: [{ type: "text", text }], details: { ok: true, ...details } };
-}
+// Wave 3 decomposition (step 4): the tool-result vocabulary + the error/sleep
+// helpers moved verbatim to src/tool-result.ts — the structural kill of the
+// byte-identical errText/asDelegateError copies (audit finding 7).
+import { asDelegateError, errText, fail, sleep, textResult, typedCode, type ToolResult } from "./tool-result.ts";
 
 /** Exchange dirs of all known task manifests (read: q-file scan surface).
  *  Migration stage 3 (audit step 9): the scan takes the active backend name
@@ -659,13 +627,6 @@ const delegateParams = Type.Object({
 	extraArgs: Type.Optional(Type.Array(Type.String(), { description: "Extra args appended after --" })),
 });
 
-function asDelegateError(err: unknown): DelegateError | null {
-	if (err instanceof Error && typeof (err as DelegateError).code === "string") {
-		return err as DelegateError;
-	}
-	return null;
-}
-
 async function reportExists(path: string): Promise<boolean> {
 	try {
 		await stat(path);
@@ -798,21 +759,6 @@ function watchAudit(line: string): void {
 	void appendFile(join(getAgentDir(), "delegate-watch.log"), `${new Date().toISOString()} ${line}\n`).catch(
 		() => undefined,
 	);
-}
-
-/** Abort-aware sleep: resolves early when the signal fires. */
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-	return new Promise((res) => {
-		const t = setTimeout(res, ms);
-		signal?.addEventListener(
-			"abort",
-			() => {
-				clearTimeout(t);
-				res();
-			},
-			{ once: true },
-		);
-	});
 }
 
 // ===========================================================================
