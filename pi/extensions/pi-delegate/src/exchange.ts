@@ -110,9 +110,34 @@ import {
 // "typebox/value" is the exported entry for the same build/value modules.
 import { Check, Errors } from "typebox/value";
 import { mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, homedir, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { parseSessionUsage } from "./usage.ts";
+import {
+	answerPathFor as buildAnswerPath,
+	manifestPathFor as buildManifestPath,
+	reportPathFor as buildReportPath,
+	questionArchivePathFor as buildQuestionArchivePath,
+	questionPathFor as buildQuestionPath,
+	nudgeFailedPathFor as buildNudgeFailedPath,
+	releasePathFor as buildReleasePath,
+	progressPathFor as buildProgressPath,
+	probeDirPathFor as buildProbeDirPath,
+	isProbeDir as expathsIsProbeDir,
+	sameDir,
+	type PathPlatform,
+} from "./expaths.ts";
+import * as nodePath from "node:path";
+import * as nodePathWin32 from "node:path/win32";
+
+// Shared exchange-dir name conventions (migration stage 1): the constants
+// moved to src/expaths.ts (the path-builder module owns their ONE spelling
+// so builders and classifiers cannot drift); re-exported here — the
+// exchange.ts export surface is unchanged for every consumer.
+export {
+	PROBE_DIR_SUFFIX,
+	TEARDOWN_LOG_NAME,
+} from "./expaths.ts";
 
 // ============================================================================
 // SECTION 1 — src/exchange.ts (verbatim, incl. its review-verified headers)
@@ -135,21 +160,37 @@ import { parseSessionUsage } from "./usage.ts";
  * Exchange root — all task dirs live directly under it.
  * <p>
  * FUNCTION_CONTRACT:
- * Input: none
+ * Input: platform — the OS shape the default root is derived for (default:
+ *   the running process's platform; tests may pass "win32" to assert the
+ *   Windows default without a Windows host)
  * Output: the absolute exchange root path
  * Guarantees:
- *   - default /tmp/exchange (production behavior unchanged)
- *   - $PI_DELEGATE_EXCHANGE_ROOT overrides it — test-fixture sandboxing:
- *     test manifests are written under mkdtemp dirs, NEVER into the live
- *     /tmp/exchange root (field lesson 2026-09-10: a PoC test manifest in
- *     the live root woke a bystander orchestrator through the fail-open
- *     legacy manifest scan)
+ *   - POSIX default /tmp/exchange — byte-for-byte unchanged
+ *   - win32 default %LOCALAPPDATA%\pi\exchange (per-user, durable — Windows
+ *     has no reboot-cleans-/tmp convention; %TEMP% can carry spaces and
+ *     non-ASCII usernames) — design-windows-mailbox.md §3.1
+ *   - $PI_DELEGATE_EXCHANGE_ROOT overrides any default — test-fixture
+ *     sandboxing: test manifests are written under mkdtemp dirs, NEVER into
+ *     the live root (field lesson 2026-09-10: a PoC test manifest in the
+ *     live /tmp/exchange root woke a bystander orchestrator through the
+ *     fail-open legacy manifest scan)
  * Raises: never
  * EXTERNAL_DEPENDENCY: filesystem path + $PI_DELEGATE_EXCHANGE_ROOT (test
- *   override; unset in production).
+ *   override; unset in production) + %LOCALAPPDATA% / os.homedir() on win32.
  */
-export function exchangeRoot(): string {
-	return process.env.PI_DELEGATE_EXCHANGE_ROOT || "/tmp/exchange";
+export function exchangeRoot(platform: NodeJS.Platform = process.platform): string {
+	if (process.env.PI_DELEGATE_EXCHANGE_ROOT) return process.env.PI_DELEGATE_EXCHANGE_ROOT;
+	// EXTERNAL_DEPENDENCY: %LOCALAPPDATA% (win32 default root derivation).
+	if (platform === "win32") {
+		const base = process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local");
+		// Joined with the win32 path shape: node:path on a posix host would
+		// assemble mixed separators (C:\Users\x/…/exchange) — the default must
+		// be separator-native for the platform it is derived FOR (a real Windows
+		// host already gets the win32 shape from node:path; this makes the
+		// injected-platform tests honest too).
+		return nodePathWin32.join(base, "pi", "exchange");
+	}
+	return "/tmp/exchange";
 }
 
 export interface ManifestWorker {
@@ -275,32 +316,40 @@ export interface ExchangeDir {
 
 /**
  * Validate and open the exchange dir for a brief.
- * Rules: briefPath absolute, inside /tmp/exchange/<task>/, file exists and is
- * non-empty. Throws a DelegateError (typed, seam taxonomy) with code E_BRIEF
- * otherwise.
+ * Rules: briefPath absolute (per the injected platform), directly inside
+ * <exchangeRoot>/<task>/ (case/separator-stable compare — see the
+ * BUG_FIX_CONTEXT note in the body), file exists and is non-empty. Throws a
+ * DelegateError (typed, seam taxonomy) with code E_BRIEF otherwise.
+ * The optional `p` platform parameter defaults to node's own path — tests
+ * inject node.path.win32 to drive the Windows shape from a POSIX host.
  */
-export function ensureExchangeDir(briefPathRaw: string): ExchangeDir {
+export function ensureExchangeDir(briefPathRaw: string, p: PathPlatform = nodePath): ExchangeDir {
 	// Normalize a leading @ (models sometimes prefix tool path args with it).
 	const briefPath = briefPathRaw.startsWith("@") ? briefPathRaw.slice(1) : briefPathRaw;
 
-	if (!briefPath || !isAbsolute(briefPath)) {
+	if (!briefPath || !p.isAbsolute(briefPath)) {
 		throw delegateError(
 			"E_BRIEF",
 			`Brief path must be absolute, got: "${briefPathRaw}"`,
 		);
 	}
-	const brief = resolve(briefPath);
-	const dir = dirname(brief);
-	const task = basename(dir);
-	const parent = dirname(dir);
+	const brief = p.resolve(briefPath);
+	const dir = p.dirname(brief);
+	const task = p.basename(dir);
+	const parent = p.dirname(dir);
 
-	if (resolve(parent) !== exchangeRoot()) {
+	// BUG_FIX_CONTEXT (Windows case/separator stability): symptom — on Windows
+	// a brief at `c:\…` against a root env var `C:\…` failed E_BRIEF spuriously:
+	// resolve() does NOT fold drive-letter or component case, and the old code
+	// compared raw strings. Fix — compare through expaths.sameDir (case-folded,
+	// both-separator-folding on win32; byte-identical strict equality on posix).
+	if (!sameDir(parent, exchangeRoot(), p)) {
 		throw delegateError(
 			"E_BRIEF",
 			`Brief must live directly inside ${exchangeRoot()}/<task>/ — parent dir of "${dir}" is "${parent}"`,
 		);
 	}
-	if (!task || task === basename(exchangeRoot())) {
+	if (!task || task === p.basename(exchangeRoot())) {
 		throw delegateError("E_BRIEF", `Missing task slug in brief path: "${brief}"`);
 	}
 
@@ -319,9 +368,9 @@ export function ensureExchangeDir(briefPathRaw: string): ExchangeDir {
 	}
 
 	// Conventional report path: brief-<name>.md → report-<name>.json (sibling).
-	const briefName = basename(brief);
+	const briefName = p.basename(brief);
 	const nameMatch = /^brief-(.+)\.md$/.exec(briefName);
-	const reportPath = nameMatch ? reportPathFor(dir, nameMatch[1]) : "";
+	const reportPath = nameMatch ? buildReportPath(dir, nameMatch[1], p) : "";
 
 	return { dir, task, briefPath: brief, reportPath };
 }
@@ -676,35 +725,25 @@ export async function persistTaskUsageSnapshot(dir: string, snapshot: TaskUsageS
 // Reports
 // ---------------------------------------------------------------------------
 
-/** Conventional report path for a worker. */
+/** Conventional report path for a worker (built by src/expaths.ts — the ONE
+ *  path builder; separator-native per the platform, POSIX byte-identical). */
 export function reportPathFor(dir: string, name: string): string {
-	return `${dir}/report-${name}.json`;
+	return buildReportPath(dir, name);
 }
 
 // ---------------------------------------------------------------------------
 // Shared dir/file conventions (single-source constants — migration stage 1)
 // ---------------------------------------------------------------------------
 
-/** Probe-run dir convention (DESIGN.md §5.1 step 4, §19.4 probe honesty):
- *  probe runs exchange under <exchangeRoot>/_probe — no report is ever
- *  expected there. One suffix, imported by spawn (dir builder), observe and
- *  index (dir classification). Before the migration the literal was
- *  duplicated in four files.
- * <p>
- * FUNCTION_CONTRACT (constant):
- * Input: none
- * Output: the "_probe" dir-name suffix
- * Guarantees: never changes value without a migration note — fixture dirs
- *   and classification regexes across tests depend on the exact spelling.
- * Raises: never */
-export const PROBE_DIR_SUFFIX = "_probe";
-
 /**
  * True when an exchange dir is the probe dir (or a fixture shaped like one).
+ * Delegates to src/expaths.ts (the ONE classifier) — basename compare, so a
+ * Windows probe dir `<root>\_probe` is detected too (the old
+ * endsWith("/_probe") missed it).
  * <p>
  * FUNCTION_CONTRACT:
  * Input: dir — absolute exchange dir path
- * Output: true iff dir ends with "/" + PROBE_DIR_SUFFIX
+ * Output: true iff the dir's basename equals PROBE_DIR_SUFFIX
  * Guarantees:
  *   - pure string test, no fs access
  *   - single classifier for probe dirs (observe view building, index tool
@@ -712,22 +751,9 @@ export const PROBE_DIR_SUFFIX = "_probe";
  *     each site carried its own endsWith("/_probe") copy)
  * Raises: never
  */
-export function isProbeDir(dir: string): boolean {
-	return dir.endsWith(`/${PROBE_DIR_SUFFIX}`);
+export function isProbeDir(dir: string, p: PathPlatform = nodePath): boolean {
+	return expathsIsProbeDir(dir, p);
 }
-
-/** Teardown audit trail file name — <exchange dir>/teardown.log, shared by
- *  the /delegate-teardown command (observe.ts logTo) and the collect-time
- *  auto-teardown (spawn.ts logTeardownAudit) so both close paths write ONE
- *  trail per task dir. Before the migration the name was duplicated in both
- *  files and pinned byte-identical by a text pin (test C4.4).
- * <p>
- * FUNCTION_CONTRACT (constant):
- * Input: none
- * Output: "teardown.log"
- * Guarantees: exact spelling — the file is a shared append-only artifact.
- * Raises: never */
-export const TEARDOWN_LOG_NAME = "teardown.log";
 
 /**
  * Format ONE teardown-audit line: `[ISO] line\n` — the format both close
@@ -981,22 +1007,23 @@ export function validateReportAgainstSchema(
 	return { ok: true, report: reportOf(base.r) };
 }
 
-/** Mailbox paths, next to the brief. */
+/** Mailbox paths, next to the brief (built by src/expaths.ts). */
 export function questionPathFor(dir: string, name: string): string {
-	return `${dir}/q-${name}.json`;
+	return buildQuestionPath(dir, name);
 }
 
 export function answerPathFor(dir: string, name: string): string {
-	return `${dir}/a-${name}.json`;
+	return buildAnswerPath(dir, name);
 }
 
 // ---------------------------------------------------------------------------
 // F6 — nudge-failed marker (mailbox answer posted, pane nudge failed)
 // ---------------------------------------------------------------------------
 
-/** Conventional nudge-failed marker path — next to the brief, worker-scoped. */
+/** Conventional nudge-failed marker path — next to the brief, worker-scoped
+ *  (built by src/expaths.ts). */
 export function nudgeFailedPathFor(dir: string, name: string): string {
-	return `${dir}/nudge-failed-${name}.json`;
+	return buildNudgeFailedPath(dir, name);
 }
 
 /** Mailbox tool → watcher fallback marker (nudge-failed-<name>.json): written
@@ -1048,9 +1075,10 @@ export function readNudgeFailedMarker(path: string): NudgeFailedEnvelope | null 
 // §23 retire — release marker (orchestrator ACK, watcher-consumed)
 // ---------------------------------------------------------------------------
 
-/** Conventional release path (retire ACK) — next to the brief. */
+/** Conventional release path (retire ACK) — next to the brief (built by
+ *  src/expaths.ts). */
 export function releasePathFor(dir: string, name: string): string {
-	return `${dir}/release-${name}.json`;
+	return buildReleasePath(dir, name);
 }
 
 /** Orchestrator → watcher release marker (release-<name>.json). The watcher
@@ -1319,9 +1347,9 @@ function resolveExtendsChain(
 	}
 }
 
-/** Conventional progress-ping path for a worker. */
+/** Conventional progress-ping path for a worker (built by src/expaths.ts). */
 export function progressPathFor(dir: string, name: string): string {
-	return `${dir}/p-${name}.jsonl`;
+	return buildProgressPath(dir, name);
 }
 
 /**
@@ -1379,7 +1407,14 @@ export function archiveRoot(): string {
 	// EXTERNAL_DEPENDENCY: $HOME env var (fallback: os.homedir()) — the archive
 	// lives at $HOME/.pi/agent/delegate-archive/, OUTSIDE /tmp (which dies on
 	// reboot; see the module header's durability note).
-	return path.join(process.env.HOME ?? os.homedir(), ARCHIVE_DIR);
+	// BUG_FIX_CONTEXT (Windows HOME misdirection): symptom — on Windows a
+	// POSIX-style $HOME (some environments set it) silently redirected the
+	// archive outside the real profile. Why the old code failed: HOME-first
+	// lookup is a Unix convention, os.homedir() (USERPROFILE) is the Windows
+	// truth. Fix: on win32 prefer os.homedir(); POSIX behavior byte-identical
+	// (HOME still wins there).
+	const base = process.platform === "win32" ? os.homedir() : (process.env.HOME ?? os.homedir());
+	return path.join(base, ARCHIVE_DIR);
 }
 
 /**
