@@ -413,6 +413,179 @@ function watchAudit(line: string): void {
 	);
 }
 
+// ===========================================================================
+// Wave 3 decomposition (step 4.5, the audit's "shrink its blast radius"):
+// the two execute() phases that read NO closure mutable state become pure
+// functions with explicit args — tier/provider/model resolution and
+// report-schema resolution. NOT a rewrite of execute(): each phase keeps its
+// exact decision logic, E_* texts and details payloads verbatim; only the
+// phase boundary becomes a discriminated result the closure returns (E_TIER/
+// E_BRIEF) or consumes. The remaining execute() closure shrink is the
+// written next-cycle plan (STABILIZATION.md Wave 3 item 4).
+// ===========================================================================
+
+/** Explicit inputs of the tier-resolution phase (no closure state). */
+interface TierResolutionInput {
+	name: string;
+	tier?: string;
+	provider?: string;
+	model?: string;
+	thinking?: string;
+}
+
+/**
+ * v1.9.2 tier resolution as a PURE function (verbatim decision logic from
+ * the execute closure).
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input:
+ *   - input: the call's explicit tier/provider/model/thinking params + the
+ *     worker name (for the E_TIER details payload)
+ *   - tierTable: resolveTierTable() result (the config "tiers" section)
+ *   - spawnDefaults: resolveSpawnDefaults() result (the config "defaults")
+ * Output: {ok:true, provider, model, thinking} — every key resolved (string),
+ *   or {ok:false, failure} — the E_TIER tool result to return verbatim
+ * Guarantees:
+ *   - explicit params > tiers[<tier>] > defaults, per key; there is NO
+ *     built-in worker tier — an unconfigured environment fails with E_TIER
+ *     (never a guessed provider)
+ *   - pure: no I/O, no closure reads; the config reads happen in the CALLER
+ * Raises: never
+ */
+function resolveTierPlacement(
+	input: TierResolutionInput,
+	tierTable: Record<string, SpawnTier>,
+	spawnDefaults: { provider?: string; model?: string; thinking?: string; tier?: string },
+): { ok: true; provider: string; model: string; thinking: string } | { ok: false; failure: ToolResult } {
+	const requestedTier = input.tier ?? spawnDefaults.tier;
+	let tierEntry: SpawnTier | undefined;
+	if (requestedTier !== undefined) {
+		tierEntry = tierTable[requestedTier];
+		if (tierEntry === undefined) {
+			const available = Object.keys(tierTable).sort();
+			return {
+				ok: false,
+				failure: fail(
+					"E_TIER",
+					`E_TIER — unknown worker tier "${requestedTier}"` +
+						` (configured tiers: ${available.length > 0 ? available.join(", ") : "none"}). ` +
+						"Add it to ~/.pi/agent/pi-delegate.config.json under \"tiers\", drop the tier param, " +
+						"or pass provider/model/thinking explicitly.",
+					{ tier: requestedTier, availableTiers: available, name: input.name },
+				),
+			};
+		}
+	}
+	const pickTier = (
+		explicit: string | undefined,
+		fromTier: string | undefined,
+		fromDefaults: string | undefined,
+	): string | undefined => explicit ?? fromTier ?? fromDefaults;
+	const provider = pickTier(input.provider, tierEntry?.provider, spawnDefaults.provider);
+	const model = pickTier(input.model, tierEntry?.model, spawnDefaults.model);
+	const thinking = pickTier(input.thinking, tierEntry?.thinking, spawnDefaults.thinking);
+	const missingTierKeys = [
+		provider === undefined ? "provider" : undefined,
+		model === undefined ? "model" : undefined,
+		thinking === undefined ? "thinking" : undefined,
+	].filter((k): k is string => typeof k === "string");
+	if (missingTierKeys.length > 0) {
+		return {
+			ok: false,
+			failure: fail(
+				"E_TIER",
+				`E_TIER — no worker ${missingTierKeys.join("/")} configured (no built-in tier exists). ` +
+					"Set \"tiers\" / \"defaults\" in ~/.pi/agent/pi-delegate.config.json, e.g. " +
+					'{"tiers": {"flash": {"provider": "zai", "model": "glm-5.3-flash", "thinking": "high"}}, ' +
+					"\"defaults\": {\"tier\": \"flash\"}} — or pass provider/model/thinking explicitly.",
+				{ missing: missingTierKeys, name: input.name },
+			),
+		};
+	}
+	// The E_TIER guard above guarantees all three keys are defined (the same
+	// shape the execute closure's later `provider as string` sites relied on).
+	return { ok: true, provider: provider as string, model: model as string, thinking: thinking as string };
+}
+
+/** Explicit inputs of the report-schema resolution phase (no closure state). */
+interface SchemaResolutionInput {
+	name: string;
+	/** Resolved brief path (empty for probes). */
+	briefPath: string;
+	/** Session cwd — the project-local schema library root is resolved from it. */
+	cwd: string;
+	isProbe: boolean;
+}
+
+/**
+ * v1.5 report-schema resolution as a PURE function (verbatim decision logic
+ * from the execute closure; the one advisory side effect — the
+ * "schema resolver threw" progress line — comes back as degradedWarning for
+ * the caller to emit, keeping the function itself side-effect-free).
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: name (worker name, for the E_BRIEF payload); briefPath (resolved);
+ *   cwd; isProbe (probes have no brief → base schema only, no I/O)
+ * Output: {ok:true, briefSchema, schemaProvenance, resolvedSchema,
+ *   degradedWarning?} — the three closure variables' values, or
+ *   {ok:false, failure} — the E_BRIEF tool result to return verbatim
+ * Guarantees:
+ *   - a bad schema rejects the spawn with E_BRIEF BEFORE place() (never
+ *     wastes a worker)
+ *   - an unexpected resolver THROW degrades to base-schema-only validation
+ *     (ok:true + degradedWarning) — the {ok:false} path is the real
+ *     rejection; schema null = the brief has no reportSchema key (base-only
+ *     validation, never a rejection)
+ *   - pure except the resolver's own documented fs reads (resolveReportSchema)
+ * Raises: never (the resolver's throws are caught here, per the contract)
+ */
+function resolveBriefReportSchema(input: SchemaResolutionInput): {
+	ok: true;
+	briefSchema: Record<string, unknown> | null;
+	schemaProvenance: string[];
+	resolvedSchema: Record<string, unknown> | null;
+	degradedWarning?: string;
+} | { ok: false; failure: ToolResult } {
+	const { name, briefPath, cwd, isProbe } = input;
+	if (isProbe) return { ok: true, briefSchema: null, schemaProvenance: [], resolvedSchema: null };
+	let resolved: ReturnType<typeof resolveReportSchema>;
+	let degradedWarning: string | undefined;
+	try {
+		// EXTERNAL_DEPENDENCY: filesystem — <cwd>/.pi/delegate-schemas/
+		// (via pi's CONFIG_DIR_NAME — the literal ".pi" honoring pi's
+		// project-config convention) and ~/.pi/agent/pi-delegate-schemas/
+		// (library type files <name>.json).
+		// Two-tier schema library (DESIGN.md §16): project-local
+		// <cwd>/.pi/delegate-schemas/ searched FIRST, user-level second.
+		resolved = resolveReportSchema(briefPath, resolve(cwd, CONFIG_DIR_NAME, "delegate-schemas"));
+	} catch (err) {
+		// A throw is not a resolution failure per the contract ({ok:false} is) —
+		// degrade to base-schema-only validation instead of rejecting the spawn.
+		resolved = { ok: true, schema: null, provenance: [] };
+		degradedWarning = errText(err);
+	}
+	if (!resolved.ok) {
+		return {
+			ok: false,
+			failure: fail(
+				"E_BRIEF",
+				`E_BRIEF — report schema resolution failed for ${name}: ${resolved.error}\n` +
+					"Fix the brief's reportSchema reference or inline fragment before spawning.",
+				{ briefPath, name, resolutionError: resolved.error },
+			),
+		};
+	}
+	// Corrected contract (merge gate): schema is null when the brief has no
+	// reportSchema key — ok-with-null → base-only validation, never a rejection.
+	return {
+		ok: true,
+		briefSchema: resolved.schema,
+		schemaProvenance: resolved.provenance,
+		resolvedSchema: resolved.schema,
+		...(degradedWarning !== undefined ? { degradedWarning } : {}),
+	};
+}
+
 /**
  * Register the `delegate` tool on the extension API.
  * <p>
@@ -536,51 +709,22 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			// EXTERNAL_DEPENDENCY: ~/.pi/agent/pi-delegate.config.json — "tiers" and
 			// "defaults" sections (via resolveSpawnDefaults/resolveTierTable in
 			// usage.ts); missing/unconfigured → E_TIER, never a guessed provider.
-			// v1.9.2 tier resolution — explicit params > tiers[<tier>] > defaults,
-			// per key. There is NO built-in worker tier: an unconfigured environment
-			// fails fast with E_TIER here (before touching herdr) instead of
-			// silently spawning a provider the operator never chose.
-			const spawnDefaults = resolveSpawnDefaults();
-			const tierTable = resolveTierTable();
-			const requestedTier = params.tier ?? spawnDefaults.tier;
-			let tierEntry: SpawnTier | undefined;
-			if (requestedTier !== undefined) {
-				tierEntry = tierTable[requestedTier];
-				if (tierEntry === undefined) {
-					const available = Object.keys(tierTable).sort();
-					return fail(
-						"E_TIER",
-						`E_TIER — unknown worker tier "${requestedTier}"` +
-							` (configured tiers: ${available.length > 0 ? available.join(", ") : "none"}). ` +
-							"Add it to ~/.pi/agent/pi-delegate.config.json under \"tiers\", drop the tier param, " +
-							"or pass provider/model/thinking explicitly.",
-						{ tier: requestedTier, availableTiers: available, name: params.name },
-					);
-				}
-			}
-			const pickTier = (
-				explicit: string | undefined,
-				fromTier: string | undefined,
-				fromDefaults: string | undefined,
-			): string | undefined => explicit ?? fromTier ?? fromDefaults;
-			const provider = pickTier(params.provider, tierEntry?.provider, spawnDefaults.provider);
-			const model = pickTier(params.model, tierEntry?.model, spawnDefaults.model);
-			const thinking = pickTier(params.thinking, tierEntry?.thinking, spawnDefaults.thinking);
-			const missingTierKeys = [
-				provider === undefined ? "provider" : undefined,
-				model === undefined ? "model" : undefined,
-				thinking === undefined ? "thinking" : undefined,
-			].filter((k): k is string => typeof k === "string");
-			if (missingTierKeys.length > 0) {
-				return fail(
-					"E_TIER",
-					`E_TIER — no worker ${missingTierKeys.join("/")} configured (no built-in tier exists). ` +
-						"Set \"tiers\" / \"defaults\" in ~/.pi/agent/pi-delegate.config.json, e.g. " +
-						'{"tiers": {"flash": {"provider": "zai", "model": "glm-5.3-flash", "thinking": "high"}}, ' +
-						"\"defaults\": {\"tier\": \"flash\"}} — or pass provider/model/thinking explicitly.",
-					{ missing: missingTierKeys, name: params.name },
-				);
-			}
+			// Wave 3 (step 4.5): the phase is a pure function over explicit args
+			// (resolveTierPlacement) — the decision logic, E_TIER texts and details
+			// payloads are verbatim; only the boundary is a discriminated result.
+			const tierResolution = resolveTierPlacement(
+				{
+					name: params.name,
+					tier: params.tier,
+					provider: params.provider,
+					model: params.model,
+					thinking: params.thinking,
+				},
+				resolveTierTable(),
+				resolveSpawnDefaults(),
+			);
+			if (!tierResolution.ok) return tierResolution.failure;
+			const { provider, model, thinking } = tierResolution;
 			const mode = params.mode ?? "worktree";
 			// Probe is not a placement mode: it uses the cheapest real placement (tab).
 			const placementMode: PlacementMode = mode === "probe" ? "tab" : mode;
@@ -645,47 +789,24 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			// v1.5 (DESIGN.md §16–§17): resolve the brief's report schema — inline
 			// fragment or named library type — once, BEFORE place(): a bad schema must
 			// never waste a worker. On {ok:false} the spawn is rejected with E_BRIEF.
-			// The resolved provenance chain is recorded in the manifest (§17) and
-			// quoted in terminal results when the fragment rejects a report.
-			// Unexpected throws (contract bugs) degrade to base-schema-only validation
-			// rather than blocking the run — the {ok:false} path is the real rejection.
-			let briefSchema: Record<string, unknown> | null = null;
-			let schemaProvenance: string[] = [];
-			// Merged fragment (§17) — recorded in the manifest as reportSchemaFragment
-			// during the post-start reconcile, and quoted in fragment-rejection errors.
-			let resolvedSchema: Record<string, unknown> | null = null;
-			if (!isProbe) {
-				let resolved: ReturnType<typeof resolveReportSchema>;
-				try {
-					// EXTERNAL_DEPENDENCY: filesystem — <cwd>/.pi/delegate-schemas/
-					// (via pi's CONFIG_DIR_NAME — the literal ".pi" honoring pi's
-					// project-config convention) and ~/.pi/agent/pi-delegate-schemas/
-					// (library type files <name>.json).
-					// Two-tier schema library (DESIGN.md §16): project-local
-					// <cwd>/.pi/delegate-schemas/ searched FIRST, user-level second.
-					resolved = resolveReportSchema(briefPath, resolve(ctx.cwd, CONFIG_DIR_NAME, "delegate-schemas"));
-				} catch (err) {
-					// A throw is not a resolution failure per the contract ({ok:false} is) —
-					// degrade to base-schema-only validation instead of rejecting the spawn.
-					resolved = { ok: true, schema: null, provenance: [] };
-					step(
-						`warning: schema resolver threw unexpectedly (${errText(err)}) — falling back to base-schema-only validation`,
-						{ phase: "schema-degraded", error: errText(err) },
-					);
-				}
-				if (!resolved.ok) {
-					return fail(
-						"E_BRIEF",
-						`E_BRIEF — report schema resolution failed for ${params.name}: ${resolved.error}\n` +
-							"Fix the brief's reportSchema reference or inline fragment before spawning.",
-						{ briefPath, name: params.name, resolutionError: resolved.error },
-					);
-				}
-				// Corrected contract (merge gate): schema is null when the brief has no
-				// reportSchema key — ok-with-null → base-only validation, never a rejection.
-				briefSchema = resolved.schema;
-				schemaProvenance = resolved.provenance;
-				resolvedSchema = resolved.schema;
+			// Wave 3 (step 4.5): the phase is a pure function over explicit args
+			// (resolveBriefReportSchema) — the decision logic, the degrade-to-base
+			// contract and the E_BRIEF text are verbatim; the one advisory side
+			// effect (the degraded-resolution progress line) comes back as
+			// degradedWarning and is emitted here, in the original order.
+			const schemaResolution = resolveBriefReportSchema({
+				name: params.name,
+				briefPath,
+				cwd: ctx.cwd,
+				isProbe,
+			});
+			if (!schemaResolution.ok) return schemaResolution.failure;
+			const { briefSchema, schemaProvenance, resolvedSchema } = schemaResolution;
+			if (schemaResolution.degradedWarning !== undefined) {
+				step(
+					`warning: schema resolver threw unexpectedly (${schemaResolution.degradedWarning}) — falling back to base-schema-only validation`,
+					{ phase: "schema-degraded", error: schemaResolution.degradedWarning },
+				);
 			}
 
 			// 2. Place (worktree create / tab create — transport serializes mutations).
