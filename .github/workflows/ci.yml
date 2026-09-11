@@ -75,6 +75,14 @@ jobs:
           check_bump "root package.json" "$old_root" "$new_root"
           check_bump "extension package.json" "$old_ext" "$new_ext"
 
+      # Typecheck gate (Definition of Stable #1): bun typechecks nothing at
+      # runtime, so strict-mode holes ship invisibly without this. typescript
+      # is a pinned devDependency (7.x native compiler); the QA config is the
+      # repo's own test/tsconfig.qa.json.
+      - name: Typecheck (tsc --noEmit, QA config)
+        working-directory: pi/extensions/pi-delegate
+        run: bunx tsc --noEmit -p test/tsconfig.qa.json
+
       # Canonical runner: per-file timeout, at most one environment-flake
       # retry, an explicit ENV-FAIL verdict, and a non-zero exit on any FAIL
       # (protocol in test/run-checks.sh; it self-installs on a fresh

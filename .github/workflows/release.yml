@@ -49,6 +49,11 @@ jobs:
       # Canonical runner (same protocol as ci.yml — see test/run-checks.sh):
       # per-file timeout, one env-flake retry, explicit ENV-FAIL verdict,
       # non-zero exit on any FAIL.
+      # Typecheck gate on main before tagging (same as the PR gate in ci.yml).
+      - name: Typecheck (tsc --noEmit, QA config)
+        working-directory: pi/extensions/pi-delegate
+        run: bunx tsc --noEmit -p test/tsconfig.qa.json
+
       - name: Run check suite on main before tagging
         working-directory: pi/extensions/pi-delegate
         run: ./test/run-checks.sh
