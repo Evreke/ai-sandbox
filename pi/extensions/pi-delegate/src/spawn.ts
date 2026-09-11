@@ -101,7 +101,7 @@
 import { appendFile, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
-import { Type } from "typebox";
+import { type Static, Type } from "typebox";
 import { CONFIG_DIR_NAME, getAgentDir, type Theme } from "@earendil-works/pi-coding-agent";
 import {
 	aggregateTaskUsage,
@@ -612,6 +612,10 @@ const START_TIMEOUT_MS = 120_000;
 const SUBMIT_TIMEOUT_MS = 30_000;
 /** Default settle timeout for probe mode (short smoke gate). */
 const PROBE_TIMEOUT_MS = 120_000;
+/** Cap for the DEPRECATED timeoutMs alias (§20.1 hardened): a legacy stale
+ *  timeoutMs must never hold the session hostage — folded into waitMs capped
+ *  here AND clamped again in execute()'s wait computation. ONE spelling. */
+const WAIT_CAP_MS = 120_000;
 /** Exchange dir for probe runs — no brief/task, but placements must stay
  *  teardown- and status-visible (manifestStore.scan() covers every manifest under
  *  the exchange root). Derived from exchangeRoot() so sandboxed tests
@@ -1051,6 +1055,25 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			"mode 'probe' is the explicit smoke gate — run one probe before any ≥3 fan-out. " +
 			"Esc detaches without killing the worker. Report status 'fail' still means the worker ran and reported honestly.",
 		promptSnippet: "Spawn a worker with a brief file and block until its report lands",
+		prepareArguments(args): Static<typeof delegateParams> {
+			// Legacy-session shim (pi docs Argument preparation): old sessions may
+			// carry the deprecated timeoutMs alias. Fold it into waitMs ONLY when
+			// waitMs is not already present, applying the same WAIT_CAP_MS clamp
+			// execute() applies to the alias — the resulting call behaves exactly
+			// like the pre-refactor runtime for old calls. The public schema stays
+			// strict: everything without a string/number timeoutMs passes through
+			// untouched and is validated as-is.
+			if (!args || typeof args !== "object") return args as Static<typeof delegateParams>;
+			const input = args as Record<string, unknown>;
+			if (typeof input.waitMs === "number") return args as Static<typeof delegateParams>;
+			const legacy =
+				typeof input.timeoutMs === "number" ? input.timeoutMs
+				: typeof input.timeoutMs === "string" && input.timeoutMs.trim() !== "" && Number.isFinite(Number(input.timeoutMs))
+					? Number(input.timeoutMs)
+					: undefined;
+			if (legacy === undefined) return args as Static<typeof delegateParams>;
+			return { ...input, waitMs: Math.min(legacy, WAIT_CAP_MS) } as Static<typeof delegateParams>;
+		},
 		promptGuidelines: [
 			"Use delegate only after the brief file exists under ${exchangeRoot()}/<task>/ — pass its path as briefPath; the brief is the worker's instructions and its OUTPUT section must point at report-<name>.json.",
 			"delegate blocks until the worker settles; the worker's report file is the completion criterion, not the agent status — status fail in the report is still an honest completion.",
@@ -1098,8 +1121,9 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			// Symptom of the old behavior: a legacy/stale timeoutMs (1800000) held the
 			// session hostage for 30 min with no heartbeat escape hatch. What was
 			// done: WAIT_CAP_MS clamps the deprecated timeoutMs; an explicit waitMs is
-			// uncapped opt-in long blocking.
-			const WAIT_CAP_MS = 120_000;
+			// uncapped opt-in long blocking. (prepareArguments also folds the legacy
+			// alias into waitMs for resumed old sessions — the clamp here is the
+			// backstop for raw timeoutMs that still reaches execute.)
 			const settleGateMs = resolveWatchConfig().settleGateMs;
 			const timeoutMs =
 				params.waitMs ??
