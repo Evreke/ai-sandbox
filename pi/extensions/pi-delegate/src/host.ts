@@ -21,8 +21,8 @@
  */
 
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 // ============================================================================
 // SECTION 1 — src/transport/types.ts (verbatim, incl. its review header)
@@ -361,7 +361,8 @@ export const DEFAULT_BUDGET_TOKENS = 150_000;
  *  built-in worker tier — delegate refuses with E_TIER.
  * <p>
  * FUNCTION_CONTRACT (constant):
- * Input: none (resolved once at module load from os.homedir())
+ * Input: none (resolved once at module load via pi's getAgentDir(), which
+ *   honors PI_CODING_AGENT_DIR and defaults to ~/.pi/agent)
  * Output: the ABSOLUTE config path — the single source every config reader
  *   takes the path from (usage.ts resolvers, observe.ts watch config,
  *   index.ts host binding). Was a dead relative suffix before — the six
@@ -371,7 +372,7 @@ export const DEFAULT_BUDGET_TOKENS = 150_000;
  *     so module-load resolution is equivalent to per-call resolution there;
  *     in node (production pi) the home cannot change mid-session either.
  * Raises: never */
-export const BUDGET_CONFIG_PATH = join(homedir(), ".pi", "agent", "pi-delegate.config.json");
+export const BUDGET_CONFIG_PATH = join(getAgentDir(), "pi-delegate.config.json");
 
 /** Fraction of budget above which terminal results carry a burn warning. */
 export const BUDGET_WARN_FRACTION = 0.8;

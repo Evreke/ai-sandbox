@@ -99,11 +99,10 @@
 // ./observe.ts, ui render helpers in ./fleet.ts, the transport surface in
 // ./transport.ts (facades remain at the old paths until W5).
 import { appendFile, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import type { Theme } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, getAgentDir, type Theme } from "@earendil-works/pi-coding-agent";
 import {
 	aggregateTaskUsage,
 	answerPathFor,
@@ -789,11 +788,12 @@ function liveSessionFile(ctx: {
  *   - never throws past the caller (append failures are swallowed)
  * Raises: never
  * EXTERNAL_DEPENDENCY: ~/.pi/agent/delegate-watch.log (append-only audit
- *   file under $HOME; os.homedir() is cached by bun — see the
+ *   file under pi's agent dir; pi's getAgentDir() (honors
+ *   PI_CODING_AGENT_DIR) resolves it — see the
  *   makeWatcherLogSink contract in observe.ts for the test seam).
  */
 function watchAudit(line: string): void {
-	void appendFile(join(homedir(), ".pi", "agent", "delegate-watch.log"), `${new Date().toISOString()} ${line}\n`).catch(
+	void appendFile(join(getAgentDir(), "delegate-watch.log"), `${new Date().toISOString()} ${line}\n`).catch(
 		() => undefined,
 	);
 }
@@ -1238,11 +1238,13 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			if (!isProbe) {
 				let resolved: ReturnType<typeof resolveReportSchema>;
 				try {
-					// EXTERNAL_DEPENDENCY: filesystem — <cwd>/.pi/delegate-schemas/ and
-					// ~/.pi/agent/pi-delegate-schemas/ (library type files <name>.json).
+					// EXTERNAL_DEPENDENCY: filesystem — <cwd>/.pi/delegate-schemas/
+					// (via pi's CONFIG_DIR_NAME — the literal ".pi" honoring pi's
+					// project-config convention) and ~/.pi/agent/pi-delegate-schemas/
+					// (library type files <name>.json).
 					// Two-tier schema library (DESIGN.md §16): project-local
 					// <cwd>/.pi/delegate-schemas/ searched FIRST, user-level second.
-					resolved = resolveReportSchema(briefPath, resolve(ctx.cwd, ".pi", "delegate-schemas"));
+					resolved = resolveReportSchema(briefPath, resolve(ctx.cwd, CONFIG_DIR_NAME, "delegate-schemas"));
 				} catch (err) {
 					// A throw is not a resolution failure per the contract ({ok:false} is) —
 					// degrade to base-schema-only validation instead of rejecting the spawn.

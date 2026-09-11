@@ -105,8 +105,8 @@
 
 import { closeSync, openSync, readFileSync, readSync, rmSync, statSync } from "node:fs";
 import { appendFile, stat } from "node:fs/promises";
-import { homedir } from "node:os";
 import { basename, join } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
 	aggregateTaskUsage,
@@ -536,8 +536,8 @@ export interface WatchConfig {
  *   - tolerant: missing/corrupt/non-object config → null, never throws
  * Raises: never
  * EXTERNAL_DEPENDENCY: filesystem — ~/.pi/agent/pi-delegate.config.json
- *   (via homedir(); the single config file for watch + collect + spawn
- *   defaults across the extension).
+ *   (via pi's getAgentDir(), which honors PI_CODING_AGENT_DIR; the single
+ *   config file for watch + collect + spawn defaults across the extension).
  */
 function readDelegateConfig(): Record<string, unknown> | null {
 	try {
@@ -2198,13 +2198,15 @@ export function makeSender(
  *     prefix; routine bookkeeping never reaches the pane
  * Raises: never
  * EXTERNAL_DEPENDENCY: ~/.pi/agent/delegate-watch.log (append-only audit
- *   file under $HOME); os.homedir() is cached by bun — tests must set $HOME
- *   at child-process spawn time or redirect before the first call.
+ *   file under pi's agent dir); pi's getAgentDir() (honors
+ *   PI_CODING_AGENT_DIR) resolves it — os.homedir() is cached by bun —
+ *   tests must set $HOME at child-process spawn time or redirect before
+ *   the first call.
  */
 export function makeWatcherLogSink(): (m: string) => void {
 	return (m: string): void => {
 		void appendFile(
-			join(homedir(), ".pi", "agent", "delegate-watch.log"),
+			join(getAgentDir(), "delegate-watch.log"),
 			`${new Date().toISOString()} ${m}\n`,
 		).catch(() => undefined); // audit is advisory — never throw past the tick
 		if (/\berror\b|\bfail|already gone|unavailable/i.test(m)) {

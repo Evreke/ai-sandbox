@@ -50,8 +50,8 @@
  */
 
 import { closeSync, openSync, readFileSync, readdirSync, readSync, statSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { SessionUsage, SpawnTier } from "./host.ts";
 
 /** Canonical worker-stale default (§22): a collected worker still mounted
@@ -231,7 +231,7 @@ export function resolvePiSessionCandidates(
 	startedAtMs: number,
 	opts?: { sessionsRoot?: string; windowMs?: number },
 ): string[] {
-	const sessionsRoot = opts?.sessionsRoot ?? join(homedir(), ".pi", "agent", "sessions");
+	const sessionsRoot = opts?.sessionsRoot ?? join(getAgentDir(), "sessions");
 	const windowMs = opts?.windowMs ?? 10 * 60_000;
 	const munged = workerCwd.replace(/^\//, "").replace(/\//g, "-");
 	let entries: string[];

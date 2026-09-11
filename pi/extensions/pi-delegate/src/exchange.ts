@@ -91,7 +91,7 @@
  *      preserved verbatim, incl. its namespace-style imports).
  */
 
-import { parseFrontmatter, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
+import { parseFrontmatter, getAgentDir, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import {
 	delegateError,
 	type DelegateError,
@@ -1631,8 +1631,10 @@ export function resolveReportSchema(
 	return resolveReportSchemaInDir(briefPath, undefined, projectSchemaDir);
 }
 
-/** User-level schema library dir, relative to $HOME (DESIGN.md §16). */
-const USER_SCHEMA_DIR = ".pi/agent/pi-delegate-schemas";
+/** User-level schema library dir (DESIGN.md §16): under pi's agent dir
+ *  (getAgentDir() — honors PI_CODING_AGENT_DIR, default ~/.pi/agent).
+ *  Module-level constant computed from the pi export at module load. */
+const USER_SCHEMA_DIR = join(getAgentDir(), "pi-delegate-schemas");
 
 /** Max number of "$extends" hops in a chain (cycle-safe backstop). */
 const MAX_SCHEMA_DEPTH = 8;
@@ -1644,7 +1646,8 @@ type SchemaResult =
 /**
  * resolveReportSchema with an injectable library dir (test seam — bun caches
  * os.homedir(), so $HOME overrides do NOT affect it at call time).
- * schemaDir omitted → real user-level library under homedir().
+ * schemaDir omitted → real user-level library under pi's agent dir
+ * (getAgentDir() — honors PI_CODING_AGENT_DIR).
  * projectSchemaDir (two-tier, §16): when provided, searched FIRST for every
  * library lookup (the root name and every "$extends" parent); user-level
  * (or the schemaDir test seam) is the fallback tier.
@@ -1704,7 +1707,7 @@ export function loadLibrarySchema(
 	name: string,
 	dirOverride?: string,
 ): { ok: true; schema: Record<string, unknown> } | { ok: false; error: string } {
-	const dir = dirOverride ?? join(homedir(), USER_SCHEMA_DIR);
+	const dir = dirOverride ?? USER_SCHEMA_DIR;
 	const path = join(dir, `${name}.json`);
 	let raw: string;
 	try {
@@ -1857,19 +1860,22 @@ import * as path from "node:path";
 
 export const ARCHIVE_DIR = ".pi/agent/delegate-archive";
 
-/** Absolute archive root. */
+/** Absolute archive root.
+ * <p>
+ * EXTERNAL_DEPENDENCY: pi's getAgentDir() (honors PI_CODING_AGENT_DIR) — the
+ * archive lives at <agentDir>/delegate-archive/, OUTSIDE /tmp (which dies on
+ * reboot; see the module header's durability note).
+ * BUG_FIX_CONTEXT (Windows HOME misdirection): symptom — on Windows a
+ * POSIX-style $HOME (some environments set it) silently redirected the
+ * archive outside the real profile. Why the old code failed: HOME-first
+ * lookup is a Unix convention, os.homedir() (USERPROFILE) is the Windows
+ * truth. Fix: pi's getAgentDir() resolves from os.homedir() on every
+ * platform (the Windows truth) — the HOME-misdirection class is gone by
+ * construction; in the default environment the resolved path is identical
+ * to the old $HOME/.pi/agent/delegate-archive.
+ */
 export function archiveRoot(): string {
-	// EXTERNAL_DEPENDENCY: $HOME env var (fallback: os.homedir()) — the archive
-	// lives at $HOME/.pi/agent/delegate-archive/, OUTSIDE /tmp (which dies on
-	// reboot; see the module header's durability note).
-	// BUG_FIX_CONTEXT (Windows HOME misdirection): symptom — on Windows a
-	// POSIX-style $HOME (some environments set it) silently redirected the
-	// archive outside the real profile. Why the old code failed: HOME-first
-	// lookup is a Unix convention, os.homedir() (USERPROFILE) is the Windows
-	// truth. Fix: on win32 prefer os.homedir(); POSIX behavior byte-identical
-	// (HOME still wins there).
-	const base = process.platform === "win32" ? os.homedir() : (process.env.HOME ?? os.homedir());
-	return path.join(base, ARCHIVE_DIR);
+	return path.join(getAgentDir(), "delegate-archive");
 }
 
 /**
