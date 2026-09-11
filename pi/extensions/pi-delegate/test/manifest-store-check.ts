@@ -262,14 +262,14 @@ try {
 	//     implementation is deleted).
 	// ---------------------------------------------------------------------------
 	{
-		const src = readFileSync(resolve(import.meta.dir, "..", "src", "exchange.ts"), "utf8");
-		const archiveIdx = src.indexOf("SECTION 2 — src/archive.ts");
-		const section = archiveIdx >= 0 ? src.slice(archiveIdx) : "";
+		// Wave 3a: the archive module moved verbatim to src/archive.ts — the pin
+		// follows the move (same assertions, new location).
+		const src = readFileSync(resolve(import.meta.dir, "..", "src", "archive.ts"), "utf8");
 		check(
 			"M4.1 the archive section carries no second tmp+rename implementation (uses the shared atomicWriteFileSync)",
-			/atomicWriteFileSync\(manifestPath/.test(section) &&
-				!/renameSync\(tmp, manifestPath\)/.test(section) &&
-				!/\.tmp-\$\{process\.pid\}-\$\{Date\.now\(\)\}/.test(section),
+			/atomicWriteFileSync\(manifestPath/.test(src) &&
+				!/renameSync\(tmp, manifestPath\)/.test(src) &&
+				!/\.tmp-\$\{process\.pid\}-\$\{Date\.now\(\)\}/.test(src),
 		);
 	}
 } finally {

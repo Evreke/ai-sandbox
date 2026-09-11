@@ -110,7 +110,7 @@ import {
 // exports map (ERR_PACKAGE_PATH_NOT_EXPORTED, verified via node + jiti);
 // "typebox/value" is the exported entry for the same build/value modules.
 import { Check, Errors } from "typebox/value";
-import { mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { parseSessionUsage } from "./usage.ts";
@@ -130,6 +130,7 @@ import {
 } from "./expaths.ts";
 import * as nodePath from "node:path";
 import * as nodePathWin32 from "node:path/win32";
+import { atomicWriteFileSync } from "./archive.ts";
 
 // Shared exchange-dir name conventions (migration stage 1): the constants
 // moved to src/expaths.ts (the path-builder module owns their ONE spelling
@@ -139,6 +140,18 @@ export {
 	PROBE_DIR_SUFFIX,
 	TEARDOWN_LOG_NAME,
 } from "./expaths.ts";
+
+// Wave 3a transition facade (temporary, one release per the plan): the
+// archive module moved verbatim to src/archive.ts — re-exported here so
+// every existing import site keeps resolving unchanged; sites flip to the
+// new module in the follow-up commit.
+export {
+	ARCHIVE_TTL_MS,
+	archiveReport,
+	archiveRoot,
+	listArchivedTasks,
+	pruneArchive,
+} from "./archive.ts";
 
 // ============================================================================
 // SECTION 1 — src/exchange.ts (verbatim, incl. its review-verified headers)
@@ -429,12 +442,6 @@ export function readManifest(dir: string): ExchangeManifest | null {
 	} catch {
 		return null;
 	}
-}
-
-function atomicWriteFileSync(path: string, content: string): void {
-	const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
-	writeFileSync(tmp, content, "utf8");
-	renameSync(tmp, path); // rename is atomic on the same filesystem
 }
 
 /**
@@ -1839,134 +1846,3 @@ export function readLastProgress(path: string): ProgressEvent | null {
 }
 
 
-// ============================================================================
-// SECTION 2 — src/archive.ts (verbatim, incl. its header and imports)
-// ============================================================================
-
-/**
- * pi-delegate — report archive (DESIGN.md §19.3).
- *
- * OWNERSHIP: contract authored by the tech lead; implementation owned by
- * worker A6 (impl-settle). Worker B6 imports, never edits this file.
- *
- * Durability: collected reports are mirrored OUT of /tmp (which dies on
- * reboot — a field task lost every artifact of three phases) into
- * ~/.pi/agent/delegate-archive/<task>/.
- */
-
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
-
-/** Absolute archive root.
- * <p>
- * EXTERNAL_DEPENDENCY: pi's getAgentDir() (honors PI_CODING_AGENT_DIR) — the
- * archive lives at <agentDir>/delegate-archive/, OUTSIDE /tmp (which dies on
- * reboot; see the module header's durability note).
- * BUG_FIX_CONTEXT (Windows HOME misdirection): symptom — on Windows a
- * POSIX-style $HOME (some environments set it) silently redirected the
- * archive outside the real profile. Why the old code failed: HOME-first
- * lookup is a Unix convention, os.homedir() (USERPROFILE) is the Windows
- * truth. Fix: pi's getAgentDir() resolves from os.homedir() on every
- * platform (the Windows truth) — the HOME-misdirection class is gone by
- * construction; in the default environment the resolved path is identical
- * to the old $HOME/.pi/agent/delegate-archive.
- */
-export function archiveRoot(): string {
-	return path.join(getAgentDir(), "delegate-archive");
-}
-
-/**
- * Archive one collected report: copy source →
- * <archiveRoot>/<task>/<basename of reportPath> (basename preserved AS-IS —
- * no "report-" prefix; R6 fix: collected reports are already named
- * report-<worker>.json, a prefix here double-prefixed them), and (re)write
- * <archiveRoot>/<task>/manifest.json from the given manifest object.
- * Best-effort by contract: return the archive report path on success,
- * null on ANY failure (caller shows a warning, never an error).
- */
-export function archiveReport(
-	taskDir: string,
-	reportPath: string,
-	manifest: Record<string, unknown>,
-): string | null {
-	try {
-		const task = path.basename(taskDir);
-		if (task.length === 0) return null;
-		const dir = path.join(archiveRoot(), task);
-		fs.mkdirSync(dir, { recursive: true });
-
-		const reportName = path.basename(reportPath);
-		if (reportName.length === 0) return null;
-		const dest = path.join(dir, reportName);
-		fs.copyFileSync(reportPath, dest);
-
-		// Manifest snapshot: atomic tmp+rename so a concurrent reader never
-		// observes a half-written manifest.json. Migration stage 2 (audit step 5):
-		// the archive path's SECOND hand-rolled atomic-write implementation is
-		// deleted — the shared atomicWriteFileSync (same file, ONE protocol) is
-		// used instead, so the write protocol has exactly one implementation.
-		const manifestPath = path.join(dir, "manifest.json");
-		atomicWriteFileSync(manifestPath, `${JSON.stringify(manifest, null, "\t")}\n`);
-		return dest;
-	} catch {
-		// Best-effort by contract: ANY failure → null, never throw.
-		return null;
-	}
-}
-
-/** Retention TTL: archived task dirs older than this are pruned (30 days). */
-export const ARCHIVE_TTL_MS = 30 * 24 * 60 * 60_000;
-
-/**
- * Retention: delete archived task dirs whose mtime is older than the TTL
- * (ARCHIVE_TTL_MS = 30 days by default; the folder mtime is the age source).
- * Best-effort by contract: ANY failure — missing/unreadable archive root,
- * undeletable task dir — is skipped, never thrown. A broken ttl input
- * (NaN/negative/Infinity) falls back to the default instead of wiping the
- * archive. Returns the number of task dirs removed.
- */
-export function pruneArchive(maxAgeMs: number = ARCHIVE_TTL_MS): number {
-	const ttl = Number.isFinite(maxAgeMs) && maxAgeMs >= 0 ? maxAgeMs : ARCHIVE_TTL_MS;
-	try {
-		const root = archiveRoot();
-		const cutoffMs = Date.now() - ttl;
-		let pruned = 0;
-		for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
-			if (!entry.isDirectory()) continue; // stray files are not task dirs
-			const dir = path.join(root, entry.name);
-			try {
-				if (fs.statSync(dir).mtimeMs >= cutoffMs) continue; // fresh — keep
-				fs.rmSync(dir, { recursive: true, force: true });
-				pruned++;
-			} catch {
-				// unreadable/undeletable task dir → skip it, keep pruning the rest
-			}
-		}
-		return pruned;
-	} catch {
-		return 0; // archiveRoot missing/unreadable → nothing to prune, never throw
-	}
-}
-
-/** List archived tasks (dir names under archiveRoot with a manifest.json). */
-export function listArchivedTasks(): string[] {
-	try {
-		const root = archiveRoot();
-		return fs
-			.readdirSync(root, { withFileTypes: true })
-			.filter((d) => d.isDirectory())
-			.map((d) => d.name)
-			.filter((name) => {
-				try {
-					return fs.statSync(path.join(root, name, "manifest.json")).isFile();
-				} catch {
-					return false;
-				}
-			})
-			.sort();
-	} catch {
-		// archiveRoot missing or unreadable → no archived tasks.
-		return [];
-	}
-}
