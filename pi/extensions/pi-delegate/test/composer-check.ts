@@ -21,10 +21,15 @@
  *       or not.
  *   M6  The production defaults are wired: with no overrides the composer
  *       scans via manifestStore with the Transport's backend name.
- *   M7  Watcher stage A: a DEGRADED tier-1 lead (unreadable session id)
- *       mounts NO watcher — ownsChildren needs a proven sessionFile, so the
- *       session classifies as a pure worker and its child wakes are lost
- *       (documented known behavior of the role table).
+ *   M7  Watcher stage C fix: a DEGRADED tier-1 lead (unreadable session id)
+ *       MOUNTS a watcher — worker identity is the entry's own sessionPath
+ *       only, so a degraded self proves nothing and reads as "not a worker"
+ *       (fail-open toward MOUNTING). Its child wakes are still lost, but on
+ *       the DELIVERY side (fail-closed, guideline §3.6) — no longer by a
+ *       spurious pure-worker classification.
+ *   M8  Stage C regression: a session whose cwd matches a worker entry's
+ *       worktree checkoutPath (ownerless historical entry) is NOT a worker
+ *       — the watcher MOUNTS.
  * Exit 0 only if all checks pass.
  */
 
@@ -137,17 +142,19 @@ rec = drive([], { sessionFile: WORKER_SESSION, cwd: SANDBOX });
 check("M4 no readable worker evidence → the watcher mounts (fail-open)", rec.mounted === true);
 rmSync(garbageDir, { recursive: true, force: true });
 
-// --- M4b: DEGRADED tier-1 lead → does NOT mount (documented known loss) ---
+// --- M7: DEGRADED tier-1 lead → MOUNTS (stage C: identity by sessionPath) --
 
-// Watcher stage A fixture-pins a known behavior of the canonical role table
-// (src/watch-role.ts sessionRole): a tier-1 lead whose session identity is
-// DEGRADED (the live sessionManager getter throws → sessionFile undefined)
-// still matches the worker gate by its worktree checkoutPath (the mounting
-// identity-equivalent), but owns NOTHING — ownsChildren requires a PROVEN
-// sessionFile. So it is classified a pure worker: NO watcher is mounted and
-// its child wakes are lost. Deliberate: delivery is fail-closed, and a
-// session that cannot prove its id must neither mount an audience role nor
-// be woken (guideline §3.6); the loss is the documented cost.
+// Stage C fix (src/watch-role.ts sessionRole): the worker gate matches the
+// entry's OWN sessionPath ONLY — the former worktree checkoutPath === cwd
+// mounting equivalent is REMOVED (ambiguous: tab workers share the
+// orchestrator's checkout, and a historical entry poisoned the gate for any
+// new session in that cwd). A degraded tier-1 lead (the live sessionManager
+// getter throws → sessionFile undefined) can match NOTHING: it reads as
+// "not a worker" and MOUNTS a watcher (fail-open toward MOUNTING). Its
+// child wakes are still lost — but now on the DELIVERY side, fail-closed
+// (guideline §3.6: no proven id delivers nothing), never by a wrong
+// mount-side classification. Harmless: a mounted watcher without a proven
+// identity never produces a wrong wake (stage A invariant).
 {
 	const leadChild = [
 		{
@@ -158,8 +165,27 @@ rmSync(garbageDir, { recursive: true, force: true });
 		},
 	];
 	rec = drive([...pureWorkerManifest, ...leadChild], { sessionFile: undefined, cwd: join(SANDBOX, "wt-w1") });
-	check("M7 degraded tier-1 lead (unreadable self id) mounts NO watcher (child wake loss is documented)", rec.mounted === false);
+	check("M7 degraded tier-1 lead (unreadable self id) MOUNTS a watcher (delivery stays fail-closed)", rec.mounted === true);
 	check("M7b degraded tier-1 lead still prunes the archive once", rec.prunes === 1, `prunes=${rec.prunes}`);
+}
+
+// --- M8: ownerless historical entry + cwd match → MOUNTS (stage C) ---------
+
+// The incident shape: a manifest worker entry with a worktree checkoutPath
+// equal to THIS session's cwd but no sessionPath at all (ownerless,
+// historical). Before the stage C fix the cwd match classified the session
+// a pure worker → no watcher → every child wake silently lost. Now: a cwd
+// match proves nothing → the watcher mounts.
+{
+	const ownerlessHistorical = [
+		{
+			name: "w-historical",
+			placement: { kind: "worktree", checkoutPath: join(SANDBOX, "wt-w1") },
+		},
+	];
+	rec = drive(ownerlessHistorical, { sessionFile: WORKER_SESSION, cwd: join(SANDBOX, "wt-w1") });
+	check("M8 ownerless entry + cwd match → NOT a worker → the watcher MOUNTS", rec.mounted === true);
+	check("M8b the ownerless-cwd session still prunes the archive once", rec.prunes === 1, `prunes=${rec.prunes}`);
 }
 
 // --- M5: identity threading + single prune --------------------------------

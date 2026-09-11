@@ -10,6 +10,39 @@ Version numbers align with the iteration numbering in DESIGN.md (v1.x sections).
 
 ### Changed
 
+- **An orchestrator session running in a directory where a worker once ran
+  again receives wake-ups (stage C mount-gate fix).** The mount gate
+  (`isWorkerSession`) used to classify any session whose cwd equals a worker
+  entry's `placement.checkoutPath` as that worker — so a fresh orchestrator
+  started in a worktree where an earlier worker had run silently mounted no
+  watcher and lost every child wake-up (reproduced in live acceptance
+  testing). Worker identity on the mount side is now proven ONLY by the
+  entry's own `sessionPath` (the worker session's JSONL path); the
+  checkoutPath === cwd branch is removed as ambiguous by construction (tab
+  workers always share the orchestrator's checkout, and a historical entry
+  poisoned the gate for every future session in that cwd). Unproven reads as
+  "not a worker" and the session mounts — safe because delivery stays
+  fail-closed (watcher stage A): a mounted watcher without a proven identity
+  never produces a wrong wake. Consequences of the same fix: the in-loop
+  self/leaf-worker suppression also matches by sessionPath only, and a
+  degraded tier-1 lead (unreadable session id) now mounts a watcher but
+  still wakes for nothing (the fail-closed edge lives on the delivery side,
+  guideline §3.6).
+
+- **A worker that ends without a report is now reported explicitly (watcher
+  stage C — explicit result-plane states).** The `worker-dead` wake now also
+  fires for a worker that SETTLED (done/idle, still known to herdr) without
+  ever writing a report — previously that state was silent; only the
+  gone-from-host shape woke anyone. Both shapes name the missing report and
+  the failed-spawn move, carry the same launch-stamp episode fingerprint, and
+  are committed to the durable delivery store like every other kind. The
+  missing-report branch is deliberately not silenced by the `collectedAt`
+  stamp (that stamp suppresses only the report-branch wake-ups). A corrupt
+  `q-<name>.json` mailbox file (exists but is not valid JSON or not a question
+  envelope) is now audited in the watcher log with its cause instead of being
+  silently treated as "no question" — it still produces no wake-up and is
+  never masked as a report event. No ownership or delivery behavior changed:
+  unreliable result files never widen the wake-up audience.
 - **Watcher wake-up delivery now survives a session restart (watcher stage
   B — durable delivery store).** The delivered-facts dedup left the memory of
   one watcher mount: each audience session commits its delivery records to

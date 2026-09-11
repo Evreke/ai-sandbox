@@ -647,7 +647,10 @@ archived tasks ("last task: <task> — N archived reports — ~/.pi/agent/delega
   mount gate (src/watch-role.ts, classifyOwnership → workerAudienceMatch) —
   the display-only degraded-self worktree fallback (checkoutPath === cwd →
   "mine") NEVER feeds delivery: a degraded self-id delivers nothing
-  unconditionally (§21.1 F1, stage-A update).
+  unconditionally (§21.1 F1, stage-A update). Stage C note: the MOUNT gate
+  dropped the same equivalent (its identity is the entry's own sessionPath
+  only) — the fallback survives as a display convenience for the
+  degraded-self-id worktree corner, documented in src/fleet.ts.
 - **Placed-count chip — REMOVED (v1.8, user decision)**: the global cross-session
   count + pessimistic burn were confusing. `ctx.ui.setFooter` itself is also banned
   (it REPLACES pi's native footer — context %, model, cost, cwd). Only the live-rows
@@ -784,7 +787,7 @@ workers' session JSONL (usage gauges + a tail-window tool-call scan).
 | `mailbox-question` | `q-<name>.json` holds a valid envelope | question text + options + "answer via `delegate_mailbox` (action 'answer')" |
 | `grill-deck` | worker's session JSONL contains a `grill_deck` toolCall | "blocked on an interactive deck in its OWN pane — only a human there can answer (or steer it to the mailbox)" |
 | `context-critical` | `contextPct ≥ CONTEXT_CRITICAL_PCT` (90) vs `resolveContextWindow(model)` | pct + "steer it to wrap up now / plan a fresh-name retry" |
-| `worker-dead` | herdr knows the agent is gone (no live status) AND no report on disk | "exited without producing anything — read the pane, then diagnosed retry" |
+| `worker-dead` | the worker's episode ended with NO report on disk: herdr no longer knows the agent (gone from the host), or the worker settled (done/idle in herdr) without ever writing one (watcher stage C — guideline §6.2.1) | "no report — exited/finished without producing anything — read the pane, then diagnosed retry" |
 | `worker-stale` (v1.12.1, §22) | manifest `collectedAt` older than `watch.staleAfterMs` AND the worker still live in herdr | "collected N min ago and still mounted — tear it down (/delegate-teardown) or keep" |
 
 **Dedup (watcher stage B — memory is a cache, disk is the truth).** Every kind
@@ -813,19 +816,49 @@ status flap or a transient read error. One `sendUserMessage` per **batch**
 the episode rules for the gauge/absence kinds — live in the delivered-store
 subsection below. See §21.1b for the durable store itself.
 
+**Result-plane states (watcher stage C — guideline §6.2, all pinned by
+W3/W4/W7/W18).** The result plane (the `report-*.json` / `q-*.json` files the
+WORKER is supposed to write) is an unreliable sensor by nature: absence or
+corruption of these files is a valid worker outcome, never a delivery (router)
+failure. Every state is therefore explicit and observable:
+
+1. **No report after the episode ended** (the worker is gone from herdr, or it
+   settled done/idle without ever writing one, always past the 60 s placement
+   grace) → the `worker-dead` wake names the missing report and the failed-spawn
+   move. This branch is deliberately NOT silenced by the `collectedAt` stamp:
+   it is about an absent report, while `collectedAt` suppresses only the
+   report-branch wake-ups (guideline §6.2.1).
+2. **A report that exists but fails validation** → `report-invalid`, with the
+   validation error quoted — a distinct kind and message, never rendered as a
+   delivery failure.
+3. **A valid report** → `report-ready`.
+4. **A valid question envelope** (`q-<name>.json`) → `mailbox-question`.
+5. **A corrupt q-file** (the file exists but is not valid JSON or not a question
+   envelope) → an audit line in the watcher log with the cause (via the
+   `onSkip` sink, reason `corrupt-question`); it produces NO event and is never
+   masked as `report-ready`. A mid-write torn read reads as corrupt and
+   self-heals on a later tick.
+
+No state above loosens ownership or delivery (guideline §6.3): a missing or
+broken result file never widens the audience, and fixing the model's report
+habits lives in the spawn flow, not here.
+
 **Suppressions** (each pinned by a test): `worker-dead` never fires while herdr
-is unreachable (statuses unknown ≠ dead), inside the 60 s placement grace
-window, for probe runs (probes write no report, §19.4), or when a report
-exists. Manifests older than the 24 h lookback are dropped — a fresh session
-must not be woken for last week's fleet.
+is unreachable (statuses unknown ≠ dead — for both the gone-from-host and the
+settled shape), inside the 60 s placement grace window, for probe runs (probes
+write no report, §19.4), or when a report exists. Manifests older than the
+24 h lookback are dropped — a fresh session must not be woken for last week's
+fleet.
 
 **Self-mute.** Every pi session runs this extension, workers included, so the
-watcher identifies *itself* in the manifests (session JSONL path, or the unique
-worktree checkout path) and (a) never delivers events about its own worker and
-(b) stays silent altogether when it is a leaf **worktree** worker — that fleet
+watcher identifies *itself* in the manifests by its own session JSONL path
+(stage C fix: the former worktree checkoutPath === cwd equivalent is gone —
+a historical entry must not mute a new session that merely shares its cwd)
+and (a) never delivers events about its own worker and (b) stays silent
+altogether when it is a leaf **worktree** worker — that fleet
 belongs to whoever spawned it. Sub-orchestrators (tab placements, per the skill)
-keep their watcher; tab workers are never muted on cwd alone, because a tab
-shares the orchestrator's checkout and cwd cannot tell them apart.
+keep their watcher; no session is ever identified by cwd alone, because a tab
+shares the orchestrator's checkout and cwd cannot tell sessions apart.
 
 **Delivery.** `pi.sendUserMessage(text, { deliverAs: "followUp" })` — it wakes
 an idle orchestrator and never interrupts a turn in flight. The tick AWAITED
@@ -927,9 +960,26 @@ none of them can corrupt a spawn or a collect result). One fix shape each:
   | Role | Definition | Mount local watcher? | Receives wake for worker W? |
   |------|------------|----------------------|------------------------------|
   | Pure orchestrator | Is not a worker entry in any live manifest; is the owner of its own workers | Yes | Yes, when the owner of W is this session |
-  | Pure worker | Is a worker entry; owns no child workers | No | No (not a fleet audience) |
+  | Pure worker | Is a worker entry (the entry's OWN `sessionPath` equals this session's JSONL path); owns no child workers | No | No (not a fleet audience) |
   | Worker-orchestrator (tier-1) | Is a worker entry of the parent AND the owner of its own child workers | Yes | Yes only for W whose owner is this session; never for the parent's other workers |
   | Foreign | Any other session | Does not matter | Never for W with a foreign owner |
+
+  Worker identity on the MOUNT side is the entry's OWN `sessionPath` only
+  (stage C fix). The former mounting equivalent `placement.checkoutPath ===
+  cwd` (worktree entries only) was REMOVED as ambiguous by construction:
+  tab workers ALWAYS share the orchestrator's checkout, and a HISTORICAL
+  worker entry poisoned the gate for ANY future session started in that cwd
+  — an orchestrator silently lost its watcher and every child wake. A cwd
+  coincidence proves nothing; unproven reads as "not a worker" and the
+  session MOUNTS — harmless since stage A, because delivery is fail-closed
+  (a mounted watcher without a proven identity never produces a wrong
+  wake). Consequence of the removal: during the spawn race (the manifest
+  record predates the worker's sessionPath) a worker session may briefly
+  mount a watcher — delivery stays silent, and the worker's own events are
+  filtered by the same sessionPath identity. The UI keeps ONE display-only
+  remnant of the equivalent (classifyOwnership: no owner field + degraded
+  self-id + worktree checkoutPath === cwd → glyph "mine"); it never feeds
+  delivery (§19.4).
 
   In natural language: a session either appears as a worker entry in some
   live manifest or it does not. A session that is nobody's worker is a pure
@@ -942,9 +992,11 @@ none of them can corrupt a spawn or a collect result). One fix shape each:
   Everything a session can neither prove as its own worker nor be proven
   the owner of is foreign: no wake. A session whose own identity is
   unreadable (degraded self-id) is delivery-silent regardless of role — it
-  owns nothing and receives nothing; a degraded tier-1 lead therefore loses
-  its child wakes (a documented known behavior, pinned in
-  test/composer-check.ts, check M7).
+  owns nothing and receives nothing. Since the stage C fix the identity is
+  the entry's own sessionPath only, so a degraded tier-1 lead MOUNTS a
+  watcher (it can no longer be classified a pure worker by its cwd) and
+  loses its child wakes on the DELIVERY side instead (a documented known
+  behavior, pinned in test/composer-check.ts, check M7).
 ### 21.1b The durable delivered-facts store (watcher stage B, guideline §5)
 
 Before stage B the dedup lived only in the memory of ONE watcher mount: a
@@ -1027,7 +1079,7 @@ empty constant):**
 | `nudge-failed` | marker `ts` | No for the same marker |
 | `grill-deck` | deck invocation count | A second deck → a new fingerprint |
 | `context-critical` | EPISODE: worker launch stamp (`startedAt`) + the threshold | One wake per launch per threshold; a restarted worker is a new episode |
-| `worker-dead` | EPISODE: worker launch stamp (`startedAt`); a manifest without a parseable stamp degrades to a stable constant (one wake per dedup lifetime for that edge) | One wake per launch: a herdr status flap within one launch does NOT re-fire; a NEW run (new `startedAt`) is a new death episode |
+| `worker-dead` | EPISODE: worker launch stamp (`startedAt`); a manifest without a parseable stamp degrades to a stable constant (one wake per dedup lifetime for that edge) | One wake per launch: a herdr status flap within one launch does NOT re-fire; a NEW run (new `startedAt`) is a new death episode. Watcher stage C: the episode covers both missing-report shapes (gone from the host, settled without a report) — the same launch, the same episode |
 | `worker-stale` | the `collectedAt` value | A re-collect writes a new stamp → a new fingerprint |
 
 **collectedAt vs the store (guideline §5.5) — two different facts, one rule.**

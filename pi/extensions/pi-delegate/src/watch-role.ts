@@ -61,8 +61,11 @@ export interface SessionIdentity {
 	/** This session's JSONL path (ctx.sessionManager.getSessionFile()).
 	 *  Undefined = degraded self-id (headless, getter threw). */
 	sessionFile?: string;
-	/** This session's cwd (ctx.cwd) — consumed by the mount-side role table
-	 *  (sessionRole) only, never by the delivery verdict. */
+	/** This session's cwd (ctx.cwd) — NOT consumed by the role table since
+	 *  the stage C mount-gate fix (worker identity is the entry's own
+	 *  sessionPath only); kept for shape compatibility with SelfIdentity
+	 *  and the display-side fallback in fleet.ts. Never by the delivery
+	 *  verdict. */
 	cwd?: string;
 }
 
@@ -128,11 +131,15 @@ export function workerAudienceMatch(
 /** The two mount-side roles of the guideline §3.4 table. */
 export interface SessionRole {
 	/** True when this session IS one of the manifest's workers (a fleet row,
-	 *  not an audience): exact session JSONL path, or — for worktree
-	 *  placements only — the unique per-worker checkout path equal to this
-	 *  session's cwd. That cwd/checkoutPath branch is an IDENTITY EQUIVALENT
-	 *  FOR MOUNTING ONLY: the delivery verdict never accepts it (guideline
-	 *  §3.6 — delivery needs a proven session id). */
+	 *  not an audience): EXACT match between the entry's own `sessionPath`
+	 *  (the worker session's JSONL path) and this session's proven
+	 *  sessionFile. The former checkoutPath === cwd mounting equivalent was
+	 *  REMOVED (stage C fix): it is ambiguous by construction — tab workers
+	 *  share the orchestrator's checkout, and a HISTORICAL worker entry
+	 *  poisoned the gate for every future session started in that cwd (an
+	 *  orchestrator silently lost its watcher). A cwd match alone proves
+	 *  nothing; unproven reads as "not a worker" and the session mounts
+	 *  (harmless: delivery stays fail-closed, guideline §3.6). */
 	isWorker: boolean;
 	/** True only when some worker entry names this session's PROVEN
 	 *  sessionFile as its orchestrator — the tier-1 worker-orchestrator
@@ -171,9 +178,14 @@ export interface ManifestLike {
  *   - ownsChildren requires a proven sessionFile — a degraded tier-1 lead
  *     (getter threw) owns nothing and its child wakes are lost (documented,
  *     known behavior);
- *   - the cwd/checkoutPath isWorker branch covers the spawn race (the
- *     manifest record predates the worker's sessionPath) and tab workers are
- *     NEVER matched by cwd (shared checkout is ambiguous);
+ *   - isWorker is matched by the entry's OWN sessionPath only — the
+ *     former cwd/checkoutPath branch was removed as ambiguous (stage C
+ *     fix): tab workers share the orchestrator's checkout, and a
+ *     historical worker entry used to poison the gate for ANY new session
+ *     started in that cwd. Consequence: during the spawn race (the
+ *     manifest record predates the worker's sessionPath) a worker session
+ *     may briefly MOUNT a watcher — harmless, because delivery is
+ *     fail-closed and the entry's owner is another session;
  *   - pure: no I/O, no lookback window (asks about a SESSION, which may
  *     outlive the 24 h fleet), never throws
  * Raises: never
@@ -188,19 +200,15 @@ export function sessionRole(self: SessionIdentity, manifests: ReadonlyArray<Mani
 		for (const w of workers) {
 			if (w === null || typeof w !== "object") continue;
 			const e = w as Record<string, unknown>;
+			// Worker identity: the entry's OWN sessionPath only. A cwd match
+			// (even against a worktree entry's unique checkoutPath) is NOT
+			// identity — a historical entry would poison the gate for every
+			// future session in that cwd (stage C fix, BUG_FIX_CONTEXT in the
+			// commit message). A degraded self-id (selfId undefined) can match
+			// nothing → "not a worker" → the session mounts (fail-open toward
+			// MOUNTING; delivery stays fail-closed, guideline §3.6).
 			if (!isWorker && selfId !== undefined && e.sessionPath === selfId) {
 				isWorker = true;
-			}
-			if (!isWorker && self.cwd !== undefined) {
-				const placement = e.placement;
-				if (
-					placement !== null &&
-					typeof placement === "object" &&
-					(placement as Record<string, unknown>).kind === "worktree"
-				) {
-					const checkoutPath = (placement as Record<string, unknown>).checkoutPath;
-					if (typeof checkoutPath === "string" && checkoutPath === self.cwd) isWorker = true;
-				}
 			}
 			if (
 				!ownsChildren &&
