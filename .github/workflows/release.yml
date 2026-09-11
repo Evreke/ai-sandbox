@@ -33,7 +33,9 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          # Pinned: an unrelated bun release must not flip the gate; bumps
+          # are deliberate (change this line explicitly).
+          bun-version: 1.4.2
 
       # Same as ci.yml: typebox is a peerDependency, the checkout has no
       # node_modules — without the install every check that spawns a bun

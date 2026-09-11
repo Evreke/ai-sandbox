@@ -20,7 +20,9 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          # Pinned: an unrelated bun release must not flip the gate; bumps
+          # are deliberate (change this line explicitly).
+          bun-version: 1.4.2
 
       # typebox is an optional peerDependency — the repo carries bun.lock but
       # no node_modules, and the check scripts spawn bun subprocesses that
