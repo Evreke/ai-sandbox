@@ -25,7 +25,7 @@
  * Exit 0 only if all checks pass.
  */
 
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import {
@@ -34,6 +34,7 @@ import {
 	type ExchangeManifest,
 	type ManifestWorker,
 } from "../src/exchange.ts";
+import { atomicWriteFileSync } from "../src/manifest-store.ts";
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = "") {
@@ -270,6 +271,49 @@ try {
 			/atomicWriteFileSync\(manifestPath/.test(src) &&
 				!/renameSync\(tmp, manifestPath\)/.test(src) &&
 				!/\.tmp-\$\{process\.pid\}-\$\{Date\.now\(\)\}/.test(src),
+		);
+	}
+
+	// -----------------------------------------------------------------------
+	// M6 — the atomic writer's fsync protocol (Wave 4 item 4, crash
+	// consistency). HONESTY NOTE on what is and is NOT proven: a real crash
+	// (power loss between write and rename) cannot be reproduced in a
+	// deterministic check. What IS proven here:
+	//   - the writer still produces byte-identical files and leaves no tmp
+	//     residue (M6.1 — the open/write/fsync/close refactor changed no
+	//     observable bytes);
+	//   - the fsync call exists at the ONE writer site and is ordered BEFORE
+	//     the rename (M6.2 static pin on src/manifest-store.ts, same
+	//     technique as M4.1).
+	// What is NOT proven: that the OS actually flushed to stable storage —
+	// that is the kernel's contract with fsyncSync, taken on faith per POSIX.
+	// -----------------------------------------------------------------------
+	{
+		const fsDir = join(SANDBOX, "task-m6");
+		const target = join(fsDir, "m6.txt");
+		mkdirSync(fsDir, { recursive: true });
+		const content = JSON.stringify({ probe: "m6", n: 42 }, null, "\t") + "\n";
+		atomicWriteFileSync(target, content);
+		check(
+			"M6.1 the fsync'd writer still produces byte-identical files",
+			readFileSync(target, "utf8") === content,
+		);
+		check(
+			"M6.1b no tmp residue is left next to the target",
+			!readdirSync(fsDir).some((f) => f.startsWith("m6.txt.tmp-")),
+			readdirSync(fsDir).join(", "),
+		);
+		const msSrc = readFileSync(resolve(import.meta.dir, "..", "src", "manifest-store.ts"), "utf8");
+		const fnStart = msSrc.indexOf("export function atomicWriteFileSync");
+		const fnEnd = msSrc.indexOf("renameSync(tmp, path)", fnStart);
+		const fnBody = fnStart >= 0 && fnEnd > fnStart ? msSrc.slice(fnStart, fnEnd) : "";
+		check(
+			"M6.2 static pin: fsyncSync runs inside the ONE atomic writer, before renameSync (open → write → fsync → close → rename)",
+			/openSync\(tmp/.test(fnBody) &&
+				/writeSync\(fd/.test(fnBody) &&
+				fnBody.includes("fsyncSync(fd)") &&
+				fnBody.includes("closeSync(fd)"),
+			fnBody.slice(0, 120),
 		);
 	}
 } finally {

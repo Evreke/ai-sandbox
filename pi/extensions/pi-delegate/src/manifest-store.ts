@@ -24,15 +24,17 @@
  *     serialization is what makes the claim/rollback protocol safe against
  *     parallel spawns.
  *   - manifest writes are atomic (tmp+rename via the ONE shared
- *     atomicWriteFileSync) and serialized via withFileMutationQueue on the
- *     target path.
+ *     atomicWriteFileSync, which now FSYNCS the tmp file before the rename —
+ *     Wave 4 item 4, crash consistency: a crash after rename can no longer
+ *     leave a renamed-but-never-flushed empty/short file) and serialized via
+ *     withFileMutationQueue on the target path.
  *   - F1 usage cache is a CACHE, not authority (readers never write).
  *
  * All bodies are byte-verbatim moves from src/exchange.ts (Wave 3a).
  */
 
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
-import { mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, writeSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import type { Placement } from "./host.ts";
 import { exchangeRoot } from "./exchange.ts";
@@ -73,12 +75,29 @@ export function isSupportedSchemaVersion(v: unknown): boolean {
  * Guarantees:
  *   - atomic: content lands via tmp file + rename (atomic on the same
  *     filesystem); a concurrent reader never sees a half-written file
+ *   - crash-consistent (Wave 4 item 4): the tmp file's bytes are fsync'd
+ *     BEFORE the rename — open → write → fsync → close → rename, one
+ *     protocol at this one call site. Directory fsync is deliberately
+ *     OMITTED: the durability target is "a renamed file holds the full
+ *     content", not "the directory entry survives a power loss" — the
+ *     exchange dir itself is long-lived (created once, far earlier than any
+ *     write), and a POSIX-optional directory fsync would add a
+ *     platform-dependent failure mode (EINVAL on some filesystems) to every
+ *     write for no gain on that target.
  * Raises:
  *   - propagates filesystem errors (callers decide tolerance)
  */
 export function atomicWriteFileSync(path: string, content: string): void {
 	const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
-	writeFileSync(tmp, content, "utf8");
+	// open → write → fsync → close (Wave 4 item 4: flush the tmp file's bytes
+	// to stable storage BEFORE the rename makes it visible at `path`).
+	const fd = openSync(tmp, "w");
+	try {
+		writeSync(fd, content, null, "utf8");
+		fsyncSync(fd);
+	} finally {
+		closeSync(fd);
+	}
 	renameSync(tmp, path); // rename is atomic on the same filesystem
 }
 
