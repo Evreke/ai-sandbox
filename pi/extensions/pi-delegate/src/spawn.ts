@@ -28,7 +28,7 @@
  * of the two source files' exports).
  * Critical invariants (owned here, per report-ref-map.json hiddenInvariants):
  *   - append-before-start (EXECUTION side; exchange.ts owns the file
- *     conventions via updateManifest): the ManifestWorker entry is appended
+ *     conventions via the manifest store): the ManifestWorker entry is appended
  *     after place() and BEFORE startAgent; a refused start rolls back ONLY
  *     the entry THIS call appended (match name + this paneId + no
  *     sessionPath) — never a pre-existing same-name worker.
@@ -102,15 +102,13 @@ import {
 	progressPathFor,
 	questionPathFor,
 	readLastProgress,
-	readManifest,
+	manifestStore,
 	readQuestion,
 	releasePathFor,
 	reportPathFor,
 	resolveReportSchema,
-	scanAllManifests,
 	TEARDOWN_LOG_NAME,
 	teardownLogLine,
-	updateManifest,
 	validateReport,
 	validateReportAgainstSchema,
 	writeAnswer,
@@ -229,13 +227,13 @@ function textResult(text: string, details: Record<string, unknown>): ToolResult 
 /** Exchange dirs of all known task manifests (read: q-file scan surface). */
 function knownTaskDirs(): string[] {
 	const dirs = new Set<string>();
-	for (const manifest of scanAllManifests()) dirs.add(manifest.dir);
+	for (const manifest of manifestStore.scan()) dirs.add(manifest.dir);
 	return [...dirs];
 }
 
 /** Exchange dir that owns a worker, from the manifests (answer/steer target). */
 function findWorkerDir(name: string): string | null {
-	for (const manifest of scanAllManifests()) {
+	for (const manifest of manifestStore.scan()) {
 		if (manifest.workers.some((w) => w.name === name)) return manifest.dir;
 	}
 	return null;
@@ -590,7 +588,7 @@ const SUBMIT_TIMEOUT_MS = 30_000;
 /** Default settle timeout for probe mode (short smoke gate). */
 const PROBE_TIMEOUT_MS = 120_000;
 /** Exchange dir for probe runs — no brief/task, but placements must stay
- *  teardown- and status-visible (scanAllManifests covers every manifest under
+ *  teardown- and status-visible (manifestStore.scan() covers every manifest under
  *  the exchange root). Derived from exchangeRoot() so sandboxed tests
  *  ($PI_DELEGATE_EXCHANGE_ROOT) never touch the live /tmp/exchange root. */
 function probeExchangeDir(): string {
@@ -947,7 +945,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			// formula) or output budget (secondary, when set).
 			const maxPct = params.maxContextPct ?? CONTEXT_WARN_PCT;
 			const contextWindow = resolveContextWindow(model);
-			const priorWorker = readManifest(manifestDir)?.workers.find(
+			const priorWorker = manifestStore.read(manifestDir)?.workers.find(
 				(w) => w.name === params.name && typeof w.sessionPath === "string" && w.sessionPath.length > 0,
 			);
 			if (priorWorker?.sessionPath) {
@@ -1089,7 +1087,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				} catch {
 					fleetDescription = undefined; // unreadable brief → next spawn retries
 				}
-				await updateManifest(manifestDir, (m) =>
+				await manifestStore.update(manifestDir, (m) =>
 					applyFleetTaskFields(
 						{ ...m, workers: [...m.workers, manifestEntry] },
 						{ description: fleetDescription, masterSessionPath: orchestratorSessionPath },
@@ -1140,7 +1138,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				// sessionPath — a pre-existing same-name
 				// worker (its own placement / a real sessionPath) is preserved.
 				try {
-					await updateManifest(manifestDir, (m) => ({
+					await manifestStore.update(manifestDir, (m) => ({
 						...m,
 						workers: m.workers.filter(
 							(w) =>
@@ -1211,7 +1209,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			{
 				const canonicalReportPath = reportPathFor(manifestDir, canonical);
 				try {
-					await updateManifest(manifestDir, (m) => ({
+					await manifestStore.update(manifestDir, (m) => ({
 						...m,
 					workers: m.workers.map((w) =>
 						w.name === params.name &&
@@ -1320,7 +1318,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 					const statuses = await transport.listStatuses();
 					const live = statuses.filter((s) => s.status === "working" || s.status === "blocked");
 					if (live.length === 0) {
-						notifyFleetIdle(ctx, readManifest(manifestDir)?.workers.length ?? 1);
+						notifyFleetIdle(ctx, manifestStore.read(manifestDir)?.workers.length ?? 1);
 					}
 				} catch {
 					// advisory only — herdr unreachable → skip the nudge
@@ -1413,7 +1411,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				// Best-effort by contract: null/throw → warning line, never an error.
 				let archivePath: string | null = null;
 				try {
-					const manifest = readManifest(manifestDir);
+					const manifest = manifestStore.read(manifestDir);
 					if (manifest) {
 						archivePath = archiveReport(manifestDir, usedReportPath, manifest as unknown as Record<string, unknown>);
 					}
@@ -1435,7 +1433,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				// never fails the collect.
 				let collectedNote = "";
 				try {
-					await updateManifest(manifestDir, (m) => ({
+					await manifestStore.update(manifestDir, (m) => ({
 						...m,
 						workers: m.workers.map((w) =>
 							w.name === canonical || w.name === params.name
@@ -1603,7 +1601,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				if (guessed) {
 					sessionPath = guessed;
 					try {
-						await updateManifest(manifestDir, (m) => ({
+						await manifestStore.update(manifestDir, (m) => ({
 							...m,
 							workers: m.workers.map((w) => (w.name === canonical ? { ...w, sessionPath: guessed } : w)),
 						}));

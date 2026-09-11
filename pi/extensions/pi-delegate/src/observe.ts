@@ -84,7 +84,6 @@ import {
 	archiveReport,
 	archiveRoot,
 	listArchivedTasks,
-	readManifest,
 	type TaskUsageSnapshot,
 } from "./exchange.ts";
 import {
@@ -98,10 +97,9 @@ import {
 	readNudgeFailedMarker,
 	readQuestion,
 	releasePathFor,
-	scanAllManifests,
+	manifestStore,
 	TEARDOWN_LOG_NAME,
 	teardownLogLine,
-	updateManifest,
 	validateReport,
 	validateReportAgainstSchema,
 	type ExchangeManifest,
@@ -150,7 +148,7 @@ function usageSource(): {
 } {
 	const sessionPathByName = new Map<string, string>();
 	const modelByName = new Map<string, string>();
-	for (const manifest of scanAllManifests()) {
+	for (const manifest of manifestStore.scan()) {
 		for (const w of manifest.workers) {
 			if (w.sessionPath) sessionPathByName.set(w.name, w.sessionPath);
 			if (typeof w.model === "string") modelByName.set(w.name, w.model);
@@ -367,7 +365,7 @@ export function registerStatusTool(pi: import("@earendil-works/pi-coding-agent")
 			for (const dir of fleetDirs) {
 				const snap = aggregateTaskUsage(dir);
 				if (!snap) continue; // no readable manifest → no fleet line
-				lines.push(formatFleetUsageLine(basename(dir), snap, readManifest(dir)?.description));
+				lines.push(formatFleetUsageLine(basename(dir), snap, manifestStore.read(dir)?.description));
 			}
 
 			return {
@@ -778,7 +776,7 @@ export function isWorkerSession(self: SelfIdentity, manifests: ExchangeManifest[
  * FUNCTION_CONTRACT:
  * Input:
  *   - self: this session's identity (sessionFile is the only field consulted)
- *   - manifests: manifests from scanAllManifests() (untyped JSON — may be garbage)
+ *   - manifests: manifests from manifestStore.scan() (untyped JSON — may be garbage)
  * Output: true iff some worker entry names this session as its orchestrator
  * Guarantees:
  *   - tolerant: absent/garbage manifests and worker entries degrade to false
@@ -907,7 +905,7 @@ export async function collectSnapshot(
 	self: SelfIdentity = {},
 	nowMs: number = Date.now(),
 ): Promise<WatchSnapshot> {
-	return workersFromManifests(scanAllManifests(), await readStatusesTolerant(transport), self, nowMs);
+	return workersFromManifests(manifestStore.scan(), await readStatusesTolerant(transport), self, nowMs);
 }
 
 // ---------------------------------------------------------------------------
@@ -1427,7 +1425,7 @@ async function stampWorkerField(
 	w: WatchWorker,
 	patch: (x: ExchangeManifest["workers"][number]) => ExchangeManifest["workers"][number],
 ): Promise<void> {
-	await updateManifest(w.dir, (m) => ({
+	await manifestStore.update(w.dir, (m) => ({
 		...m,
 		workers: m.workers.map((x) => (x.name === w.name ? patch(x) : x)),
 	}));
@@ -1540,7 +1538,7 @@ export async function retirePass(
 				// rewritten in place) → idempotent by construction. Best-effort by
 				// contract: a failure never blocks the close.
 				try {
-					const manifest = readManifest(w.dir);
+					const manifest = manifestStore.read(w.dir);
 					if (manifest) archiveReport(w.dir, w.reportPath, manifest as unknown as Record<string, unknown>);
 				} catch {
 					// archive is advisory — the retiredAt stamp already guards history
@@ -1606,7 +1604,7 @@ export interface WatcherDeps {
 	self?: SelfIdentity;
 	detect?: DetectOptions;
 	/** Snapshot source override (tests drive fixtures; production uses
-	 *  collectSnapshot over scanAllManifests + the injected transport). */
+	 *  collectSnapshot over manifestStore.scan() + the injected transport). */
 	snapshot?: () => Promise<WatchSnapshot>;
 	/** Advisory log sink (console.error by default). */
 	log?: (msg: string) => void;
