@@ -229,7 +229,10 @@ check(
 // observe's neighborhood lives in the extracted modules (watch-config.ts,
 // watch-store.ts, report-schema.ts, mailbox-store.ts, manifest-store.ts,
 // archive.ts); importing observe for it re-creates the forbidden edge.
-const OBSERVE_IMPORT_ALLOWLIST = new Set(["compose.ts"]);
+// Re-audit 2026-09-12: the allowlist is EMPTY — compose.ts no longer imports
+// observe.ts either; the pin is exact. Keep the filter shape so a future
+// waiver needs a named entry + a written reason, not a silent pass.
+const OBSERVE_IMPORT_ALLOWLIST = new Set<string>([]);
 const observeImportOffenders = listTsFiles(resolve(ROOT, "src"))
 	.filter((f) => !OBSERVE_IMPORT_ALLOWLIST.has(f.split("/").pop() ?? ""))
 	.filter((f) => /from\s*["']\.\/observe(\.ts)?["']/.test(readFileSync(f, "utf8")));

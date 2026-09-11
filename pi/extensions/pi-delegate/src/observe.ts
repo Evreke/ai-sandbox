@@ -6,6 +6,10 @@
  * ARCHITECTURE.md Law 5). After the release window the remaining import
  * sites (index.ts, compose.ts today; the check suite pins) flip to the new
  * modules directly and this file retires.
+ * Re-audit note (2026-09-12): no production importer remains — index.ts and
+ * compose.ts already import the extracted modules directly; only the check
+ * suite pins still resolve through this facade. Retirement is scheduled for
+ * the next cycle (ROADMAP.md post-release backlog).
  *
  * Where everything lives now:
  *   - watch-config.ts  — the tolerant watch/collect config resolution
