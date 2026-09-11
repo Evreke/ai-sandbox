@@ -23,7 +23,9 @@ import { mountSessionWatcher } from "./src/compose.ts";
 import { buildWidgetRows, disposeFleetUI, mountFleetUI, type FleetWidgetRow as FleetRow, type FleetUIDeps } from "./src/fleet.ts";
 import { createHerdrTransport } from "./src/herdr/host.ts";
 import { BUDGET_CONFIG_PATH, DelegateErrorImpl, type Transport } from "./src/host.ts";
-import { registerDelegateTool, registerMailboxTool } from "./src/spawn.ts";
+import { registerDelegateTool } from "./src/spawn.ts";
+// Wave 3 decomposition: the mailbox tool lives in src/mailbox-tool.ts.
+import { registerMailboxTool } from "./src/mailbox-tool.ts";
 
 // ===========================================================================
 // Host binding (workerhost inversion, design §5/§6 migration steps 5–6):
