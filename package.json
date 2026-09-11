@@ -6,6 +6,6 @@
   "keywords": ["pi-package"],
   "pi": {
     "extensions": ["./pi/extensions/pi-delegate"],
-    "skills": ["./pi/skills/delegate"]
+    "skills": ["./pi/extensions/pi-delegate/skills/delegate"]
   }
 }
