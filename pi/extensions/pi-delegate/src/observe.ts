@@ -15,7 +15,9 @@
  * to fleet.ts — it is view-building and now lives with the other view code
  * (this broke the fleet<->observe import cycle; observe → fleet is one-way).
  * Dependencies: exchange.ts (manifest + report + mailbox protocol), usage.ts
- * (session JSONL usage + the shared staleness constant),
+ * (session JSONL usage + tool-call names + the shared staleness constant —
+ * migration stage 3, audit step 10: usage.ts is the ONLY session-JSONL
+ * parser (one-parser law); observe consumes parsed numbers/names),
  * archive exports of exchange.ts (resume hint),
  * fleet.ts (status-tool render helpers + buildWorkerView + fleet-UI
  * mount/overlay), ./host.ts (the Transport seam + gauge constants), typebox.
@@ -29,7 +31,7 @@
  * WatchConfig, resolveWatchConfig, COLLECT_DEFAULT_TEARDOWN_AFTER_COLLECT,
  * CollectConfig, resolveCollectConfig, WatchEventKind, WatchEvent, eventKey,
  * WatchWorker, WatchSnapshot, WATCH_LOOKBACK_MS, WATCH_DEAD_GRACE_MS,
- * SESSION_TAIL_BYTES, GRILL_DECK_TOOL, SelfIdentity, isWorkerSession,
+ * GRILL_DECK_TOOL, SelfIdentity, isWorkerSession,
  * ownsChildManifests, workersFromManifests, readStatusesTolerant, collectSnapshot, DetectOptions,
  * detectWorkerEvents, detectEvents, RetireReason, RetireDecision, RetireEval,
  * mailboxDrained, evaluateRetire, RetirePassOptions, retirePass,
@@ -119,7 +121,14 @@ import {
 	renderDelegateLines,
 	type WorkerView,
 } from "./fleet.ts";
-import { contextPct, formatTokens, parseSessionUsage, resolveContextWindow, WATCH_DEFAULT_STALE_AFTER_MS } from "./usage.ts";
+import {
+	contextPct,
+	countSessionToolCall,
+	formatTokens,
+	parseSessionUsage,
+	resolveContextWindow,
+	WATCH_DEFAULT_STALE_AFTER_MS,
+} from "./usage.ts";
 import { stampRetireClockClear, stampRetireClockStart, stampRetired } from "./lifecycle.ts";
 import {
 	BUDGET_CONFIG_PATH,
@@ -718,10 +727,6 @@ export const WATCH_LOOKBACK_MS = 24 * 60 * 60_000;
 /** A worker placed seconds ago is not dead: herdr may not have registered it
  *  yet (and startAgent itself takes time). */
 export const WATCH_DEAD_GRACE_MS = 60_000;
-/** Session JSONL scan cap: only the tail can hold a NEW tool call, and a
- *  10 s poll must not re-parse 50 MB per worker. */
-export const SESSION_TAIL_BYTES = 1_000_000;
-
 /** The grill-deck tool name — a worker that invoked it is blocked on a HUMAN
  *  at its own pane, not on the mailbox. */
 export const GRILL_DECK_TOOL = "grill_deck";
@@ -915,103 +920,6 @@ export async function collectSnapshot(
 	nowMs: number = Date.now(),
 ): Promise<WatchSnapshot> {
 	return workersFromManifests(manifestStore.scan(transport.backendName()), await readStatusesTolerant(transport), self, nowMs);
-}
-
-// ---------------------------------------------------------------------------
-// Session JSONL scan — tool-call names (accompanies parseSessionUsage, which
-// deliberately knows nothing about tools). Tolerant: unreadable/corrupt/partial
-// → [] (a half-written last line is skipped, never thrown).
-// ---------------------------------------------------------------------------
-
-/** Tail-reads a worker's session JSONL (whole file when it fits the cap).
- * <p>
- * FUNCTION_CONTRACT:
- * Input: path — session JSONL path; maxBytes — tail cap (default
- *   SESSION_TAIL_BYTES = 1 MB)
- * Output: the whole file, or its last maxBytes bytes
- * Guarantees:
- *   - the fd-based tail read never loads a >1 MB session fully; the first
- *     (partial) line fails to parse and is skipped by callers
- *   - unreadable file → "" (no tool calls known), never throws
- * Raises: never
- * EXTERNAL_DEPENDENCY: filesystem — the worker's pi session JSONL
- *   (path comes from the manifest's sessionPath / pi session storage).
- */
-function readSessionTail(path: string, maxBytes: number = SESSION_TAIL_BYTES): string {
-	let fd: number | undefined;
-	try {
-		const size = statSync(path).size;
-		if (size <= maxBytes) return readFileSync(path, "utf8");
-		// Tail read (the first, partial line fails to parse and is skipped) —
-		// explicit fd read: @types/node types position/length only on the Buffer
-		// overload of readFileSync, and no new dependencies are allowed.
-		fd = openSync(path, "r");
-		const start = size - maxBytes;
-		const len = size - start;
-		const buf = Buffer.allocUnsafe(len);
-		readSync(fd, buf, 0, len, start);
-		return buf.toString("utf8");
-	} catch {
-		return ""; // unreadable → no tool calls known, never throw
-	} finally {
-		if (fd !== undefined) {
-			try {
-				closeSync(fd);
-			} catch {
-				// already closed — advisory scan, nothing to recover
-			}
-		}
-	}
-}
-
-/** Names of every toolCall in a worker session (duplicates preserved — the
- *  count is a useful fingerprint). Empty when the session is unknown/corrupt.
- * <p>
- * FUNCTION_CONTRACT:
- * Input: sessionPath — worker session JSONL path (undefined → [])
- * Output: toolCall block names in order, duplicates preserved
- * Guarantees:
- *   - reads only the session TAIL (readSessionTail) — a 10 s poll must not
- *     re-parse 50 MB; corrupt/partial lines are skipped
- * Raises: never
- * EXTERNAL_DEPENDENCY: filesystem — the worker's pi session JSONL.
- */
-export function sessionToolCallNames(sessionPath?: string): string[] {
-	if (!sessionPath) return [];
-	const names: string[] = [];
-	for (const line of readSessionTail(sessionPath).split("\n")) {
-		if (!line.trim()) continue;
-		let e: unknown;
-		try {
-			e = JSON.parse(line);
-		} catch {
-			continue; // corrupt/partial line — skip
-		}
-		const content = (e as { message?: { content?: unknown } })?.message?.content;
-		if (!Array.isArray(content)) continue;
-		for (const block of content) {
-			if (
-				block !== null &&
-				typeof block === "object" &&
-				(block as { type?: unknown }).type === "toolCall" &&
-				typeof (block as { name?: unknown }).name === "string"
-			) {
-				names.push((block as { name: string }).name);
-			}
-		}
-	}
-	return names;
-}
-
-/** How many times a worker invoked a tool (0 when unreadable).
- * <p>
- * FUNCTION_CONTRACT:
- * Input: sessionPath (may be undefined), toolName
- * Output: exact invocation count in the session tail (0 when unreadable)
- * Raises: never
- */
-export function countSessionToolCall(sessionPath: string | undefined, toolName: string): number {
-	return sessionToolCallNames(sessionPath).filter((n) => n === toolName).length;
 }
 
 // ---------------------------------------------------------------------------

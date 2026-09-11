@@ -67,7 +67,6 @@ import {
 	WATCH_MIN_STALE_AFTER_MS,
 	WATCH_LOOKBACK_MS,
 	collectSnapshot,
-	countSessionToolCall,
 	createWatcher,
 	detectEvents,
 	detectWorkerEvents,
@@ -77,7 +76,6 @@ import {
 	makeSender,
 	ownsChildManifests,
 	resolveWatchConfig,
-	sessionToolCallNames,
 	startWatcher,
 	stopWatcher,
 	workersFromManifests,
@@ -86,6 +84,7 @@ import {
 	type WatchSnapshot,
 } from "../src/observe.ts";
 import { questionPathFor, reportPathFor, type ExchangeManifest, type ManifestWorker } from "../src/exchange.ts";
+import { countSessionToolCall, sessionToolCallNames } from "../src/usage.ts";
 import type { AgentStatus, Transport } from "../src/host.ts";
 
 let failures = 0;
