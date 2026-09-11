@@ -648,7 +648,10 @@ const delegateParams = Type.Object({
 	thinking: Type.Optional(Type.String({ description: "Thinking level override; otherwise the configured tier/defaults decide (see ~/.pi/agent/pi-delegate.config.json) — no built-in default" })),
 	waitMs: Type.Optional(Type.Number({ description: "How long this call BLOCKS waiting for the worker (default: watch.settleGateMs from ~/.pi/agent/pi-delegate.config.json, 15000 ms — just enough to prove the worker started). At the cap the call auto-detaches: END YOUR TURN, the background watcher wakes you when the report lands or the worker needs attention. Long waits are explicit opt-in via this param." })),
 	timeoutMs: Type.Optional(Type.Number({ description: "Deprecated alias for waitMs — CAPPED at 120000 ms unless waitMs is set explicitly." })),
-	releaseOn: Type.Optional(Type.Union([Type.Literal("started"), Type.Literal("settle")], { description: "When to release this call: 'settle' (default) blocks the full window unless the worker settles inline; 'started' releases as soon as the worker is proven started and working — the background watcher wakes you on report-ready/question/death. Default from watch.releaseOn in ~/.pi/agent/pi-delegate.config.json. Never applies to probes." })),
+	releaseOn: Type.Optional(StringEnum(["started", "settle"] as const, {
+		description:
+			"When to release this call: 'settle' (default) blocks the full window unless the worker settles inline; 'started' releases as soon as the worker is proven started and working — the background watcher wakes you on report-ready/question/death. Default from watch.releaseOn in ~/.pi/agent/pi-delegate.config.json. Never applies to probes.",
+	})),
 
 	budgetTokens: Type.Optional(Type.Number({ minimum: 1, description: "Optional OUTPUT-token cap (sum of assistant output); over-budget workers are refused on retry with E_BUDGET." })),
 	maxContextPct: Type.Optional(Type.Number({ minimum: 10, maximum: 99, description: "Context-window %% refusal line (default 80 — the operator restart habit). Re-spawning a worker at/over this context %% is refused with E_CONTEXT." })),
