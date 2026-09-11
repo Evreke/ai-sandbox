@@ -10,6 +10,24 @@ Version numbers align with the iteration numbering in DESIGN.md (v1.x sections).
 
 ### Changed
 
+- **Watcher wake-up delivery now survives a session restart (watcher stage
+  B — durable delivery store).** The delivered-facts dedup left the memory of
+  one watcher mount: each audience session commits its delivery records to
+  `delivered-<key>.json` in the task directory (one file per session per
+  task dir, atomic write, tolerant read) and only AFTER a successful
+  wake-up send — a failed send never touches the disk, and a failed durable
+  write is not a failed delivery (an audit line notes the possible repeat
+  after a restart). Repeated wake-ups on the same files after a session
+  restart are therefore gone. A report the collect tool already accepted
+  (the manifest `collectedAt` stamp) still never produces a delivery record
+  — the store holds only really-sent wakes. Emergency rollback to the
+  memory-only dedup without a new version: `watch.durableDelivery: false`
+  (default true; a non-boolean value warns once and stays true). One-time
+  behavior on upgrade: the first run on a RESUMED session may emit a single
+  volley of repeated wake-ups — the store starts empty and is never seeded
+  (seeding would guess what was delivered; the volley is bounded by the
+  ownership gate and the 24 h lookback). On a shared machine, updated and
+  not-yet-updated sessions behave differently until all are updated.
 - **Watcher wake-up delivery is fail-closed by default (watcher stage A).**
   A manifest with no owner fields anywhere (legacy) no longer delivers
   wake-ups to every mounted watcher; only a proven owner session is woken.

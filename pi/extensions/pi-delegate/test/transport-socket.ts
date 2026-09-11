@@ -300,6 +300,12 @@ try {
 	// server/socket — the LIVE leg must SKIP, not crash the whole file with an
 	// unhandled connect ENOENT (offline legs TS.1–TS.7 already passed above).
 	{
+		// BUG_FIX_CONTEXT (stale pre-existing pin, fails on the stage-A base):
+		// the liveness gate below exec's `herdr --version` THROUGH the canary
+		// stub on PATH (it forwards to the real binary and logs the spawn), so
+		// the canary count is already 1 before the socket call — the absolute
+		// ZERO-spawn assertion failed on every run. What was done: the baseline
+		// is captured BEFORE the gate and the assertion compares the DELTA.
 		const herdrLive = await (async () => {
 			try {
 				await execFileP("herdr", ["--version"], { encoding: "utf8", timeout: 10_000 });
@@ -311,10 +317,14 @@ try {
 		if (!herdrLive) {
 			console.log("SKIP TS.8 LIVE leg — herdr not available on this host (offline legs TS.1–TS.7 all ran)");
 		} else {
+		// The liveness gate above already exec'd `herdr --version` THROUGH the
+		// canary (it forwards to the real binary) — capture the baseline HERE,
+		// after the gate and before the socket call under test.
+		const canaryBaseline = canaryCount();
 		const t = new HerdrTransport(); // default socket resolution (env/default path)
 		const socketStatuses = await t.listStatuses();
 		check("TS.8 LIVE socket listStatuses resolves with ≥1 agent", socketStatuses.length >= 1, `n=${socketStatuses.length}`);
-		const spawnsAfterSocketCall = canaryCount();
+		const spawnsAfterSocketCall = canaryCount() - canaryBaseline;
 		check("TS.8 LIVE socket path spawned ZERO herdr processes", spawnsAfterSocketCall === 0, `canary=${spawnsAfterSocketCall}`);
 		// CLI cross-check — NOTE: this intentionally spawns via the canary (it IS a
 		// CLI call); the ZERO-spawn assertion above was captured BEFORE it.

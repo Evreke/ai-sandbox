@@ -33,12 +33,12 @@
  * WATCH_MIN_STALE_AFTER_MS, RETIRE_DEFAULT_TTL_MS, RETIRE_DEFAULT_ENABLED,
  * WatchConfig, resolveWatchConfig, COLLECT_DEFAULT_TEARDOWN_AFTER_COLLECT,
  * CollectConfig, resolveCollectConfig, WatchEventKind, WatchEvent, eventKey,
- * WatchWorker, WatchSnapshot, WATCH_LOOKBACK_MS, WATCH_DEAD_GRACE_MS,
+ * DeliveryKey, SendOutcome, WatchWorker, WatchSnapshot, WATCH_LOOKBACK_MS, WATCH_DEAD_GRACE_MS,
  * GRILL_DECK_TOOL, SelfIdentity, isWorkerSession,
  * ownsChildManifests, workersFromManifests, readStatusesTolerant, collectSnapshot, DetectOptions,
  * detectWorkerEvents, detectEvents, RetireReason, RetireDecision, RetireEval,
  * mailboxDrained, evaluateRetire, RetirePassOptions, retirePass,
- * formatEventBatch, WatcherDeps, WatcherHandle, createWatcher, stopWatcher,
+ * formatEventBatch, formatWakeUpAuditLine, WatcherDeps, WatcherHandle, createWatcher, stopWatcher,
  * makeSender, startWatcher, registerCommands, formatFleetUsageLine (F1).
  * Critical invariants (owned here, per report-ref-map.json hiddenInvariants):
  *   - collectedAt-dedup (reader side): report-ready/report-invalid are SILENT
@@ -72,6 +72,16 @@
  *     explicit watch.legacyFailOpen:true; a degraded self-id delivers
  *     NOTHING unconditionally (no configuration escape); skipped deliveries
  *     are auditable (onSkip → the watcher log sink).
+ *   - durable delivery store (watcher stage B, guideline §5): the dedup
+ *     memory (`seen`) is only a CACHE of the durable delivered-facts file
+ *     (delivered-<watcherKey>.json per task dir, exchange.ts I/O). A
+ *     delivery key is committed to disk ONLY after a successful send; a
+ *     failed send rolls the batch's keys back out of memory only — never
+ *     off disk; a failed durable WRITE is not a failed delivery (memory
+ *     keys stay, an audit line notes the possible post-restart repeat); a
+ *     failed read degrades to an empty store (never throws). Records are
+ *     removed ONLY as garbage collection when a worker really vanishes
+ *     from the manifests — never on a skipped observation.
  * External runtime dependencies (ZCS, ported from the bundle's watcher
  * contract): ~/.pi/agent/pi-delegate.config.json (watch/collect config —
  * readDelegateConfig); the worker session JSONL files on disk (gauges +
@@ -100,10 +110,15 @@ import { basename, join } from "node:path";
 import { Type } from "typebox";
 import {
 	aggregateTaskUsage,
+	appendDeliveredRecords,
 	archiveReport,
 	archiveRoot,
+	deleteWorkerDeliveryRecords,
+	deliveryRecordKey,
+	deliveredStorePathFor,
 	exchangeRoot,
 	listArchivedTasks,
+	readDeliveredStore,
 	type TaskUsageSnapshot,
 } from "./exchange.ts";
 import {
@@ -126,6 +141,7 @@ import {
 	validateReport,
 	validateReportAgainstSchema,
 	watcherKeyFor,
+	type DeliveryRecord,
 	type ExchangeManifest,
 	type RetireStamps,
 } from "./exchange.ts";
@@ -471,6 +487,11 @@ export const RETIRE_DEFAULT_TTL_MS = 900_000;
  *  the operator opted in via watch.retire:true (user decision, mandatory). */
 export const RETIRE_DEFAULT_ENABLED = false;
 
+/** Watcher stage B master default: TRUE — committing the durable delivered
+ *  facts is the safe value (it only ever SUPPRESSES a repeated wake-up; the
+ *  memory-only rollback is the emergency exit, not the default). */
+export const DURABLE_DELIVERY_DEFAULT_ENABLED = true;
+
 export interface WatchConfig {
 	intervalMs: number;
 	settleGateMs: number;
@@ -496,6 +517,12 @@ export interface WatchConfig {
 	 *  edge: a session whose identity is unreadable delivers nothing with or
 	 *  without the flag (guideline §3.6 — no configuration escape). */
 	legacyFailOpen: boolean;
+	/** Watcher stage B (guideline §5, default TRUE): commit delivered-facts
+	 *  records to the durable per-task store after a successful send, so the
+	 *  dedup survives a session restart. false is the emergency rollback to
+	 *  the pre-stage-B memory-only dedup (repeated wake-ups after a restart
+	 *  return) without shipping a new version. */
+	durableDelivery: boolean;
 }
 
 /** Shared tolerant config read (v1.12.1): null when absent/corrupt/not an
@@ -542,6 +569,7 @@ export function resolveWatchConfig(): WatchConfig {
 		retireTtlMs: RETIRE_DEFAULT_TTL_MS,
 		retire: RETIRE_DEFAULT_ENABLED,
 		legacyFailOpen: false,
+		durableDelivery: DURABLE_DELIVERY_DEFAULT_ENABLED,
 	};
 	try {
 		const e = readDelegateConfig()?.watch;
@@ -581,6 +609,18 @@ export function resolveWatchConfig(): WatchConfig {
 				warnBadLegacyFailOpen(w.legacyFailOpen);
 			}
 		}
+		// Watcher stage B: absent key → true (the safe value); a present boolean
+		// is used as-is; a present non-boolean warns ONCE and stays true — a
+		// typo must never silently switch OFF the durable dedup (that would
+		// silently reintroduce repeated wake-ups after every restart).
+		let durableDelivery = fallback.durableDelivery;
+		if (w.durableDelivery !== undefined) {
+			if (typeof w.durableDelivery === "boolean") {
+				durableDelivery = w.durableDelivery;
+			} else {
+				warnBadDurableDelivery(w.durableDelivery);
+			}
+		}
 		return {
 			intervalMs: num(w.intervalMs, fallback.intervalMs, WATCH_MIN_INTERVAL_MS),
 			settleGateMs: num(w.settleGateMs, fallback.settleGateMs, 1),
@@ -589,6 +629,7 @@ export function resolveWatchConfig(): WatchConfig {
 			retireTtlMs,
 			retire,
 			legacyFailOpen,
+			durableDelivery,
 		};
 	} catch {
 		return fallback; // defensive — readDelegateConfig already absorbs throws
@@ -625,6 +666,17 @@ function warnBadLegacyFailOpen(v: unknown): void {
 	console.error(
 		`[pi-delegate watch] bad watch.legacyFailOpen (${JSON.stringify(v) ?? "undefined"}) — ` +
 			"legacy no-owner delivery stays DISABLED (default false; true is unsafe on multi-session)",
+	);
+}
+
+/** Warn-once flag for a bad watch.durableDelivery (watcher stage B) — once per process. */
+let durableDeliveryWarned = false;
+function warnBadDurableDelivery(v: unknown): void {
+	if (durableDeliveryWarned) return;
+	durableDeliveryWarned = true;
+	console.error(
+		`[pi-delegate watch] bad watch.durableDelivery (${JSON.stringify(v) ?? "undefined"}) — ` +
+			"durable delivery stays ENABLED (default true; false reverts to memory-only dedup)",
 	);
 }
 
@@ -705,9 +757,24 @@ export interface WatchEvent {
 	fingerprint?: string;
 }
 
-/** Dedup key: dir#worker#kind[#fingerprint]. */
+/** One parsed delivery key — the CANONICAL in-memory shape of a dedup key
+ *  (watcher stage B). Never re-parsed out of a string: the reset loop keeps
+ *  this structure in the cache map, so no delimiter-splitting over
+ *  unvalidated paths (task dirs and session paths may contain any
+ *  separator) can ever reintroduce the ambiguity bug class. */
+export interface DeliveryKey {
+	dir: string;
+	worker: string;
+	kind: WatchEventKind;
+	fingerprint: string;
+}
+
+/** In-memory dedup key: canonical JSON array of FOUR components — task dir,
+ *  worker, kind, fingerprint. Same serialization scheme as the durable
+ *  store's record key (which omits the dir: the task dir is given by the
+ *  store FILE's location) — one scheme, no second format. */
 export function eventKey(e: Pick<WatchEvent, "worker" | "dir" | "kind" | "fingerprint">): string {
-	return `${e.dir}#${e.worker}#${e.kind}${e.fingerprint ? `#${e.fingerprint}` : ""}`;
+	return JSON.stringify([e.dir, e.worker, e.kind, e.fingerprint ?? ""]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1026,6 +1093,22 @@ function isPlainRecord(v: unknown): v is Record<string, unknown> {
 	return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+/** Episode fingerprint for worker-dead (watcher stage B, guideline §5.4):
+ *  the manifest launch stamp — a new run is a new death episode. A manifest
+ *  without a parseable startedAt degrades to a stable per-entry constant
+ *  (one wake per dedup lifetime for that edge — documented degradation,
+ *  never an empty fingerprint). */
+function deathEpisodeFingerprint(w: WatchWorker): string {
+	return w.startedAtMs !== undefined ? new Date(w.startedAtMs).toISOString() : "unknown-launch";
+}
+
+/** Episode fingerprint for context-critical (watcher stage B, guideline
+ *  §5.4): the same launch stamp + the threshold — at most one context wake
+ *  per worker launch per threshold. */
+function contextEpisodeFingerprint(w: WatchWorker, threshold: number): string {
+	return `${deathEpisodeFingerprint(w)}@${threshold}`;
+}
+
 /**
  * All conditions currently true for one worker (already-deduped by the caller).
  * Detection order = orchestrator priority: a landed report outranks a question,
@@ -1163,6 +1246,9 @@ export function detectWorkerEvents(w: WatchWorker, opts: DetectOptions = {}): Wa
 	}
 
 	// 4. context-critical — pi's own gauge (last assistant totalTokens ÷ window).
+	//    Fingerprint = the worker's launch stamp + the threshold (watcher stage
+	//    B episode rule): at most ONE context wake per worker LAUNCH — a
+	//    restarted worker (new startedAt) is a new episode and may wake again.
 	if (w.sessionPath) {
 		const pct = contextPct(parseSessionUsage(w.sessionPath), resolveContextWindow(w.model));
 		const threshold = opts.contextCriticalPct ?? CONTEXT_CRITICAL_PCT;
@@ -1172,6 +1258,7 @@ export function detectWorkerEvents(w: WatchWorker, opts: DetectOptions = {}): Wa
 					"context-critical",
 					`context at ${pct}% ≥ ${threshold}% (session ${w.sessionPath}) — its next turns compact: ` +
 						"steer it to wrap up NOW (delegate_mailbox action 'steer') or plan a fresh-name retry",
+					contextEpisodeFingerprint(w, threshold),
 				),
 			);
 		}
@@ -1193,6 +1280,10 @@ export function detectWorkerEvents(w: WatchWorker, opts: DetectOptions = {}): Wa
 				"worker-dead",
 				`has no live host status and no report at ${w.reportPath} — it exited without producing ` +
 					"anything. Treat as a failed spawn: read the pane, then a diagnosed retry.",
+				// Watcher stage B episode rule: the fingerprint is the worker's launch
+				// stamp — a NEW run of the worker (new startedAt) is a new death episode
+				// and wakes again; a herdr status flap within one launch does not.
+				deathEpisodeFingerprint(w),
 			),
 		);
 	}
@@ -1225,80 +1316,84 @@ export function detectWorkerEvents(w: WatchWorker, opts: DetectOptions = {}): Wa
 
 /**
  * Deduped detection over a whole snapshot. `seen` is the watcher's memory
- * (worker+kind[+fingerprint] fired since the last reset): an event fires at
- * most once per key. State reset is split by fingerprint presence (D1 fix):
- *   - keys WITHOUT a fingerprint (gauge/absence kinds: worker-dead,
- *     context-critical) are forgotten when not observed true this tick —
- *     re-arming is the point (fire exactly once per episode);
- *   - keys WITH a fingerprint (report-ready, report-invalid, mailbox-question,
- *     grill-deck, nudge-failed, worker-stale) are forgotten ONLY when the
- *     worker vanished from the snapshot or the same worker+kind is observed
- *     with a DIFFERENT fingerprint. A tick with no observation (transient
- *     ENOENT on the report, a manifest read between rewrites) must not
- *     resurrect the event.
+ * cache (watcher stage B: a CACHE of the durable delivered-facts store, not
+ * the source of truth): a map from the canonical eventKey to the PARSED
+ * DeliveryKey — the reset loop reads the structure, it never re-splits a
+ * key string (the old right-to-left `split("#")` survived only while the
+ * task dir was the single unvalidated component; the durable keys make the
+ * string format gone by construction). An event fires at most once per key.
+ * Every kind now carries a fingerprint (gauge/absence kinds carry an
+ * EPISODE fingerprint — worker-dead the launch stamp, context-critical the
+ * launch stamp + threshold), so the reset rule is uniform (D1 fix, now for
+ * all kinds):
+ *   - a key survives a tick with no observation of its condition (a
+ *     transient ENOENT on the report, a manifest read between rewrites
+ *     must not resurrect the event);
+ *   - a key is forgotten when the worker VANISHED from the snapshot (a real
+ *     removal — manifest writes are atomic) or the same worker+kind is
+ *     observed with a DIFFERENT fingerprint (a new episode / a new fact).
  * Mutates `seen`, returns the new events.
  */
 export function detectEvents(
 	snap: WatchSnapshot,
-	seen: Set<string>,
+	seen: Map<string, DeliveryKey>,
 	opts: DetectOptions = {},
 ): WatchEvent[] {
 	const tickOpts: DetectOptions = { ...opts, statusesKnown: snap.statusesKnown };
 	const fresh: WatchEvent[] = [];
 	const current = new Set<string>();
-	// Fingerprinted-kind observations this tick: `dir#worker#kind` → fingerprint
-	// (used by the reset below — a key is forgotten on a NEW fingerprint, not on
-	// a missed observation).
+	// Fingerprint observations this tick: `dir#worker#kind` → fingerprint
+	// (used by the reset below — a key is forgotten on a NEW fingerprint, not
+	// on a missed observation). The `dir#worker#kind` join is a Set/Map
+	// IDENTITY string built and consumed only here (kinds are fixed tokens;
+	// worker names cannot contain "#"), never parsed back.
 	const observedFingerprints = new Map<string, string>();
 	// Workers present in THIS tick's snapshot: `dir#worker`.
 	const presentWorkers = new Set<string>();
 	for (const w of snap.workers) {
 		presentWorkers.add(`${w.dir}#${w.name}`);
 		for (const e of detectWorkerEvents(w, tickOpts)) {
+			const parsed: DeliveryKey = {
+				dir: e.dir,
+				worker: e.worker,
+				kind: e.kind,
+				fingerprint: e.fingerprint ?? "",
+			};
 			const key = eventKey(e);
 			current.add(key);
-			if (e.fingerprint !== undefined) {
-				observedFingerprints.set(`${w.dir}#${w.name}#${e.kind}`, e.fingerprint);
-			}
+			observedFingerprints.set(`${e.dir}#${e.worker}#${e.kind}`, parsed.fingerprint);
 			if (!seen.has(key)) {
-				seen.add(key);
+				seen.set(key, parsed);
 				fresh.push(e);
 			}
 		}
 	}
-	// State reset: forget every key not observed true THIS tick, EXCEPT
-	// fingerprinted keys of workers still present (see the contract above).
-	// Gauge keys of vanished workers are dropped too, and `seen` cannot grow
-	// without bound: a fingerprinted key is bounded by one per worker+kind and
-	// is replaced on a new fingerprint; the 24 h lookback (WATCH_LOOKBACK_MS)
-	// drops vanished workers. Manifest writes are atomic
-	// (exchange.ts atomicWriteFileSync), so a vanished worker is a real removal,
-	// not a half-written read.
-	for (const key of [...seen]) {
+	// State reset: forget every key not observed true THIS tick, EXCEPT keys
+	// of workers still present whose fingerprint has not changed (see the
+	// contract above). Keys of vanished workers are dropped too, and `seen`
+	// cannot grow without bound: a key is bounded by one per worker+kind and
+	// is replaced on a new fingerprint; the 24 h lookback
+	// (WATCH_LOOKBACK_MS) drops vanished workers. Manifest writes are atomic
+	// (exchange.ts atomicWriteFileSync), so a vanished worker is a real
+	// removal, not a half-written read.
+	for (const [key, parsed] of [...seen]) {
 		if (current.has(key)) continue;
-		// Parse from the right: dir#worker#kind[#fingerprint] — kind and worker
-		// never contain '#' (kinds are fixed tokens; worker names are
-		// [a-z][a-z0-9_-]{0,31}), so the dir can safely be re-joined.
-		const parts = key.split("#");
-		const fp = parts.length > 3 ? parts.pop() : undefined;
-		const kind = parts.pop() ?? "";
-		const name = parts.pop() ?? "";
-		const dir = parts.join("#");
-		if (fp !== undefined) {
-			const workerGone = !presentWorkers.has(`${dir}#${name}`);
-			const currentFp = observedFingerprints.get(`${dir}#${name}#${kind}`);
-			// BUG_FIX_CONTEXT: symptom — duplicate [report-ready] wake-ups for a
-			// report whose mtime never changed (field: two deliveries, same
-			// fingerprint; diag-watch-crossfleet case C5). Root cause — the old
-			// reset deleted every key not observed true this tick, so ONE tick
-			// with a missed observation (transient ENOENT on the report;
-			// fileMtimeMs → null suppresses the event) FORGOT the fingerprinted
-			// key and the restored file re-fired. Missed observation was treated
-			// as condition reset. What was done: fingerprinted keys survive a
-			// no-observation tick of a still-present worker; they are forgotten
-			// only on worker-vanished or a different fingerprint.
-			if (!workerGone && (currentFp === undefined || currentFp === fp)) continue;
-		}
+		const workerGone = !presentWorkers.has(`${parsed.dir}#${parsed.worker}`);
+		const currentFp = observedFingerprints.get(`${parsed.dir}#${parsed.worker}#${parsed.kind}`);
+		// BUG_FIX_CONTEXT: symptom — duplicate [report-ready] wake-ups for a
+		// report whose mtime never changed (field: two deliveries, same
+		// fingerprint; diag-watch-crossfleet case C5). Root cause — the old
+		// reset deleted every key not observed true this tick, so ONE tick
+		// with a missed observation (transient ENOENT on the report;
+		// fileMtimeMs → null suppresses the event) FORGOT the fingerprinted
+		// key and the restored file re-fired. Missed observation was treated
+		// as condition reset. What was done: keys survive a no-observation
+		// tick of a still-present worker; they are forgotten only on
+		// worker-vanished or a different fingerprint. Watcher stage B: the
+		// same rule now covers ALL kinds (episode fingerprints), and the
+		// loop reads the parsed DeliveryKey structure instead of re-splitting
+		// the key string (a task-dir path may contain any separator).
+		if (!workerGone && (currentFp === undefined || currentFp === parsed.fingerprint)) continue;
 		seen.delete(key);
 	}
 	return fresh;
@@ -1656,6 +1751,39 @@ export function formatEventBatch(events: WatchEvent[]): string {
 	return [head, ...events.map((e) => `- [${e.kind}] ${e.worker}: ${e.message}`)].join("\n");
 }
 
+/**
+ * Audit line for a REAL send (guideline §9.1, DESIGN.md §21 delivery).
+ * <p>
+ * The durable delivery store answers "what did this audience already hear";
+ * this line answers the incident question the store cannot: WHAT EXACTLY was
+ * considered delivered at what moment — the recovery trail after a send pi
+ * may have swallowed asynchronously. One line per BATCH (not per event — the
+ * watcher log already carries a lot of service noise, §9.1 forbids spamming
+ * it). The line states the send FACT and the batch CONTENT: for every event
+ * its task dir, worker name, event kind and fingerprint — the same four
+ * components the dedup key is built from, so a post-incident reader can
+ * re-derive exactly which key was committed.
+ * <p>
+ * The word "sent" (never "fail"/"error") is deliberate: the production sink
+ * (makeWatcherLogSink) surfaces only error-shaped lines to the pane, so a
+ * routine success lands in the audit FILE only — §9.1 ("routine success
+ * deliver must not spam the TUI; the audit file — yes").
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: events — the events of one batch that was really sent (silent mode
+ *   and a failed send have their own lines and never reach this formatter)
+ * Output: one line, e.g.
+ *   `wake-up sent: 2 event(s) — /tmp/exchange/x :: w1/report-ready#1726..., /tmp/exchange/x :: w2/report-ready#1726...`
+ * Guarantees: pure formatting; no I/O; one line per batch regardless of how
+ *   many task dirs the batch spans; an event without a fingerprint renders an
+ *   empty `#` (the same empty component the dedup key uses)
+ * Raises: never
+ */
+export function formatWakeUpAuditLine(events: WatchEvent[]): string {
+	const content = events.map((e) => `${e.dir} :: ${e.worker}/${e.kind}#${e.fingerprint ?? ""}`).join(", ");
+	return `wake-up sent: ${events.length} event(s) — ${content}`;
+}
+
 // ---------------------------------------------------------------------------
 // Watcher loop
 // ---------------------------------------------------------------------------
@@ -1663,11 +1791,28 @@ export function formatEventBatch(events: WatchEvent[]): string {
 export interface WatcherDeps {
 	transport: Transport;
 	/** Delivery sink — pi.sendUserMessage(..., {deliverAs:"followUp"}) in
-	 *  production, injectable in tests. Throws are swallowed by the loop. */
-	send: (text: string) => void | Promise<void>;
+	 *  production (makeSender), injectable in tests. Throws are swallowed by
+	 *  the loop. Watcher stage B internal contract: the sink REPORTS its
+	 *  outcome — a SendOutcome ({delivered, mode}); a legacy injectable sink
+	 *  that returns void is treated as a real send (delivered, mode
+	 *  "sent"). The durable commit happens ONLY for a real send. */
+	send: (text: string) => SendOutcome | void | Promise<SendOutcome | void>;
 	intervalMs?: number;
 	self?: SelfIdentity;
 	detect?: DetectOptions;
+	/** Watcher stage B (default TRUE — watch.durableDelivery): commit
+	 *  delivered-facts records to the durable per-task store after a
+	 *  successful send, so the dedup survives a session restart. false is
+	 *  the emergency rollback to memory-only dedup. */
+	durableDelivery?: boolean;
+	/** Injectable durable-commit seam (tests): defaults to
+	 *  appendDeliveredRecords in exchange.ts (one atomic merge per task
+	 *  dir). A rejection is NOT a failed delivery — memory keys stay, an
+	 *  audit line notes the possible post-restart repeat. */
+	commitDelivery?: (
+		dir: string,
+		entries: ReadonlyArray<{ worker: string; kind: string; fingerprint: string }>,
+	) => Promise<void>;
 	/** Snapshot source override (tests drive fixtures; production uses
 	 *  collectSnapshot over manifestStore.scan() + the injected transport). */
 	snapshot?: () => Promise<WatchSnapshot>;
@@ -1688,11 +1833,45 @@ function errText(err: unknown): string {
 /**
  * Build the poller. Never throws; every cycle is wrapped so a bad manifest, an
  * unreachable herdr or a throwing sink only costs that cycle.
+ * <p>
+ * FUNCTION_CONTRACT (the tick, guideline §5.3 — exact order):
+ *   1. snapshot; 2. retire pass (before delivery); 3. detection with the
+ *   memory cache; 4. self-event filter + leaf-worker check BEFORE any
+ *   durable write (a leaf worker never writes to disk); 5. canonical keys
+ *   for the batch; 6. keys already in the durable store are dropped (they
+ *   STAY in memory and are never rolled back); 7. an empty batch ends the
+ *   tick silently; 8. ONE send; 9. only on a successful send — an atomic
+ *   records write per task dir (a batch may span dirs: atomicity holds
+ *   within each dir, a partial commit between dirs is possible and
+ *   documented); 10. a failed send → nothing on disk, the batch's memory
+ *   keys roll back. A failed durable WRITE is not a failed delivery:
+ *   memory keys stay (a rollback would re-fire the batch EVERY tick —
+ *   endless retry noise), an audit line notes the possible repeat after a
+ *   restart. Silent mode (no pi.sendUserMessage) → no disk write, memory
+ *   keys stay. Garbage collection: records of a worker that really
+ *   vanished from the manifests are removed from this audience's store.
  */
 export function createWatcher(deps: WatcherDeps): WatcherHandle {
-	const seen = new Set<string>();
+	const seen = new Map<string, DeliveryKey>();
 	const log = deps.log ?? ((m: string) => console.error(`[pi-delegate watch] ${m}`));
 	let stopped = false;
+	// Watcher stage B: the audience key of THIS mount — the durable store
+	// file name component (delivered-<watcherKey>.json). A degraded self-id
+	// degrades to the shared "anon" file (strictly no worse than the old
+	// shared-manifest stamps).
+	const watcherKey = watcherKeyFor(deps.self?.sessionFile);
+	const audienceSessionPath = deps.self?.sessionFile ?? "";
+	const durableEnabled = deps.durableDelivery !== false;
+	const commit = deps.commitDelivery;
+	// Content cache of this audience's store files, keyed by task dir, kept
+	// fresh by the file's mtime: a tick re-reads a dir's store only when its
+	// mtime moved (or the cache was invalidated by this mount's own write).
+	// A negative mtime means "no file yet" and is cached too.
+	const storeCache = new Map<string, { mtimeMs: number; records: Record<string, DeliveryRecord> }>();
+	// Garbage-collection candidates: (dir, worker) pairs THIS mount has
+	// committed records for. A worker that disappears from the snapshots is
+	// really gone (manifest writes are atomic) → its records are collected.
+	const gcCandidates = new Map<string, { dir: string; worker: string }>();
 	// v1.11.x ownership, watcher stage A: the live self identity (the session
 	// this watcher is mounted in) wins over an injected option; both absent →
 	// FAIL-CLOSED: the watcher delivers nothing (every worker skips with the
@@ -1712,12 +1891,49 @@ export function createWatcher(deps: WatcherDeps): WatcherHandle {
 				)),
 	};
 
+	/** THIS audience's committed records for one task dir — mtime-cached. */
+	const storeRecordsFor = (dir: string): Record<string, DeliveryRecord> => {
+		let mtimeMs = -1;
+		try {
+			mtimeMs = statSync(deliveredStorePathFor(dir, watcherKey)).mtimeMs;
+		} catch {
+			// no store file yet
+		}
+		const cached = storeCache.get(dir);
+		if (cached && cached.mtimeMs === mtimeMs) return cached.records;
+		const records = readDeliveredStore(dir, watcherKey).records;
+		storeCache.set(dir, { mtimeMs, records });
+		return records;
+	};
+
+	/** Garbage collection over the store: a worker this mount committed
+	 *  records for that is absent from the current snapshot is REALLY gone
+	 *  (manifest writes are atomic) → remove its records from this
+	 *  audience's file. Advisory: any failure is logged and retried next
+	 *  tick — it can never affect a delivery. */
+	const garbageCollect = async (snap: WatchSnapshot): Promise<void> => {
+		const liveNow = new Set(snap.workers.map((w) => `${w.dir}#${w.name}`));
+		for (const [id, { dir, worker }] of [...gcCandidates]) {
+			if (liveNow.has(id)) continue;
+			gcCandidates.delete(id);
+			try {
+				await deleteWorkerDeliveryRecords(dir, watcherKey, worker);
+				storeCache.delete(dir); // own write → drop the cached content
+				log(`collected delivery records of the vanished worker ${worker} (${dir})`);
+			} catch (err) {
+				log(`delivery-record garbage collection failed for ${worker} (${dir}) (${errText(err)}) — advisory, retried next tick`);
+			}
+		}
+	};
+
 	const tick = async (): Promise<WatchEvent[]> => {
 		if (stopped) return [];
 		let events: WatchEvent[];
 		let leafWorker = false;
+		let snapOrNull: WatchSnapshot | null = null;
 		try {
-			const snap = deps.snapshot ? await deps.snapshot() : await collectSnapshot(deps.transport, deps.self ?? {});
+			snapOrNull = deps.snapshot ? await deps.snapshot() : await collectSnapshot(deps.transport, deps.self ?? {});
+			const snap = snapOrNull;
 			// §23 retire pass — BEFORE event delivery and fully guarded: a stamp/
 			// teardown failure is logged and retried next tick; it can never affect
 			// spawn/collect outcomes or this tick's wake-ups.
@@ -1756,9 +1972,33 @@ export function createWatcher(deps: WatcherDeps): WatcherHandle {
 			log(`tick skipped (${errText(err)}) — advisory, no outcome affected`);
 			return [];
 		}
+		// Garbage collection of vanished workers — before the delivery path,
+		// so a gone worker's records leave the store even on a quiet tick.
+		if (durableEnabled && snapOrNull !== null) await garbageCollect(snapOrNull);
 		if (leafWorker || events.length === 0) return [];
+		// Watcher stage B, §5.3 step 6: drop events whose delivery key is
+		// already committed to THIS audience's durable store (e.g. after a
+		// session restart, where the memory cache starts empty). Dropped keys
+		// STAY in memory and are never rolled back.
+		if (durableEnabled) {
+			const committedRecordsByDir = new Map<string, Record<string, DeliveryRecord>>();
+			events = events.filter((e) => {
+				let records = committedRecordsByDir.get(e.dir);
+				if (records === undefined) {
+					records = storeRecordsFor(e.dir);
+					committedRecordsByDir.set(e.dir, records);
+				}
+				return records[deliveryRecordKey(e.worker, e.kind, e.fingerprint ?? "")] === undefined;
+			});
+		}
+		if (events.length === 0) return [];
+		// ONE send per batch, INSIDE the error guard, its outcome AWAITED (the
+		// pre-stage-B code ignored the returned value — a silent no-op sender
+		// was indistinguishable from success, and a future async failure would
+		// have gone unnoticed).
+		let outcome: SendOutcome | void;
 		try {
-			await deps.send(formatEventBatch(events));
+			outcome = await deps.send(formatEventBatch(events));
 		} catch (err) {
 			// BUG_FIX_CONTEXT: symptom — one failed send during a transient
 			// delivery outage permanently silenced that wake-up (the `seen` key was
@@ -1767,13 +2007,66 @@ export function createWatcher(deps: WatcherDeps): WatcherHandle {
 			// the batch's keys are deleted from `seen`, so the event re-fires on the
 			// next tick while its condition still holds.
 			// Delivery failed: roll the batch's keys back out of `seen`, or a single
-			// transient send error would permanently swallow the wake-up — the exact
-			// failure this module exists to prevent (a gauge-shaped event has no
-			// fingerprint, so its key would never fire again). Still advisory, never a
-			// queue: nothing is buffered, and an event whose condition already reset is
-			// simply gone (detectEvents forgets keys it did not see this tick).
+			// transient send error would permanently swallow the wake-up. Nothing is
+			// written to the durable store (a commit would claim a delivery that
+			// did not happen). Still advisory, never a queue: nothing is buffered,
+			// and an event whose condition already reset is simply gone.
 			for (const e of events) seen.delete(eventKey(e));
-			log(`delivery failed (${errText(err)}) — batch rolled back, re-fires while still true (advisory)`);
+			log(`delivery failed (${errText(err)}) — batch rolled back, durable store untouched, re-fires while still true (advisory)`);
+			return events;
+		}
+		// Watcher stage B send semantics: a legacy injectable sink returning
+		// void is treated as a real send; an explicit silent outcome (no
+		// usable pi.sendUserMessage) is NOT a delivery — nothing is committed
+		// to disk, and the memory keys are NOT rolled back either (a rollback
+		// would re-fire the batch every tick forever: endless noise from a
+		// session that can never deliver — the existing "headless watcher is
+		// silent but unbroken" contract).
+		const delivered = outcome === undefined || outcome.delivered === true;
+		if (!delivered) {
+			log("delivery sink is silent (no usable pi.sendUserMessage) — wake-up suppressed in memory, nothing committed to the durable store");
+			return events;
+		}
+		// Guideline §9.1 / DESIGN.md §21 delivery: every REAL send is recorded as
+		// ONE audit line per batch with the batch content (dir :: worker/kind#fp
+		// per event) — the recovery trail after an incident. Written at the send
+		// SUCCESS, before the durable commit: the line describes the FACT OF
+		// SENDING, so a later commit failure must not hide it (the commit-failure
+		// line below then names the same batch). Silent mode and a failed send
+		// returned above with their own lines — never a third line here.
+		log(formatWakeUpAuditLine(events));
+		// §5.3 step 9 — commit AFTER the successful send, one atomic merge per
+		// task dir (a batch may span dirs: atomicity holds WITHIN each dir's
+		// file; a partial commit between dirs is possible and documented). A
+		// failed commit is NOT a failed delivery: the send happened, so the
+		// memory keys STAY (a rollback would re-fire the whole batch EVERY
+		// tick while the store is unwritable — endless retry noise, worse than
+		// one possible repeat after a restart); the audit line notes it.
+		if (durableEnabled) {
+			const byDir = new Map<string, Array<{ worker: string; kind: string; fingerprint: string }>>();
+			for (const e of events) {
+				const list = byDir.get(e.dir) ?? [];
+				list.push({ worker: e.worker, kind: e.kind, fingerprint: e.fingerprint ?? "" });
+				byDir.set(e.dir, list);
+			}
+			for (const [dir, entries] of byDir) {
+				try {
+					if (commit) {
+						await commit(dir, entries);
+					} else {
+						// EXTERNAL_DEPENDENCY: the delivered-facts file
+						// delivered-<watcherKey>.json in the task dir (exchange.ts I/O).
+						await appendDeliveredRecords(dir, watcherKey, audienceSessionPath, entries, new Date().toISOString(), "sent");
+					}
+					storeCache.delete(dir); // own write → the cached content is stale
+					for (const e of entries) gcCandidates.set(`${dir}#${e.worker}`, { dir, worker: e.worker });
+				} catch (err) {
+					log(
+						`durable delivery record not written for ${dir} (${errText(err)}) — ` +
+							"the wake-up WAS sent; the same fact may repeat after a session restart (advisory)",
+					);
+				}
+			}
 		}
 		return events;
 	};
@@ -1813,18 +2106,35 @@ export function stopWatcher(): void {
 	}
 }
 
+/** Structured send outcome (watcher stage B, guideline §5): the INTERNAL
+ *  contract of the delivery sink. `mode: "silent"` means the build has no
+ *  usable `pi.sendUserMessage` (headless/old pi) — the tick treats it as
+ *  "not a delivery": nothing is committed to the durable store and the
+ *  memory keys are not rolled back (the existing "headless watcher is
+ *  silent but unbroken" contract). Full delivery CONFIRMATION would require
+ *  changes on the pi side (out of scope for stage B) — every real send is
+ *  additionally recorded in the watcher audit log with the batch content,
+ *  which is the recovery trail if pi ever swallows a send asynchronously. */
+export interface SendOutcome {
+	delivered: boolean;
+	mode: "sent" | "silent";
+}
+
 /**
  * Delivery sink builder (§21). Guarded by design: a build without
- * `sendUserMessage` (headless/old pi) returns a NO-OP — the watcher stays inert
- * instead of throwing on every tick. `deliverAs: "followUp"` is what makes it a
+ * `sendUserMessage` (headless/old pi) returns a SILENT outcome (mode
+ * "silent", delivered false) — the watcher stays inert instead of throwing
+ * on every tick, and the tick knows NOT to commit a durable record for a
+ * send that never happened. `deliverAs: "followUp"` is what makes it a
  * wake-up that never interrupts a turn in flight.
  */
 export function makeSender(
 	pi: { sendUserMessage?: (content: string, options?: { deliverAs?: "steer" | "followUp" }) => unknown },
-): (text: string) => void {
-	return (text: string): void => {
-		if (typeof pi.sendUserMessage !== "function") return;
+): (text: string) => SendOutcome {
+	return (text: string): SendOutcome => {
+		if (typeof pi.sendUserMessage !== "function") return { delivered: false, mode: "silent" };
 		pi.sendUserMessage(text, { deliverAs: "followUp" });
+		return { delivered: true, mode: "sent" };
 	};
 }
 
@@ -1893,11 +2203,14 @@ export function startWatcher(
 		// §23: the retire TTL threads the same way.
 		// Watcher stage A: the legacy fail-open rollback threads from
 		// watch.legacyFailOpen (default false — fail-closed delivery).
+		// Watcher stage B: the durable delivered-facts store switch threads
+		// from watch.durableDelivery (default true — commit after send).
 		detect: {
 			staleAfterMs: cfg.staleAfterMs,
 			retireTtlMs: cfg.retireTtlMs,
 			legacyFailOpen: cfg.legacyFailOpen,
 		},
+		durableDelivery: cfg.durableDelivery,
 	});
 	const stop = (): void => {
 		handle.stop();

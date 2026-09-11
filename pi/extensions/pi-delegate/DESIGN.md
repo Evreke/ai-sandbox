@@ -63,6 +63,8 @@ pi-delegate/
 │   │                         #   never read other sessions' fleets
 │   ├── observe.ts            # what the orchestrator KNOWS: delegate_status (read-only),
 │   │                         #   the event-driven watcher, the §23 retire engine,
+│   │                         #   the durable delivered-facts policy (stage B: key
+│   │                         #   shape, tick order, commit-after-send, GC),
 │   │                         #   watch/collect config resolution, /delegate-fleet +
 │   │                         #   /delegate-teardown commands. Must never spawn or
 │   │                         #   mutate a worker outside the retire/teardown contracts
@@ -71,8 +73,10 @@ pi-delegate/
 │   │                         #   overlay, worker-view aggregation. Read-only by
 │   │                         #   contract; owns line-width clamping
 │   ├── exchange.ts           # everything durable on disk: exchange-dir conventions,
-│   │                         #   manifests, reports, schemas, mailbox files, archive.
-│   │                         #   Owns append-before-start (file side), atomic
+│   │                         #   manifests, reports, schemas, mailbox files, archive,
+│   │                         #   the watcher satellites (retire stamps + the durable
+│   │                         #   delivered-facts store, stage B). Owns
+│   │                         #   append-before-start (file side), atomic
 │   │                         #   serialized manifest writes, answer-consumed mtime
 │   ├── host.ts               # the WorkerHost seam: the Transport interface (frozen
 │   │                         #   type name), req/result types, the E_* taxonomy +
@@ -783,18 +787,31 @@ workers' session JSONL (usage gauges + a tail-window tool-call scan).
 | `worker-dead` | herdr knows the agent is gone (no live status) AND no report on disk | "exited without producing anything — read the pane, then diagnosed retry" |
 | `worker-stale` (v1.12.1, §22) | manifest `collectedAt` older than `watch.staleAfterMs` AND the worker still live in herdr | "collected N min ago and still mounted — tear it down (/delegate-teardown) or keep" |
 
-**Dedup.** Key = `dir#worker#kind`; an event fires **at most once** per key
-until the condition stops being true, at which point the key is forgotten and
-the condition can fire again. Keys of workers that LEAVE the manifests are
-forgotten on the next tick as well — `seen` cannot grow without bound in a
-long-lived orchestrator, and a worker that comes back can wake the fleet owner
-again (W8.10–W8.11b). Three kinds carry a payload fingerprint in the
-key — `report-ready`/`report-invalid` the report mtime, `mailbox-question` the
-envelope `ts`, `grill-deck` the invocation count, `worker-stale` the `collectedAt`
-stamp (§22) — because a *rewritten* report, a *re-asked* question, a *second* deck and a
-*re-collected* worker are new facts, and suppressing them would silently drop the only
-signal the orchestrator has. `context-critical` and `worker-dead` stay key-only: they
-must fire exactly once. One `sendUserMessage` per **batch** (per tick), never per event.
+**Dedup (watcher stage B — memory is a cache, disk is the truth).** Every kind
+carries a fingerprint, and the delivery key exists in two canonical views of
+ONE scheme — a JSON-array string, never a delimiter-split string (task-dir
+paths and session paths are unvalidated and may contain any separator; the old
+right-to-left `#`-split survived only while the dir was the single
+unvalidated component):
+
+- **in-memory key** (`eventKey`): `JSON.stringify([dir, worker, kind, fingerprint])` —
+  the watcher's cache map holds the PARSED key structure, and the state-reset
+  loop reads the structure instead of re-splitting a string;
+- **durable record key** (`deliveryRecordKey`, exchange.ts):
+  `JSON.stringify([worker, kind, fingerprint])` — the task dir and the
+  audience are given by the STORE FILE's location, not by key components.
+
+An event fires **at most once** per key. A key survives a tick with no
+observation of its condition (a transient ENOENT on the report must not
+resurrect the event); it is forgotten only when the worker VANISHED from the
+manifests (a real removal — manifest writes are atomic) or the same
+worker+kind is observed with a DIFFERENT fingerprint (a new episode / a new
+fact). The durable committed records are removed ONLY by garbage collection
+when a worker really disappears — never on a skipped observation, a herdr
+status flap or a transient read error. One `sendUserMessage` per **batch**
+(per tick), never per event. The full fingerprint rules per kind — including
+the episode rules for the gauge/absence kinds — live in the delivered-store
+subsection below. See §21.1b for the durable store itself.
 
 **Suppressions** (each pinned by a test): `worker-dead` never fires while herdr
 is unreachable (statuses unknown ≠ dead), inside the 60 s placement grace
@@ -811,15 +828,34 @@ keep their watcher; tab workers are never muted on cwd alone, because a tab
 shares the orchestrator's checkout and cwd cannot tell them apart.
 
 **Delivery.** `pi.sendUserMessage(text, { deliverAs: "followUp" })` — it wakes
-an idle orchestrator and never interrupts a turn in flight. Guarded twice:
-`typeof pi.sendUserMessage === "function"` (old/headless builds stay inert) and
-a try/catch that logs the failure and **rolls the batch's dedup keys back out of
-`seen`** — a transient send error must never permanently swallow a wake-up, which
-is the failure this module exists to prevent (W9.13–W9.13c). Nothing is buffered:
-an event whose condition has already reset is simply gone. **Advisory by
-contract**: no watcher failure — bad manifest, dead herdr, throwing sink — can
-affect a spawn or a collect; the report file remains the only completion
-criterion.
+an idle orchestrator and never interrupts a turn in flight. The tick AWAITED
+the sink and, since watcher stage B, the sink reports a structured outcome
+(`SendOutcome`): a real send (`mode "sent"`) or **silent mode** (no usable
+`pi.sendUserMessage` — old/headless builds). Silent mode is NOT a delivery:
+nothing is committed to the durable store, and the memory keys are not rolled
+back either (a rollback would re-fire the batch every tick forever — endless
+noise from a session that can never deliver; the "headless watcher is silent
+but unbroken" contract). A throw (or a rejected promise) rolls the batch's
+dedup keys back out of `seen` — a transient send error must never permanently
+swallow a wake-up, which is the failure this module exists to prevent
+(W9.13–W9.13c) — and writes NOTHING to the store. Full delivery CONFIRMATION
+would require changes on the pi side (out of scope for stage B): the runtime
+swallows asynchronous send failures, so "no synchronous exception" is the only
+honest signal — therefore every real send is also recorded as a line in the
+watcher audit log with the batch content (the recovery trail after an
+incident). The audit line is ONE PER BATCH, never one per event (the log
+carries a lot of service noise; guideline §9.1 forbids spamming it), and names
+the send fact plus every event's four key components — task dir, worker, event
+kind and fingerprint (`<dir> :: <worker>/<kind>#<fingerprint>`, comma-
+separated) — so a post-incident reader can re-derive exactly which dedup keys
+were considered delivered. It is written at the send SUCCESS, before the
+durable commit, so a later commit failure cannot hide the fact that the batch
+went out; silent mode and a failed send have their own lines and never produce
+one. The line is routed to the audit FILE only (it never matches the sink's
+error pattern), so a routine success does not reach the pane. Nothing is buffered: an event whose condition has already reset is
+simply gone. **Advisory by contract**: no watcher failure — bad manifest, dead
+herdr, throwing sink — can affect a spawn or a collect; the report file
+remains the only completion criterion.
 
 **Config** (`~/.pi/agent/pi-delegate.config.json`, tolerant, never throws):
 
@@ -909,6 +945,110 @@ none of them can corrupt a spawn or a collect result). One fix shape each:
   owns nothing and receives nothing; a degraded tier-1 lead therefore loses
   its child wakes (a documented known behavior, pinned in
   test/composer-check.ts, check M7).
+### 21.1b The durable delivered-facts store (watcher stage B, guideline §5)
+
+Before stage B the dedup lived only in the memory of ONE watcher mount: a
+session restart forgot everything, and on the same files on disk the events
+were delivered AGAIN. The store closes that class: the wake-up dedup survives
+a session restart.
+
+**Where the records live.** One satellite file per task dir per audience
+session: `delivered-<watcherKey>.json` next to the manifest (watcherKey = the
+existing 8-hex FNV-1a hash of the audience session's JSONL path — the same
+convention as the retire-stamp satellites, `watch-<key>.json`). One file per
+session-audience per task dir. There is exactly ONE writer per file BY
+CONSTRUCTION — the file name carries the audience key, so two sessions never
+write the same file (the in-process file-mutation queue serializes only
+inside one process; inter-process safety comes from the file NAME, not from a
+lock). I/O reuses the shared blocks: atomic write via temp file + rename,
+tolerant read — a missing, corrupt or torn file reads as an EMPTY store
+(worst case one repeated wake-up, never a throw). Policy (key shape, tick
+algorithm, commits) lives in `src/observe.ts`; the file I/O lives in
+`src/exchange.ts` — the same split as the retire stamps.
+
+**File schema.** `{ schemaVersion: 1, audienceSessionPath, records }` where
+`records` maps the canonical record key
+`JSON.stringify([worker, kind, fingerprint])` to
+`{ worker, kind, fingerprint, deliveredAt (ISO), deliveryMode }`. The task
+dir and the audience are given by the FILE's location, not by key components.
+
+**Tick order (normative, guideline §5.3).** 1) snapshot; 2) the retire pass
+(before delivery); 3) detection against the memory cache; 4) the self-event
+filter and the leaf-worker check happen BEFORE any durable write — a leaf
+worker session writes NOTHING to disk; 5) canonical keys for the batch;
+6) keys already present in the store are dropped (they STAY in memory and
+are never rolled back); 7) an empty batch ends the tick silently; 8) ONE
+send; 9) only on a successful send — an atomic records commit per task dir;
+10) a failed send → nothing on disk, the batch's memory keys roll back.
+
+**Commit granularity.** A batch may span several task dirs; the commit is
+atomic WITHIN each dir's file, so between dirs a partial commit is possible
+(one dir committed, another failed). This is documented behavior, not a bug:
+a partially committed batch may repeat for the failed dirs only.
+
+**Failure edges.**
+- *Send failed* → no store write, memory keys rolled back (re-fires while
+  the condition still holds).
+- *Send succeeded, store commit failed* → NOT a failed delivery: memory keys
+  STAY (a rollback would re-fire the batch EVERY tick while the store is
+  unwritable — endless retry noise, worse than one possible repeat after a
+  restart); the audit log gets the line "durable delivery record not
+  written … the same fact may repeat after a session restart".
+- *Store read failed / torn file* → empty store, never a throw; the memory
+  cache still suppresses within the session; durable keys are NEVER erased
+  by a failed read.
+
+**No seeding on the first tick with an empty store.** Seeding would GUESS
+what was delivered — an ad-hoc marker without the general key schema
+(forbidden by guideline §5.2), and a skipped wake-up is exactly the failure
+class this module exists to prevent. The one-time volley of repeated
+wake-ups after upgrading on a RESUMED session is bounded by the stage-A
+ownership gate (a brand-new session owns nothing → no volley at all) and the
+24 h manifest lookback; it happens at most once. Old builds neither read nor
+write the new files (reads go by file-name pattern), so the versions are
+compatible by construction — on a shared machine the behaviors may differ
+between sessions until all sessions are updated.
+
+**Emergency rollback.** `watch.durableDelivery: false` (default TRUE — the
+safe value: the store only ever SUPPRESSES a repeated wake-up) reverts to the
+pre-stage-B memory-only dedup without shipping a new version. A non-boolean
+value warns once and stays true. No paths in the config: the location is
+convention (like the retire stamps).
+
+**Fingerprint rules per kind (guideline §5.4 — every kind MUST have a
+documented rule; episode kinds fingerprint by an episode id, never by an
+empty constant):**
+
+| Kind | Fingerprint | Repeat on the same fingerprint |
+|------|-------------|-------------------------------|
+| `report-ready` | report file mtime | No |
+| `report-invalid` | report file mtime | No for the same mtime |
+| `mailbox-question` | question envelope `ts` | No; a new question → a new fingerprint |
+| `nudge-failed` | marker `ts` | No for the same marker |
+| `grill-deck` | deck invocation count | A second deck → a new fingerprint |
+| `context-critical` | EPISODE: worker launch stamp (`startedAt`) + the threshold | One wake per launch per threshold; a restarted worker is a new episode |
+| `worker-dead` | EPISODE: worker launch stamp (`startedAt`); a manifest without a parseable stamp degrades to a stable constant (one wake per dedup lifetime for that edge) | One wake per launch: a herdr status flap within one launch does NOT re-fire; a NEW run (new `startedAt`) is a new death episode |
+| `worker-stale` | the `collectedAt` value | A re-collect writes a new stamp → a new fingerprint |
+
+**collectedAt vs the store (guideline §5.5) — two different facts, one rule.**
+`collectedAt` means "the collect tool ACCEPTED the report" (a product fact,
+written by collect into the manifest); the delivered store means "the wake-up
+was REALLY SENT to this audience" (a watcher fact, written only by the
+watcher, only after a successful send). The rule: detection sees collectedAt
+and emits NO report events — collect NEVER writes to the delivery store
+(`src/spawn.ts` is untouched by stage B). Re-writing a report after collect
+therefore does not produce a new report wake (existing product behavior,
+pinned by a test that asserts the store holds no report-kind records when
+collectedAt is set).
+
+**Garbage collection.** Records are removed ONLY when a worker really
+disappears from the manifests (a watcher that committed records for it
+notices the disappearance on a later tick and deletes the worker's records
+from ITS OWN store file). Records are never removed on a skipped observation
+or a transient error. A worker re-spawned with the same name starts with
+fresh fingerprints (a new launch stamp, new report mtimes), so stale records
+do not suppress its new facts.
+
 - **F2 — `report-invalid` fires on half-written reports and on brief-declared
   schemas.** The watcher validates with the BASE `validateReport` and has no mtime
   grace, so a worker mid-write is called invalid (and a §17 `reportSchema` report
@@ -1183,7 +1323,9 @@ each — where the invariants live:
   single src/transport.ts split by the workerhost inversion (§24): the seam
   owns the contracts, the adapter the herdr CLI/socket implementation.
 - **src/exchange.ts** — everything durable on disk: exchange-dir conventions,
-  manifests, reports, schemas, mailbox files, archive. Owns
+  manifests, reports, schemas, mailbox files, archive, the watcher satellites
+  (retire stamps + the durable delivered-facts store — stage B: the I/O half,
+  one atomic tolerant read/merge per file). Owns
   append-before-start (file side), collectedAt-dedup (write side),
   answer-consumed-mtime, atomic serialized manifest writes.
 - **src/spawn.ts** — everything the orchestrator DOES: delegate + mailbox
@@ -1191,7 +1333,9 @@ each — where the invariants live:
   collectedAt-dedup (write side), abort-detaches (flow side),
   no-direct-herdr-for-reportless-verdicts, advisory-by-contract (spawn side).
 - **src/observe.ts** — everything the orchestrator KNOWS: status tool,
-  event-driven watcher, §23 retire engine, watch/collect config, and the
+  event-driven watcher, §23 retire engine, the durable delivered-facts POLICY
+  (stage B: canonical key, tick order, commit-after-send, garbage collection),
+  watch/collect config, and the
   /delegate-fleet + /delegate-teardown commands (`registerCommands`, moved
   here from index.ts in W6 — this module owns the watcher/teardown state
   they drive). Owns collectedAt-dedup (reader side), answer-consumed-mtime
