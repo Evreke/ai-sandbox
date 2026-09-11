@@ -974,21 +974,16 @@ export class HerdrTransport implements Transport {
 		// idle/done/blocked settle; slices + reconcile; abort → detach.
 		//
 		// BUG_FIX_CONTEXT (v1.8, DESIGN.md §19.1b) — the aged-finish blind spot
-		// (live-reproduced): herdr ages done→idle within minutes, so a watcher that
-		// attaches late — fast flash probes, abort/detach recovery, slow start — can
-		// NEVER observe working/done and spins the FULL timeout against a visibly
-		// finished worker, then false-reports neverStarted. Why the two-phase fix
-		// alone did not work: it still required observing working/blocked/done.
-		// What was done: an unexplained idle is checked against the session JSONL —
-		// an assistant reply proves the prompt was consumed → settle as
-		// finishedBeforeWatch (success, not failure). No reply → never started.
-		// herdr ages done→idle within minutes, so a watcher that attaches late —
-		// fast flash probes, abort/detach recovery, slow start — can NEVER observe
-		// working/done and spins the FULL timeout against a visibly finished
-		// worker, then false-reports neverStarted. Disambiguation: an unexplained
-		// idle is checked against the session JSONL — an assistant reply proves the
-		// prompt was consumed → settle as finishedBeforeWatch (success, not
-		// failure). No reply → genuinely never started → keep polling.
+		// (live-reproduced; full record: DESIGN.md §19.1b — the CHANGELOG starts
+		// at v1.11.0, so §19.1b is the audit trail): herdr ages done→idle within
+		// minutes, so a watcher that attaches late — fast flash probes,
+		// abort/detach recovery, slow start — can NEVER observe working/done and
+		// spins the FULL timeout against a visibly finished worker, then
+		// false-reports neverStarted. Why the two-phase fix alone did not work:
+		// it still required observing working/blocked/done. What was done: an
+		// unexplained idle is checked against the session JSONL — an assistant
+		// reply proves the prompt was consumed → settle as finishedBeforeWatch
+		// (success, not failure). No reply → never started.
 		const startedAt = Date.now();
 		const deadline = startedAt + req.timeoutMs;
 		let last: AgentStatusName = "unknown";
@@ -1407,8 +1402,9 @@ export class HerdrTransport implements Transport {
 		let tabId = recordedTabId;
 		if (recordedTabId === req.placement.paneId) {
 			const live = await this.resolveLiveTabId(req.name);
-			if (live && live !== recordedTabId) {
-				tabId = live; // manifest recorded a pane id — close the REAL tab
+			const reconciled = reconcileTabClose(recordedTabId, live);
+			if (reconciled !== recordedTabId) {
+				tabId = reconciled; // manifest recorded a pane id — close the REAL tab
 			}
 		}
 		try {
@@ -1588,6 +1584,31 @@ function agentStatusFromResult(result: unknown, fallbackName: string): AgentStat
 			asString(pick(result, "pane_id", "paneId", "agent.pane_id", "pane.pane_id")),
 		),
 	};
+}
+
+/**
+ * Migration stage 3 (audit step 10): the drift-guard reconcile decision is a
+ * pure exported function (behaviorally tested in static-check T3.3b — the
+ * old T3.3 was a source-text regex over this file). The teardown call site
+ * feeds it the recorded id and the live resolution; the decision stays here,
+ * next to the adapter-internal id model.
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input:
+ *   - recordedTabId: the id the manifest placement carries (possibly the
+ *     paneId fallback — the broken signature)
+ *   - liveTabId: the real tab id from the herdr agent registry, or null when
+ *     the agent is gone / statuses unavailable
+ * Output: the tab id to close
+ * Guarantees:
+ *   - the broken signature (recorded === paneId) + a DIFFERENT live id → the
+ *     live id (close the REAL tab, not the pane)
+ *   - every other input → the recorded id unchanged (a missing live id must
+ *     not turn a working close into a wrong-target close)
+ * Raises: never
+ */
+export function reconcileTabClose(recordedTabId: string, liveTabId: string | null): string {
+	return liveTabId !== null && liveTabId !== recordedTabId ? liveTabId : recordedTabId;
 }
 
 /** Adapter-internal read model: the seam AgentStatus PLUS the herdr ids the

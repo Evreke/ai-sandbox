@@ -8,10 +8,10 @@
  *       is published ONLY as the separate export subpath "./herdr" — module
  *       resolution enforces the import rule (the old W1.1/W1.1c text pins are
  *       gone; the boundary itself is pinned by static-check T1.1e);
- *       index.ts mounts the watcher (session_start) and stops it
- *       (session_shutdown) WITHOUT a ctx.hasUI guard; delegate resolves the
- *       settle gate from watch config and its E_TIMEOUT text carries the
- *       new-model discipline.
+ *       delegate resolves the settle gate from watch config and its E_TIMEOUT
+ *       text carries the new-model discipline. Migration stage 3 (audit step
+ *       10): the old W1.1b/W1.2/W1.2b index/observe TEXT pins are gone — the
+ *       mount decision is behaviorally tested in test/composer-check.ts.
  *   W2  Config — watch.intervalMs / watch.settleGateMs defaults and overrides,
  *       in a child bun process with $HOME set at spawn time (bun caches
  *       os.homedir(), same seam as usage-check §2/§7).
@@ -49,8 +49,9 @@
  *       orchestrator / garbage); a worker-orchestrator's own children fire
  *       while its parent's manifest stays silent (F1 intact); the loop keeps
  *       the watcher alive for a worktree worker-orchestrator (leafWorker
- *       exemption); index.ts mounts the watcher for worker-orchestrators
- *       (static pin).
+ *       exemption); the worker-orchestrator mount decision is behaviorally
+ *       tested in test/composer-check.ts (the old index.ts static pin is
+ *       gone).
  * Exit 0 only if all checks pass.
  */
 
@@ -67,7 +68,6 @@ import {
 	WATCH_MIN_STALE_AFTER_MS,
 	WATCH_LOOKBACK_MS,
 	collectSnapshot,
-	countSessionToolCall,
 	createWatcher,
 	detectEvents,
 	detectWorkerEvents,
@@ -77,7 +77,6 @@ import {
 	makeSender,
 	ownsChildManifests,
 	resolveWatchConfig,
-	sessionToolCallNames,
 	startWatcher,
 	stopWatcher,
 	workersFromManifests,
@@ -86,6 +85,7 @@ import {
 	type WatchSnapshot,
 } from "../src/observe.ts";
 import { questionPathFor, reportPathFor, type ExchangeManifest, type ManifestWorker } from "../src/exchange.ts";
+import { countSessionToolCall, sessionToolCallNames } from "../src/usage.ts";
 import type { AgentStatus, Transport } from "../src/host.ts";
 
 let failures = 0;
@@ -108,25 +108,13 @@ const NOW = Date.parse("2026-09-06T12:00:00.000Z");
 // for herdr imports) are GONE — the import rule is enforced by module
 // resolution now (package.json exports map: "." → index.ts, the adapter at
 // the separate "./herdr" subpath); the boundary itself is pinned by
-// static-check T1.1e. Kept: W1.1b (observe.ts takes the seam from host.ts).
-const watchSrc = readFileSync(resolve(ROOT, "src/observe.ts"), "utf8");
-check(
-	"W1.1b observe.ts takes the Transport seam from host.ts",
-	/from\s+["']\.\/host\.ts["']/.test(watchSrc),
-);
-
-const indexSrc = readFileSync(resolve(ROOT, "index.ts"), "utf8");
-check(
-	"W1.2 index.ts mounts (session_start) and stops (session_shutdown) the watcher",
-	/pi\.on\("session_start"[\s\S]*startWatcher\(/.test(indexSrc) &&
-		/pi\.on\("session_shutdown"[\s\S]*stopWatcher\(/.test(indexSrc),
-);
-check(
-	"W1.2b watcher mount is headless-safe (NOT behind ctx.hasUI) and worker-gated (isWorkerSession)",
-	/pi\.on\("session_start"[\s\S]*?isWorkerSession\(/.test(indexSrc) &&
-		/isWorkerSession\([\s\S]{0,300}?startWatcher\(/.test(indexSrc) &&
-		!/hasUI[\s\S]{0,120}startWatcher\(/.test(indexSrc),
-);
+// static-check T1.1e.
+// Migration stage 3 (audit step 10): the old W1.1b/W1.2/W1.2b TEXT pins
+// (regex scans over index.ts/observe.ts source) are GONE — the mount
+// decision is now behaviorally tested in test/composer-check.ts (M1–M5)
+// against the composer module src/compose.ts (mountSessionWatcher), and the
+// observe→seam import is compile-time enforced (Transport is a type from
+// ./host.ts — a wrong import fails tsc, not a regex).
 
 const delegateSrc = readFileSync(resolve(ROOT, "src/spawn.ts"), "utf8");
 check("W1.3 delegate takes its default gate from watch.settleGateMs", /resolveWatchConfig\(\)\.settleGateMs/.test(delegateSrc));
@@ -1084,7 +1072,7 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 
 	// startWatcher threads the config threshold into detection (static pin, same
 	// convention as W14.17 — startWatcher needs a live pi to runtime-test).
-	const watchSrcStale = watchSrc;
+	const watchSrcStale = readFileSync(resolve(ROOT, "src/observe.ts"), "utf8");
 	check(
 		"W15.15 startWatcher threads watch.staleAfterMs (and §23 retireTtlMs) into detect opts",
 		/staleAfterMs: cfg\.staleAfterMs/.test(watchSrcStale) &&
@@ -1212,18 +1200,11 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 		handle.stop();
 	}
 
-	// (г) index.ts static pin: the mount gate is the SCOPED worker gate.
-	check(
-		"W16.12 index.ts mounts the watcher when NOT a pure worker OR owning child manifests (F6 gate)",
-		/!isWorkerSession\([\s\S]{0,200}?\|\|[\s\S]{0,80}?ownsChildManifests\(/.test(indexSrc) &&
-			/ownsChildManifests\([\s\S]{0,200}?startWatcher\(/.test(indexSrc),
-	);
-	check(
-		"W16.13 index.ts imports and uses ownsChildManifests",
-		indexSrc.includes("ownsChildManifests") &&
-			/isWorkerSession,\n\townsChildManifests,/.test(indexSrc),
-		indexSrc.includes("ownsChildManifests") ? "present" : "MISSING",
-	);
+	// (г) Migration stage 3 (audit step 10): the old index.ts STATIC pins
+	// (W16.12/W16.13 — regex scans over index.ts source for the F6 gate) are
+	// GONE — the mount decision is behaviorally tested in test/composer-check.ts
+	// (M1 pure worker silent, M2 worker-orchestrator mounts) against the
+	// composer module src/compose.ts.
 
 	// (д) Legacy fail-open pin (F6 review minor #3): the F6 gate WIDENS the
 	// mounted-watcher population — a worker-orchestrator over a LEGACY parent

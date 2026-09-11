@@ -13,7 +13,14 @@
  * Exported surface: contextPct, overContext, overOutputBudget,
  * parseSessionUsage, resolveContextWindow, resolvePiSessionCandidates,
  * formatGaugeLine, formatBudgetLine, formatTokens, resolveSpawnDefaults,
- * resolveTierTable, WATCH_DEFAULT_STALE_AFTER_MS.
+ * resolveTierTable, WATCH_DEFAULT_STALE_AFTER_MS,
+ * SESSION_TAIL_BYTES, sessionToolCallNames, countSessionToolCall.
+ * <p>
+ * Migration stage 3 (audit step 10, the one-parser law): the session-JSONL
+ * TAIL scan (tool-call names) moved here verbatim from observe.ts — this
+ * module is the ONLY session-JSONL parser in src/ (usage numbers AND
+ * tool-call names both come from the worker session files); observe.ts
+ * consumes the parsed names and never touches the JSONL itself.
  * Critical invariants (owned here):
  *   - dual-gauge semantics (§20, v1.7): PRIMARY ctx% is a STATE — the LAST
  *     assistant message's usage.totalTokens ÷ contextWindow (mirrors pi's
@@ -42,7 +49,7 @@
  *   TERTIARY  turns = assistant-message count (loop/thrash detector)
  */
 
-import { readFileSync, readdirSync } from "node:fs";
+import { closeSync, openSync, readFileSync, readdirSync, readSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { SessionUsage, SpawnTier } from "./host.ts";
@@ -360,4 +367,108 @@ export function formatTokens(n: number): string {
 	if (n < 1000) return String(n);
 	const k = n / 1000;
 	return `${k >= 100 ? Math.round(k) : Math.round(k * 10) / 10}k`;
+}
+
+// ---------------------------------------------------------------------------
+// Session JSONL scan — tool-call names (accompanies parseSessionUsage, which
+// deliberately knows nothing about tools). Migration stage 3 (audit step 10):
+// moved verbatim from observe.ts — the one-parser law (§3.2 item 7) puts ALL
+// session-JSONL parsing in this gauge layer; observe.ts consumes the names.
+// Tolerant: unreadable/corrupt/partial → [] (a half-written last line is
+// skipped, never thrown).
+// ---------------------------------------------------------------------------
+
+/** Session JSONL scan cap: only the tail can hold a NEW tool call, and a
+ *  10 s poll must not re-parse 50 MB per worker. */
+export const SESSION_TAIL_BYTES = 1_000_000;
+
+/** Tail-reads a worker's session JSONL (whole file when it fits the cap).
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: path — session JSONL path; maxBytes — tail cap (default
+ *   SESSION_TAIL_BYTES = 1 MB)
+ * Output: the whole file, or its last maxBytes bytes
+ * Guarantees:
+ *   - the fd-based tail read never loads a >1 MB session fully; the first
+ *     (partial) line fails to parse and is skipped by callers
+ *   - unreadable file → "" (no tool calls known), never throws
+ * Raises: never
+ * EXTERNAL_DEPENDENCY: filesystem — the worker's pi session JSONL
+ *   (path comes from the manifest's sessionPath / pi session storage).
+ */
+function readSessionTail(path: string, maxBytes: number = SESSION_TAIL_BYTES): string {
+	let fd: number | undefined;
+	try {
+		const size = statSync(path).size;
+		if (size <= maxBytes) return readFileSync(path, "utf8");
+		// Tail read (the first, partial line fails to parse and is skipped) —
+		// explicit fd read: @types/node types position/length only on the Buffer
+		// overload of readFileSync, and no new dependencies are allowed.
+		fd = openSync(path, "r");
+		const start = size - maxBytes;
+		const len = size - start;
+		const buf = Buffer.allocUnsafe(len);
+		readSync(fd, buf, 0, len, start);
+		return buf.toString("utf8");
+	} catch {
+		return ""; // unreadable → no tool calls known, never throw
+	} finally {
+		if (fd !== undefined) {
+			try {
+				closeSync(fd);
+			} catch {
+				// already closed — advisory scan, nothing to recover
+			}
+		}
+	}
+}
+
+/** Names of every toolCall in a worker session (duplicates preserved — the
+ *  count is a useful fingerprint). Empty when the session is unknown/corrupt.
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: sessionPath — worker session JSONL path (undefined → [])
+ * Output: toolCall block names in order, duplicates preserved
+ * Guarantees:
+ *   - reads only the session TAIL (readSessionTail) — a 10 s poll must not
+ *     re-parse 50 MB; corrupt/partial lines are skipped
+ * Raises: never
+ * EXTERNAL_DEPENDENCY: filesystem — the worker's pi session JSONL.
+ */
+export function sessionToolCallNames(sessionPath?: string): string[] {
+	if (!sessionPath) return [];
+	const names: string[] = [];
+	for (const line of readSessionTail(sessionPath).split("\n")) {
+		if (!line.trim()) continue;
+		let e: unknown;
+		try {
+			e = JSON.parse(line);
+		} catch {
+			continue; // corrupt/partial line — skip
+		}
+		const content = (e as { message?: { content?: unknown } })?.message?.content;
+		if (!Array.isArray(content)) continue;
+		for (const block of content) {
+			if (
+				block !== null &&
+				typeof block === "object" &&
+				(block as { type?: unknown }).type === "toolCall" &&
+				typeof (block as { name?: unknown }).name === "string"
+			) {
+				names.push((block as { name: string }).name);
+			}
+		}
+	}
+	return names;
+}
+
+/** How many times a worker invoked a tool (0 when unreadable).
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: sessionPath (may be undefined), toolName
+ * Output: exact invocation count in the session tail (0 when unreadable)
+ * Raises: never
+ */
+export function countSessionToolCall(sessionPath: string | undefined, toolName: string): number {
+	return sessionToolCallNames(sessionPath).filter((n) => n === toolName).length;
 }
