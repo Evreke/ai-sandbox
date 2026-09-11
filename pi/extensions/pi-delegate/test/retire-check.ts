@@ -365,7 +365,7 @@ function workerView(w: ManifestWorker, statuses: AgentStatus[] | null = [DONE(w.
 	// Herdr no longer knows the agent (the pane WAS closed) — without the
 	// retiredAt guard this would fire a bogus worker-dead.
 	const snap = snapshotFor([w], null);
-	const seen = new Set<string>();
+	const seen = new Map<string, import("../src/observe.ts").DeliveryKey>();
 	const events = (() => {
 		const mod = require("../src/observe.ts") as typeof import("../src/observe.ts");
 		return mod.detectEvents(snapshotFor([w], null), seen, { nowMs: NOW });

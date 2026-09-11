@@ -56,6 +56,11 @@ a **validated JSON report** is on disk — never when the agent status says done
 - **Event-driven watcher.** You are woken only when attention is needed: report ready or
   invalid, mailbox question, worker blocked on an interactive deck, context critical (≥90%),
   worker died without a report, collected-but-still-mounted worker. No `sleep 1500`.
+  Delivered facts are durable: a session restart does NOT re-wake you on already-delivered
+  facts (one file per session per task directory). Emergency rollback:
+  `watch.durableDelivery: false`. One-time note: the first run after upgrading on a
+  resumed session may produce a single volley of repeated wake-ups (bounded by ownership
+  and the 24 h lookback) — the durable store starts empty and is never seeded.
 - **File mailbox.** `q-<name>.json` / `a-<name>.json` — send follow-ups to a running worker
   or answer its questions without respawning it.
 - **Strict reports.** The completion criterion is a **validated JSON report** with evidence
@@ -102,6 +107,14 @@ Judgment stays with the model (decomposition, verification, merge); mechanics be
   explicit config `watch.legacyFailOpen: true`, which is unsafe on a machine with several
   sessions. A session that cannot read its own identity delivers nothing unconditionally
   (no config escape).
+- Delivered wake-up facts survive a session restart: each audience session commits its
+  delivery records to `delivered-<key>.json` in the task directory (one file per session,
+  written only after a successful send). Repeated wake-ups after a restart are therefore
+  gone; the emergency rollback is `watch.durableDelivery: false` (back to memory-only
+  dedup, no new version needed). On the first run after upgrading, a resumed session may
+  emit a one-time volley of repeated wake-ups (the store starts empty and is never
+  seeded; the volley is bounded by the ownership gate and the 24 h lookback). On a shared
+  machine, updated and not-yet-updated sessions behave differently until all are updated.
 
 ### Install
 
@@ -205,6 +218,14 @@ done/idle.
   `watch.legacyFailOpen: true`; это небезопасно на машине с несколькими сессиями. Сессия,
   которая не может прочитать собственную идентичность, не доставляет ничего безусловно
   (конфигурационного выхода нет).
+- Факты доставки пробуждений переживают рестарт сессии: каждая сессия-аудитория коммитит
+  свои записи доставки в `delivered-<ключ>.json` в каталоге задачи (один файл на сессию,
+  запись только после успешной отправки). Повторных пробуждений после рестарта больше нет;
+  аварийный откат — `watch.durableDelivery: false` (возврат к памятьному дедупу без новой
+  версии). При первом запуске после обновления возобновлённая сессия может выдать
+  единоразовый залп повторных пробуждений (хранилище стартует пустым и никогда не
+  засевается; залп ограничен гейтом владения и суточным горизонтом). На общей машине
+  обновлённые и ещё не обновлённые сессии ведут себя по-разному, пока не обновлены все.
 
 ### Установка
 

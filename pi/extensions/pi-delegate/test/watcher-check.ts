@@ -79,12 +79,24 @@ import {
 	resolveWatchConfig,
 	startWatcher,
 	stopWatcher,
+	type DeliveryKey,
 	workersFromManifests,
 	type DetectOptions,
 	type WatchEvent,
 	type WatchSnapshot,
+	type WatchWorker,
 } from "../src/observe.ts";
-import { questionPathFor, reportPathFor, type ExchangeManifest, type ManifestWorker } from "../src/exchange.ts";
+import {
+	appendDeliveredRecords,
+	deliveredStorePathFor,
+	deliveryRecordKey,
+	questionPathFor,
+	readDeliveredStore,
+	reportPathFor,
+	watcherKeyFor,
+	type ExchangeManifest,
+	type ManifestWorker,
+} from "../src/exchange.ts";
 import { countSessionToolCall, sessionToolCallNames } from "../src/usage.ts";
 import type { AgentStatus, Transport } from "../src/host.ts";
 
@@ -146,7 +158,7 @@ check(
 
 const WATCH_MOD = new URL("../src/observe.ts", import.meta.url).pathname;
 
-function watchConfigInHome(configJson: string): { intervalMs: number; settleGateMs: number; staleAfterMs: number; legacyFailOpen?: boolean; raw: string; stderr: string } {
+function watchConfigInHome(configJson: string): { intervalMs: number; settleGateMs: number; staleAfterMs: number; legacyFailOpen?: boolean; durableDelivery?: boolean; raw: string; stderr: string } {
 	const home = mkdtempSync(join(tmpdir(), "watcher-check-home-"));
 	const configDir = join(home, ".pi", "agent");
 	mkdirSync(configDir, { recursive: true });
@@ -219,6 +231,20 @@ function watchConfigInHome(configJson: string): { intervalMs: number; settleGate
 		badLf.legacyFailOpen === false && /legacyFailOpen/.test(badLf.stderr),
 		`${badLf.raw} | stderr: ${badLf.stderr.slice(0, 200)}`,
 	);
+	// Watcher stage B: watch.durableDelivery — absent → TRUE (the safe value:
+	// the durable dedup only ever SUPPRESSES a repeated wake-up); a present
+	// boolean is used as-is (false = the emergency memory-only rollback); a
+	// non-boolean warns ONCE and STAYS true (a typo must never silently
+	// switch the durable dedup off).
+	check("W2.14 no config → durableDelivery defaults true", d.durableDelivery === true, d.raw);
+	const dd = watchConfigInHome(JSON.stringify({ watch: { durableDelivery: false } }));
+	check("W2.15 watch.durableDelivery:false resolves false (emergency rollback)", dd.durableDelivery === false, dd.raw);
+	const badDd = watchConfigInHome(JSON.stringify({ watch: { durableDelivery: "no" } }));
+	check(
+		"W2.16 non-boolean durableDelivery → stays true + warn-once on stderr",
+		badDd.durableDelivery === true && /durableDelivery/.test(badDd.stderr),
+		`${badDd.raw} | stderr: ${badDd.stderr.slice(0, 200)}`,
+	);
 }
 
 // ---------------------------------------------------------------------------
@@ -288,7 +314,7 @@ function eventsFor(
 	opts: DetectOptions & { statuses?: AgentStatus[] | null; self?: { sessionFile?: string; cwd?: string } } = {},
 ): WatchEvent[] {
 	const snap = snapshotFor([w], opts.statuses === undefined ? [LIVE(w.name)] : opts.statuses, opts.self ?? {}, opts.nowMs ?? NOW);
-	return detectEvents(snap, new Set<string>(), { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true, ...opts });
+	return detectEvents(snap, newSeen(), { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true, ...opts });
 }
 
 function writeSession(dir: string, name: string, lines: unknown[]): string {
@@ -320,6 +346,15 @@ function writeValidReport(dir: string, name: string): string {
 }
 
 const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort().join(",");
+
+/** Fresh memory cache for detectEvents (watcher stage B): the dedup state is a
+ *  map from the canonical key to the PARSED DeliveryKey — never re-split from
+ *  a string. */
+const newSeen = (): Map<string, DeliveryKey> => new Map<string, DeliveryKey>();
+
+/** THIS test audience's durable store for a task dir. */
+const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
+	readDeliveredStore(dir, watcherKeyFor(sessionFile));
 
 // ---------------------------------------------------------------------------
 // W3. report-ready (+ report-invalid distinct message)
@@ -469,7 +504,7 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 	const w = mkWorker(dir, "w-dedup");
 	writeValidReport(dir, "w-dedup");
 	const snap = snapshotFor([w], [LIVE("w-dedup")]);
-	const seen = new Set<string>();
+	const seen = newSeen();
 	const first = detectEvents(snap, seen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true });
 	const second = detectEvents(snap, seen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true });
 	check("W8.1 first tick fires report-ready", first.some((e) => e.kind === "report-ready"), kindsOf(first));
@@ -492,7 +527,7 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 	const qdir = taskDir("dedup-q");
 	const qw = mkWorker(qdir, "w-ask");
 	const qsnap = snapshotFor([qw], [LIVE("w-ask")]);
-	const qseen = new Set<string>();
+	const qseen = newSeen();
 	writeFileSync(questionPathFor(qdir, "w-ask"), JSON.stringify({ worker: "w-ask", ts: "T1", question: "first?" }));
 	check("W8.6 question fires once", detectEvents(qsnap, qseen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true }).filter((e) => e.kind === "mailbox-question").length === 1);
 	writeFileSync(questionPathFor(qdir, "w-ask"), JSON.stringify({ worker: "w-ask", ts: "T1", question: "first?" }));
@@ -505,7 +540,7 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 	const gw = mkWorker(gdir, "w-deck");
 	gw.sessionPath = writeSession(gdir, "w-deck", [assistantToolCall(GRILL_DECK_TOOL)]);
 	const gsnap = snapshotFor([gw], [LIVE("w-deck")]);
-	const gseen = new Set<string>();
+	const gseen = newSeen();
 	check("W8.8b first deck fires", detectEvents(gsnap, gseen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true }).some((e) => e.kind === "grill-deck"));
 	check("W8.8c same deck count does not re-fire", detectEvents(gsnap, gseen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true }).length === 0);
 	writeFileSync(gw.sessionPath, readFileSync(gw.sessionPath, "utf8") + JSON.stringify(assistantToolCall(GRILL_DECK_TOOL)) + "\n");
@@ -521,7 +556,7 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 	const vdir = taskDir("dedup-vanish");
 	const vw = mkWorker(vdir, "w-vanish");
 	const vsnap = snapshotFor([vw], NO_STATUS); // not live, no report → worker-dead
-	const vseen = new Set<string>();
+	const vseen = newSeen();
 	check("W8.10 dead worker fires once", detectEvents(vsnap, vseen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true }).some((e) => e.kind === "worker-dead"));
 	check("W8.10b the key is held while the worker is in the snapshot", vseen.size === 1, JSON.stringify([...vseen]));
 	detectEvents(workersFromManifests([], NO_STATUS, {}, NOW), vseen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true });
@@ -1112,7 +1147,7 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 	// is a new fact), and the fingerprint IS the collectedAt stamp.
 	{
 		const snap = snapshotFor([w], [LIVE("w-stale")]);
-		const seen = new Set<string>();
+		const seen = newSeen();
 		check("W15.9 first tick fires once", detectEvents(snap, seen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true }).filter((e) => e.kind === "worker-stale").length === 1);
 		check("W15.10 identical second tick is silent (dedup)", detectEvents(snap, seen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true }).length === 0);
 		check(
@@ -1226,7 +1261,7 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 		[LIVE("lead-impl"), LIVE("lead-sibling"), LIVE("lead-pure"), LIVE("dev-impl")],
 		{ sessionFile: LEAD, cwd: LEAD_CWD },
 	);
-	const batch = detectEvents(snap, new Set(), { nowMs: NOW, selfSessionFile: LEAD });
+	const batch = detectEvents(snap, newSeen(), { nowMs: NOW, selfSessionFile: LEAD });
 	check(
 		"W16.7 the lead's watcher hears ITS OWN child's report-ready",
 		batch.some((e) => e.kind === "report-ready" && e.worker === "dev-impl"),
@@ -1328,7 +1363,7 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 	const w = mkWorker(dir, "w-dup-wake");
 	writeValidReport(dir, "w-dup-wake");
 	const snap = snapshotFor([w], [LIVE("w-dup-wake")]);
-	const seen = new Set<string>();
+	const seen = newSeen();
 
 	// Tick 1: report readable → delivered exactly once.
 	const t1 = detectEvents(snap, seen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true });
@@ -1347,7 +1382,7 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 	check("W16.16b tick 2: renamed-away report → no event", t2.length === 0, kindsOf(t2));
 	check(
 		"W16.16c tick 2: the fingerprinted seen-key survives the missed observation",
-		[...seen].some((k) => k.includes("#report-ready#")),
+		[...seen.keys()].some((k) => k.includes('"report-ready"')),
 		JSON.stringify([...seen]),
 	);
 
@@ -1370,30 +1405,494 @@ const kindsOf = (events: WatchEvent[]): string => events.map((e) => e.kind).sort
 		kindsOf(t4),
 	);
 
-	// Gauge/absence kinds keep the old reset semantics: a condition that stops
-	// being true forgets its key and re-fires when true again (exactly-once per
-	// continuous episode, not forever-silent).
+	// Gauge/absence kinds now carry EPISODE fingerprints (watcher stage B,
+	// guideline §5.4): worker-dead fingerprints by the manifest launch stamp.
+	// The reset rule is therefore the uniform fingerprinted one — a herdr
+	// status flap WITHIN one launch (dead → alive → dead again, same
+	// startedAt) is the SAME death episode and does not re-fire; a NEW run of
+	// the worker (new startedAt) is a NEW episode and wakes again. The durable
+	// store removes records only when the worker really vanishes — never on a
+	// skipped observation or a status flap.
 	const gdir = taskDir("dup-wake-gauge");
 	const gw = mkWorker(gdir, "w-dup-gauge");
 	const gsnap = snapshotFor([gw], NO_STATUS); // not live, no report → worker-dead
-	const gseen = new Set<string>();
+	const gseen = newSeen();
 	check(
 		"W16.16f gauge kind (worker-dead) fires once",
 		detectEvents(gsnap, gseen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true }).some((e) => e.kind === "worker-dead"),
 	);
+	check(
+		"W16.16f2 the worker-dead key carries the launch-stamp episode fingerprint",
+		[...gseen.values()].some((k) => k.kind === "worker-dead" && k.fingerprint === gw.startedAt),
+		JSON.stringify([...gseen.values()]),
+	);
 	const gAlive = snapshotFor([gw], [LIVE("w-dup-gauge")]); // condition stops being true
 	detectEvents(gAlive, gseen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true });
 	check(
-		"W16.16g gauge kind: the key is FORGOTTEN when the condition stops being true (reset semantics intact)",
-		gseen.size === 0,
-		JSON.stringify([...gseen]),
+		"W16.16g gauge kind: the key SURVIVES a status flap (the same launch = the same death episode; the durable record is not erased)",
+		gseen.size === 1,
+		JSON.stringify([...gseen.values()]),
 	);
 	check(
-		"W16.16h gauge kind: dead again → re-fires",
-		detectEvents(gsnap, gseen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true }).some((e) => e.kind === "worker-dead"),
+		"W16.16h gauge kind: dead again within the SAME launch → no second wake (one wake per episode)",
+		detectEvents(gsnap, gseen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true }).length === 0,
+	);
+	const gw2 = mkWorker(gdir, "w-dup-gauge", { startedAt: new Date(NOW - 5 * 60_000).toISOString() }); // a NEW run
+	const gsnap2 = snapshotFor([gw2], NO_STATUS);
+	check(
+		"W16.16h2 gauge kind: a NEW launch (new startedAt) is a NEW death episode → re-fires",
+		detectEvents(gsnap2, gseen, { nowMs: NOW, selfSessionFile: TEST_SELF, legacyFailOpen: true }).some((e) => e.kind === "worker-dead"),
 	);
 }
 
+
+// ---------------------------------------------------------------------------
+// W17. Durable delivery store (watcher stage B, guideline §5): the memory
+// dedup is a CACHE of the per-task delivered-facts file — a commit happens
+// ONLY after a successful send, a failed send never touches the disk, a
+// failed commit is not a failed delivery, records are garbage-collected
+// only when the worker really vanishes, and collectedAt never produces
+// report records.
+// ---------------------------------------------------------------------------
+
+{
+	// (1) Restart: deliver → a SECOND watcher instance (fresh memory, same
+	// session path, same files) delivers NOTHING; a DIFFERENT audience still
+	// delivers (the store is per-audience, not global).
+	{
+		const dir = taskDir("durable-restart");
+		const w = mkWorker(dir, "w-restart");
+		writeValidReport(dir, "w-restart");
+		const snap = snapshotFor([w], [LIVE("w-restart")]);
+		const sent1: string[] = [];
+		const h1 = createWatcher({
+			transport: { listStatuses: async () => [LIVE("w-restart")] } as unknown as Transport,
+			intervalMs: 3_600_000,
+			send: (t: string) => {
+				sent1.push(t);
+			},
+			snapshot: async () => snap,
+			self: { sessionFile: TEST_SELF },
+			detect: { legacyFailOpen: true },
+			log: () => {},
+		});
+		const b1 = await h1.tick();
+		check("W17.1 the first watcher delivers the report-ready", b1.length === 1 && sent1.length === 1, kindsOf(b1));
+		const store1 = ownStore(dir);
+		const recKeys1 = Object.keys(store1.records);
+		check(
+			"W17.2 the delivered fact is committed to the durable store after the send (schema, audience path, one record)",
+			recKeys1.length === 1 &&
+				store1.schemaVersion === 1 &&
+				store1.audienceSessionPath === TEST_SELF &&
+				store1.records[recKeys1[0]!]?.worker === "w-restart" &&
+				store1.records[recKeys1[0]!]?.kind === "report-ready" &&
+				store1.records[recKeys1[0]!]?.deliveryMode === "sent",
+			JSON.stringify(store1),
+		);
+		check(
+			"W17.2b the record key is the canonical three-component JSON array",
+			recKeys1[0] === deliveryRecordKey("w-restart", "report-ready", store1.records[recKeys1[0]!]?.fingerprint ?? ""),
+			recKeys1[0] ?? "",
+		);
+		h1.stop();
+
+		// Restart: a fresh watcher instance over the same files and the SAME
+		// session path (same audience key → same store file).
+		const sent2: string[] = [];
+		const h2 = createWatcher({
+			transport: { listStatuses: async () => [LIVE("w-restart")] } as unknown as Transport,
+			intervalMs: 3_600_000,
+			send: (t: string) => {
+				sent2.push(t);
+			},
+			snapshot: async () => snap,
+			self: { sessionFile: TEST_SELF },
+			detect: { legacyFailOpen: true },
+			log: () => {},
+		});
+		const b2 = await h2.tick();
+		check(
+			"W17.3 the restarted watcher delivers NOTHING on the same facts (durable dedup survives the restart)",
+			b2.length === 0 && sent2.length === 0,
+			`${kindsOf(b2)} ${JSON.stringify(sent2)}`,
+		);
+		h2.stop();
+
+		// Pair check: a DIFFERENT audience (different session path → a
+		// different store file) still delivers — guards against an accidentally
+		// global store.
+		const OTHER = "/tmp/sessions/other-audience.jsonl";
+		const sent3: string[] = [];
+		const h3 = createWatcher({
+			transport: { listStatuses: async () => [LIVE("w-restart")] } as unknown as Transport,
+			intervalMs: 3_600_000,
+			send: (t: string) => {
+				sent3.push(t);
+			},
+			snapshot: async () => snap,
+			self: { sessionFile: OTHER },
+			detect: { legacyFailOpen: true },
+			log: () => {},
+		});
+		const b3 = await h3.tick();
+		check(
+			"W17.4 a DIFFERENT audience still delivers (the store is per-audience, never global)",
+			b3.length === 1 && sent3.length === 1,
+			`${kindsOf(b3)} ${JSON.stringify(sent3)}`,
+		);
+		check("W17.4b the other audience's store file is separate", Object.keys(ownStore(dir, OTHER).records).length === 1);
+		h3.stop();
+	}
+
+	// (2) Send failure: a throwing sender (and a rejected-promise variant)
+	// leaves the store untouched; the retry delivers exactly once and writes
+	// exactly one record per event. Silent mode: no record, memory suppresses.
+	{
+		const dir = taskDir("durable-sendfail");
+		const w = mkWorker(dir, "w-sendfail");
+		writeValidReport(dir, "w-sendfail");
+		const snap = snapshotFor([w], [LIVE("w-sendfail")]);
+		const mk = (send: (t: string) => unknown) =>
+			createWatcher({
+				transport: { listStatuses: async () => [LIVE("w-sendfail")] } as unknown as Transport,
+				intervalMs: 3_600_000,
+				send: send as (text: string) => never,
+				snapshot: async () => snap,
+				self: { sessionFile: TEST_SELF },
+				detect: { legacyFailOpen: true },
+				log: () => {},
+			});
+
+		// (a) synchronously throwing sender → nothing on disk…
+		const hThrow = mk(() => {
+			throw new Error("send exploded");
+		});
+		const bThrow = await hThrow.tick();
+		check("W17.5 a throwing send delivers nothing", bThrow.length === 1, kindsOf(bThrow));
+		check("W17.5b a failed send writes NOTHING to the durable store", Object.keys(ownStore(dir).records).length === 0);
+		// …and the retry delivers exactly once, committing exactly one record.
+		let deliveredOnce = false;
+		const hRetry = mk((t: string) => {
+			if (!deliveredOnce) {
+				deliveredOnce = true;
+				return;
+			}
+			throw new Error("should not be called twice");
+		});
+		const bRetry = await hRetry.tick();
+		check("W17.6 the retry delivers exactly once after the failed send", bRetry.length === 1 && deliveredOnce, kindsOf(bRetry));
+		check(
+			"W17.6b the retry commits exactly one record for the event",
+			Object.keys(ownStore(dir).records).length === 1,
+			JSON.stringify(ownStore(dir)),
+		);
+		check("W17.6c the event never fires a third time", (await hRetry.tick()).length === 0);
+		hThrow.stop();
+		hRetry.stop();
+
+		// (b) rejected-promise variant: an async send failure is the same —
+		// nothing on disk (the tick awaits the send inside the error guard).
+		{
+			const dirP = taskDir("durable-sendfail-async");
+			const wP = mkWorker(dirP, "w-sendfail-async");
+			writeValidReport(dirP, "w-sendfail-async");
+			const snapP = snapshotFor([wP], [LIVE("w-sendfail-async")]);
+			const hP = createWatcher({
+				transport: { listStatuses: async () => [LIVE("w-sendfail-async")] } as unknown as Transport,
+				intervalMs: 3_600_000,
+				send: async () => {
+					throw new Error("async send failure");
+				},
+				snapshot: async () => snapP,
+				self: { sessionFile: TEST_SELF },
+				detect: { legacyFailOpen: true },
+				log: () => {},
+			});
+			const bP = await hP.tick();
+			check("W17.7 a REJECTED send promise delivers nothing and writes nothing", bP.length === 1 && Object.keys(ownStore(dirP).records).length === 0, kindsOf(bP));
+			hP.stop();
+		}
+
+		// (c) silent mode: the sink reports "not a delivery" → no store write,
+		// and the memory keys are NOT rolled back (no every-tick noise).
+		{
+			const dirS = taskDir("durable-silent");
+			const wS = mkWorker(dirS, "w-silent");
+			writeValidReport(dirS, "w-silent");
+			const snapS = snapshotFor([wS], [LIVE("w-silent")]);
+			const logsS: string[] = [];
+			const hS = createWatcher({
+				transport: { listStatuses: async () => [LIVE("w-silent")] } as unknown as Transport,
+				intervalMs: 3_600_000,
+				send: () => ({ delivered: false, mode: "silent" as const }),
+				snapshot: async () => snapS,
+				self: { sessionFile: TEST_SELF },
+				detect: { legacyFailOpen: true },
+				log: (m) => logsS.push(m),
+			});
+			const bS1 = await hS.tick();
+			check("W17.8 silent mode delivers nothing and writes NOTHING to the store", bS1.length === 1 && Object.keys(ownStore(dirS).records).length === 0);
+			const bS2 = await hS.tick();
+			check(
+				"W17.8b silent mode does NOT roll the memory keys back (no every-tick retry noise)",
+				bS2.length === 0,
+				kindsOf(bS2),
+			);
+			check("W17.8c silent mode leaves an audit line", logsS.some((m) => /silent/i.test(m)), JSON.stringify(logsS));
+			hS.stop();
+		}
+	}
+
+	// (3) New mtime: a rewritten report (only the mtime moves) is a NEW
+	// fingerprint — exactly one new delivery, the store append-only holds
+	// BOTH records.
+	{
+		const dir = taskDir("durable-mtime");
+		const w = mkWorker(dir, "w-mtime");
+		const p = writeValidReport(dir, "w-mtime");
+		const snap = snapshotFor([w], [LIVE("w-mtime")]);
+		const sent: string[] = [];
+		const h = createWatcher({
+			transport: { listStatuses: async () => [LIVE("w-mtime")] } as unknown as Transport,
+			intervalMs: 3_600_000,
+			send: (t: string) => {
+				sent.push(t);
+			},
+			snapshot: async () => snap,
+			self: { sessionFile: TEST_SELF },
+			detect: { legacyFailOpen: true },
+			log: () => {},
+		});
+		await h.tick();
+		utimesSync(p, new Date(NOW + 60_000), new Date(NOW + 60_000)); // only the mtime moves
+		const b2 = await h.tick();
+		check("W17.9 a rewritten report (new mtime) delivers exactly one NEW wake", b2.length === 1 && sent.length === 2, `${kindsOf(b2)} ${JSON.stringify(sent)}`);
+		const store = ownStore(dir);
+		const fps = new Set(Object.values(store.records).map((r) => r.fingerprint));
+		check(
+			"W17.9b the store is append-only: two records with DIFFERENT fingerprints (no deletion of the old fact)",
+			Object.keys(store.records).length === 2 && fps.size === 2,
+			JSON.stringify(store),
+		);
+		h.stop();
+	}
+
+	// (4) collectedAt: a collected report produces NO durable record for any
+	// report kind — the collect stamp is a product fact in the manifest, the
+	// store holds only really-sent wakes; src/spawn.ts is untouched.
+	{
+		const dir = taskDir("durable-collected");
+		const w = mkWorker(dir, "w-collected", { collectedAt: new Date(NOW - 60_000).toISOString() });
+		writeValidReport(dir, "w-collected");
+		const snap = snapshotFor([w], [LIVE("w-collected")]);
+		const sent: string[] = [];
+		const h = createWatcher({
+			transport: { listStatuses: async () => [LIVE("w-collected")] } as unknown as Transport,
+			intervalMs: 3_600_000,
+			send: (t: string) => {
+				sent.push(t);
+			},
+			snapshot: async () => snap,
+			self: { sessionFile: TEST_SELF },
+			detect: { legacyFailOpen: true, nowMs: NOW },
+			log: () => {},
+		});
+		const b = await h.tick();
+		check(
+			"W17.10 collectedAt → no report event, no delivery, NO durable records at all",
+			b.length === 0 && sent.length === 0 && Object.keys(ownStore(dir).records).length === 0,
+			`${kindsOf(b)} ${JSON.stringify(sent)}`,
+		);
+		h.stop();
+	}
+
+	// (5) Batch: two workers in ONE task dir → one message → after the success
+	// BOTH records sit in the SAME file (atomicity per dir by construction).
+	// Negative part: an injectable store-write failure once → the memory keys
+	// STAY (no re-delivery every tick) and the audit line is present.
+	{
+		const dir = taskDir("durable-batch");
+		const w1 = mkWorker(dir, "w-batch1");
+		const w2 = mkWorker(dir, "w-batch2");
+		writeValidReport(dir, "w-batch1");
+		writeValidReport(dir, "w-batch2");
+		const snap = snapshotFor([w1, w2], [LIVE("w-batch1"), LIVE("w-batch2")]);
+		const sent: string[] = [];
+		const logs: string[] = [];
+		let commitCalls = 0;
+		let breakCommit = true;
+		const h = createWatcher({
+			transport: { listStatuses: async () => [LIVE("w-batch1"), LIVE("w-batch2")] } as unknown as Transport,
+			intervalMs: 3_600_000,
+			send: (t: string) => {
+				sent.push(t);
+			},
+			commitDelivery: async (cdir, entries) => {
+				commitCalls++;
+				if (breakCommit) throw new Error("store write broken");
+				// otherwise behave exactly like the real writer
+				await appendDeliveredRecords(cdir, watcherKeyFor(TEST_SELF), TEST_SELF, entries, new Date().toISOString(), "sent");
+			},
+			snapshot: async () => snap,
+			self: { sessionFile: TEST_SELF },
+			detect: { legacyFailOpen: true },
+			log: (m) => logs.push(m),
+		});
+		const b1 = await h.tick();
+		check(
+			"W17.11 a two-worker batch in one dir sends ONE message carrying both events",
+			b1.length === 2 && sent.length === 1 && (sent[0]?.match(/- \[/g) ?? []).length === 2,
+			`${kindsOf(b1)}`,
+		);
+		check("W17.11b the failed commit wrote nothing", Object.keys(ownStore(dir).records).length === 0 && commitCalls === 1);
+		check(
+			"W17.11c a failed commit is NOT a failed delivery: memory keys stay, NO re-delivery on the next ticks",
+			(await h.tick()).length === 0 && sent.length === 1 && commitCalls === 1,
+		);
+		check(
+			"W17.11d the failed commit leaves the audit line (a repeat is possible after a restart)",
+			logs.some((m) => /durable delivery record not written/.test(m) && /restart/.test(m)),
+			JSON.stringify(logs),
+		);
+		breakCommit = false;
+		// The commit succeeds only when a NEW fact fires (the memory keys of the
+		// first batch were kept): rewrite one report with a new mtime.
+		utimesSync(reportPathFor(dir, "w-batch1"), new Date(NOW + 60_000), new Date(NOW + 60_000));
+		const b2 = await h.tick();
+		check("W17.11e a working commit persists the new fact", b2.length === 1 && Object.keys(ownStore(dir).records).length === 1);
+		h.stop();
+	}
+
+	// (6) Batch across two dirs is committed as two files (atomicity holds
+	// WITHIN each dir — documented partial-commit surface).
+	{
+		const dirA = taskDir("durable-batch-a");
+		const dirB = taskDir("durable-batch-b");
+		const wA = mkWorker(dirA, "w-ba");
+		const wB = mkWorker(dirB, "w-bb");
+		writeValidReport(dirA, "w-ba");
+		writeValidReport(dirB, "w-bb");
+		const snap = snapshotFor([wA, wB], [LIVE("w-ba"), LIVE("w-bb")]);
+		const sent: string[] = [];
+		const h = createWatcher({
+			transport: { listStatuses: async () => [LIVE("w-ba"), LIVE("w-bb")] } as unknown as Transport,
+			intervalMs: 3_600_000,
+			send: (t: string) => {
+				sent.push(t);
+			},
+			snapshot: async () => snap,
+			self: { sessionFile: TEST_SELF },
+			detect: { legacyFailOpen: true },
+			log: () => {},
+		});
+		const b = await h.tick();
+		check(
+			"W17.12 a batch spanning two task dirs is ONE message and TWO store files (one per dir)",
+			b.length === 2 && sent.length === 1 &&
+				Object.keys(ownStore(dirA).records).length === 1 &&
+				Object.keys(ownStore(dirB).records).length === 1,
+			`${kindsOf(b)}`,
+		);
+		h.stop();
+	}
+
+	// (7) Garbage collection: a worker that vanishes from the manifests has its
+	// records removed; a transient unreadable store NEVER erases durable keys.
+	{
+		const dir = taskDir("durable-gc");
+		const w = mkWorker(dir, "w-gc");
+		writeValidReport(dir, "w-gc");
+		let snap = snapshotFor([w], [LIVE("w-gc")]);
+		const h = createWatcher({
+			transport: { listStatuses: async () => [LIVE("w-gc")] } as unknown as Transport,
+			intervalMs: 3_600_000,
+			send: () => {},
+			snapshot: async () => snap,
+			self: { sessionFile: TEST_SELF },
+			detect: { legacyFailOpen: true },
+			log: () => {},
+		});
+		await h.tick();
+		check("W17.13 the record exists before the GC", Object.keys(ownStore(dir).records).length === 1);
+		snap = snapshotFor([], []); // the worker really vanished from the manifests
+		await h.tick();
+		check(
+			"W17.14 the vanished worker's records are garbage-collected from the store",
+			Object.keys(ownStore(dir).records).length === 0,
+			JSON.stringify(ownStore(dir)),
+		);
+		h.stop();
+
+		// Transient read error: a corrupt store file is read as EMPTY (never a
+		// throw) — the memory cache still suppresses within the session, and
+		// the durable keys are not erased by the failed read.
+		const dirT = taskDir("durable-torn");
+		const wT = mkWorker(dirT, "w-torn");
+		writeValidReport(dirT, "w-torn");
+		const snapT = snapshotFor([wT], [LIVE("w-torn")]);
+		const sentT: string[] = [];
+		const hT = createWatcher({
+			transport: { listStatuses: async () => [LIVE("w-torn")] } as unknown as Transport,
+			intervalMs: 3_600_000,
+			send: (t: string) => {
+				sentT.push(t);
+			},
+			snapshot: async () => snapT,
+			self: { sessionFile: TEST_SELF },
+			detect: { legacyFailOpen: true },
+			log: () => {},
+		});
+		await hT.tick();
+		const before = readFileSync(deliveredStorePathFor(dirT, watcherKeyFor(TEST_SELF)), "utf8");
+		writeFileSync(deliveredStorePathFor(dirT, watcherKeyFor(TEST_SELF)), "{corrupt"); // transient torn file
+		check("W17.15 a torn store read suppresses nothing extra in memory (no re-delivery)", (await hT.tick()).length === 0 && sentT.length === 1);
+		writeFileSync(deliveredStorePathFor(dirT, watcherKeyFor(TEST_SELF)), before); // the transient error is over
+		check(
+			"W17.16 the transient read error did NOT erase the durable keys",
+			Object.keys(ownStore(dirT).records).length === 1,
+			JSON.stringify(ownStore(dirT)),
+		);
+		check("W17.16b after the recovery the event stays suppressed", (await hT.tick()).length === 0);
+		hT.stop();
+	}
+
+	// (8) Emergency rollback: durableDelivery:false → byte-identical memory-only
+	// behavior (no store file is ever created).
+	{
+		const dir = taskDir("durable-off");
+		const w = mkWorker(dir, "w-off");
+		writeValidReport(dir, "w-off");
+		const snap = snapshotFor([w], [LIVE("w-off")]);
+		const sent: string[] = [];
+		const h = createWatcher({
+			transport: { listStatuses: async () => [LIVE("w-off")] } as unknown as Transport,
+			intervalMs: 3_600_000,
+			send: (t: string) => {
+				sent.push(t);
+			},
+			snapshot: async () => snap,
+			self: { sessionFile: TEST_SELF },
+			detect: { legacyFailOpen: true },
+			durableDelivery: false,
+			log: () => {},
+		});
+		const b = await h.tick();
+		check(
+			"W17.17 durableDelivery:false → the memory-only dedup, no store file ever created",
+			b.length === 1 && sent.length === 1,
+		);
+		let storeFileExists = false;
+		try {
+			readFileSync(deliveredStorePathFor(dir, watcherKeyFor(TEST_SELF)));
+			storeFileExists = true;
+		} catch {
+			storeFileExists = false;
+		}
+		check("W17.17b the rollback creates no store file", !storeFileExists);
+		h.stop();
+	}
+}
 
 rmSync(FIX, { recursive: true, force: true });
 console.log(failures === 0 ? "\nALL WATCHER CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
