@@ -30,6 +30,7 @@
 import {
 	type AgentStatus,
 	type AgentStatusName,
+	delegateErrorWithDetail,
 	DelegateErrorImpl,
 	type Placement,
 	type PlacementMode,
@@ -129,12 +130,14 @@ export class FakeWorkerHost implements Transport {
 			);
 		}
 		if (this.agents.has(req.name)) {
-			// D4 seam contract: collision → E_NAME with candidate guidance; the
-			// caller reads back the effective name from the result.
-			throw new DelegateErrorImpl(
+			// D4 seam contract: collision → E_NAME. Migration stage 1 (errors-defect
+			// 2): the guidance BASE TEXT comes from the seam dictionary via
+			// delegateErrorWithDetail — the fake appends only its own fact (which
+			// agent holds the name); it does not phrase hints itself.
+			throw delegateErrorWithDetail(
 				"E_NAME",
 				`fake host: agent name ${req.name} already taken`,
-				`Name is taken — use the canonical name when retrying. Existing agent: ${req.name}`,
+				`existing agent: ${req.name}`,
 			);
 		}
 		this.agents.set(req.name, { name: req.name, placement });

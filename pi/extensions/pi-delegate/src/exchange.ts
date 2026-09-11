@@ -78,12 +78,12 @@
  */
 
 import { parseFrontmatter, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
-import type {
-	DelegateError,
-	DelegateErrorCode,
-	Placement,
-	ProgressEvent,
-	WorkerReport,
+import {
+	delegateError,
+	type DelegateError,
+	type Placement,
+	type ProgressEvent,
+	type WorkerReport,
 } from "./host.ts";
 import {
 	isProgressEvent,
@@ -238,21 +238,11 @@ export interface ExchangeDir {
 // Errors
 // ---------------------------------------------------------------------------
 
-class ExchangeDelegateError extends Error implements DelegateError {
-	readonly code: DelegateErrorCode;
-	readonly guidance: string;
-	override cause?: unknown;
-
-	constructor(code: DelegateErrorCode, message: string, cause?: unknown) {
-		super(message);
-		this.name = "DelegateError";
-		this.code = code;
-		this.guidance = E_BRIEF_GUIDANCE;
-		if (cause !== undefined) this.cause = cause;
-	}
-}
-
-const E_BRIEF_GUIDANCE = "Write the brief file first, then retry the delegate call.";
+// Migration stage 1 (audit, errors-defect 2): the exchange module's SECOND
+// error class (ExchangeDelegateError, with its own hardcoded E_BRIEF guidance
+// duplicating the seam dictionary) is DELETED. Every error this module raises
+// goes through the ONE seam factory (delegateError from src/host.ts), so the
+// guidance text has exactly one writer.
 
 // ---------------------------------------------------------------------------
 // Path validation + ensureExchangeDir
@@ -261,14 +251,15 @@ const E_BRIEF_GUIDANCE = "Write the brief file first, then retry the delegate ca
 /**
  * Validate and open the exchange dir for a brief.
  * Rules: briefPath absolute, inside /tmp/exchange/<task>/, file exists and is
- * non-empty. Throws a DelegateError with code E_BRIEF otherwise.
+ * non-empty. Throws a DelegateError (typed, seam taxonomy) with code E_BRIEF
+ * otherwise.
  */
 export function ensureExchangeDir(briefPathRaw: string): ExchangeDir {
 	// Normalize a leading @ (models sometimes prefix tool path args with it).
 	const briefPath = briefPathRaw.startsWith("@") ? briefPathRaw.slice(1) : briefPathRaw;
 
 	if (!briefPath || !isAbsolute(briefPath)) {
-		throw new ExchangeDelegateError(
+		throw delegateError(
 			"E_BRIEF",
 			`Brief path must be absolute, got: "${briefPathRaw}"`,
 		);
@@ -279,27 +270,27 @@ export function ensureExchangeDir(briefPathRaw: string): ExchangeDir {
 	const parent = dirname(dir);
 
 	if (resolve(parent) !== exchangeRoot()) {
-		throw new ExchangeDelegateError(
+		throw delegateError(
 			"E_BRIEF",
 			`Brief must live directly inside ${exchangeRoot()}/<task>/ — parent dir of "${dir}" is "${parent}"`,
 		);
 	}
 	if (!task || task === basename(exchangeRoot())) {
-		throw new ExchangeDelegateError("E_BRIEF", `Missing task slug in brief path: "${brief}"`);
+		throw delegateError("E_BRIEF", `Missing task slug in brief path: "${brief}"`);
 	}
 
 	let content: string;
 	try {
 		content = readFileSync(brief, "utf8");
 	} catch (err) {
-		throw new ExchangeDelegateError(
+		throw delegateError(
 			"E_BRIEF",
 			`Brief file not readable at ${brief}: ${(err as Error).message}`,
 			err,
 		);
 	}
 	if (content.trim().length === 0) {
-		throw new ExchangeDelegateError("E_BRIEF", `Brief file is empty: ${brief}`);
+		throw delegateError("E_BRIEF", `Brief file is empty: ${brief}`);
 	}
 
 	// Conventional report path: brief-<name>.md → report-<name>.json (sibling).

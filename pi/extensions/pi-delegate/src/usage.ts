@@ -64,6 +64,7 @@ import type { SessionUsage, SpawnTier } from "./host.ts";
  * Raises: never */
 export const WATCH_DEFAULT_STALE_AFTER_MS = 30 * 60_000;
 import {
+	BUDGET_CONFIG_PATH,
 	CONTEXT_WINDOWS,
 	DEFAULT_CONTEXT_WINDOW,
 } from "./host.ts";

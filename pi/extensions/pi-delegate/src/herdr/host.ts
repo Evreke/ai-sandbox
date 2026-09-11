@@ -26,6 +26,7 @@ import {
 	type AgentStatusName,
 	type AuthorityMode,
 	delegateError,
+	delegateErrorWithDetail,
 	DelegateErrorImpl,
 	type DelegateError,
 	type DelegateErrorCode,
@@ -1238,10 +1239,13 @@ export class HerdrTransport implements Transport {
 			// candidate-list guidance.
 			if (/agent_name_taken/i.test(msg) || /name taken by a live agent/i.test(msg)) {
 				const candidates = /candidat\w*\s*[:=]?\s*([^\n]+)/i.exec(msg)?.[1]?.trim() ?? "unknown";
-				throw new DelegateErrorImpl(
+				// Migration stage 1 (errors-defect 2): the guidance BASE TEXT is the
+				// seam dictionary's (GUIDANCE.E_NAME via delegateErrorWithDetail) —
+				// the adapter appends only the backend FACT (the candidate list).
+				throw delegateErrorWithDetail(
 					"E_NAME",
 					`herdr agent start ${req.name}: name taken by a live agent (candidates: ${candidates})`,
-					`requested worker name is taken by a live agent — choose a different name (candidates: ${candidates})`,
+					`candidates: ${candidates}`,
 					err,
 				);
 			}

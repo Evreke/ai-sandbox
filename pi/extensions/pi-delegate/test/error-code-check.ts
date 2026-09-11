@@ -34,6 +34,7 @@ import {
 } from "../src/host.ts";
 import { createHerdrTransport } from "../src/herdr/host.ts";
 import { registerDelegateTool } from "../src/spawn.ts";
+import { delegateErrorWithDetail, GUIDANCE } from "../src/host.ts";
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = "") {
@@ -234,6 +235,81 @@ try {
 			`E6 ${code} is a valid DelegateErrorCode with guidance attached`,
 			de.code === code && typeof de.guidance === "string",
 			`guidance=${de.guidance.slice(0, 60)}`,
+		);
+	}
+
+	// -------------------------------------------------------------------------
+	// E7 — step 3: the "name taken" hint has ONE source. Both adapters append
+	// only a detail clause to the seam dictionary's base text.
+	// -------------------------------------------------------------------------
+	const { FakeWorkerHost } = await import("../src/host/fake.ts");
+	const fake = new FakeWorkerHost({ repoPath: rootCwd });
+	const p = await fake.place({ mode: "tab", repoPath: rootCwd, branch: "b", label: "l" });
+	await fake.startAgent({ name: "dup", placementRef: p.placementRef ?? p.paneId, provider: "p", model: "m", thinking: "low", timeoutMs: 1000 });
+	try {
+		await fake.startAgent({ name: "dup", placementRef: p.placementRef ?? p.paneId, provider: "p", model: "m", thinking: "low", timeoutMs: 1000 });
+		check("E7 fake collision guidance = dictionary base + detail", false, "no throw");
+	} catch (e) {
+		const g = (e as DelegateErrorImpl).guidance ?? "";
+		check(
+			"E7 fake collision: guidance STARTS with the dictionary base text (the adapter only appends its fact)",
+			e instanceof DelegateErrorImpl &&
+				g.startsWith(GUIDANCE.E_NAME) &&
+				g.includes("existing agent: dup"),
+			`guidance=${g}`,
+		);
+	}
+
+	// The herdr adapter (E1 above) — same property on the real adapter.
+	// Re-derive its error and assert the same base-text prefix.
+	try {
+		await t.startAgent(startReq);
+	} catch (e) {
+		const g = (e as DelegateErrorImpl).guidance ?? "";
+		check(
+			"E7b herdr collision: guidance STARTS with the dictionary base text + candidates fact",
+			g.startsWith(GUIDANCE.E_NAME) && /candidates: routing-rev-2/.test(g),
+			`guidance=${g}`,
+		);
+	}
+
+	// E8 — source-level single-source pin: the base "choose a different name"
+	// phrasing exists EXACTLY once across src/ (in the seam dictionary).
+	const { readdirSync, readFileSync: rf, statSync: st } = await import("node:fs");
+	const { dirname: dn, resolve: rs } = await import("node:path");
+	const listSrc = (dir: string): string[] => {
+		const out: string[] = [];
+		for (const e of readdirSync(dir, { withFileTypes: true })) {
+			const fp = rs(dir, e.name);
+			if (e.isDirectory()) out.push(...listSrc(fp));
+			else if (e.name.endsWith(".ts")) out.push(fp);
+		}
+		return out;
+	};
+	const srcDir = rs(dn(process.argv[1] ?? "."), "..", "src");
+	const PHRASE = /choose a different name/i;
+	const hits = listSrc(srcDir)
+		.map((f) => ({ f, n: rf(f, "utf8").split(PHRASE).length - 1 }))
+		.filter((x) => x.n > 0);
+	check(
+		"E8 the 'choose a different name' hint phrasing exists EXACTLY once across src/ (the seam dictionary)",
+		hits.length === 1 && hits[0].f.endsWith(join("src", "host.ts")) && hits[0].n === 1,
+		JSON.stringify(hits),
+	);
+	// And the dictionary entry is non-trivial (a real hint, not a stub).
+	check("E8b GUIDANCE.E_NAME is the collision hint", PHRASE.test(GUIDANCE.E_NAME), GUIDANCE.E_NAME);
+
+	// E9 — the exchange module's second error class is gone: ensureExchangeDir
+	// raises through the ONE seam factory (typed DelegateErrorImpl + E_BRIEF).
+	const { ensureExchangeDir } = await import("../src/exchange.ts");
+	try {
+		ensureExchangeDir("relative/brief.md");
+		check("E9 ensureExchangeDir → seam-typed E_BRIEF", false, "no throw");
+	} catch (e) {
+		check(
+			"E9 ensureExchangeDir raises through the ONE seam error factory (typed code + dictionary guidance, no second class)",
+			e instanceof DelegateErrorImpl && (e as DelegateErrorImpl).code === "E_BRIEF" && (e as DelegateErrorImpl).guidance === GUIDANCE.E_BRIEF,
+			`${(e as Error).name}`,
 		);
 	}
 

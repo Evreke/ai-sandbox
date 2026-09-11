@@ -503,10 +503,48 @@ export function delegateError(code: DelegateErrorCode, message: string, cause?: 
 	return new DelegateErrorImpl(code, message, GUIDANCE[code], cause);
 }
 
-/** Guidance text per DESIGN.md §7 — embedded in every typed error. */
-const GUIDANCE: Record<DelegateErrorCode, string> = {
+/**
+ * Migration stage 1 (audit, errors-defect 2): the guidance TEXT has ONE
+ * writer — the central §7 dictionary (GUIDANCE). Adapters never write their
+ * own hint phrasing: they append a backend FACT (candidate names, existing
+ * agent, stderr detail) to the dictionary's base text via this helper.
+ * Before this, three sources phrased the same "name taken" advice three
+ * different ways (seam: "use the canonical name", herdr: "choose a different
+ * name", fake: a third variant).
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: code — taxonomy entry; message — the error message (facts, may
+ *   name the backend); detail — the adapter's fact clause (or empty)
+ * Output: DelegateErrorImpl whose guidance = GUIDANCE[code], optionally
+ *   followed by the detail clause in parentheses
+ * Guarantees:
+ *   - the base phrasing of every hint is byte-identical across adapters
+ *   - empty/absent detail → guidance is exactly GUIDANCE[code]
+ * Raises: never
+ */
+export function delegateErrorWithDetail(
+	code: DelegateErrorCode,
+	message: string,
+	detail?: string,
+	cause?: unknown,
+): DelegateErrorImpl {
+	return new DelegateErrorImpl(
+		code,
+		message,
+		detail ? `${GUIDANCE[code]} (${detail})` : GUIDANCE[code],
+		cause,
+	);
+}
+
+/** Guidance text per DESIGN.md §7 — embedded in every typed error.
+ *  Migration stage 1: EXPORTED as the single writer of the base hint text —
+ *  adapters may only append a detail clause (delegateErrorWithDetail); the
+ *  single-source pin in test/error-code-check.ts asserts the base phrasing
+ *  exists nowhere else. */
+export const GUIDANCE: Record<DelegateErrorCode, string> = {
 	E_BRIEF: "Write the brief file first, then retry the delegate call.",
-	E_NAME: "Use the returned canonical name.",
+	E_NAME:
+		"Name collision: the requested worker name is taken by a live agent — choose a different name.",
 	E_TIER:
 		"Add tiers/defaults to ~/.pi/agent/pi-delegate.config.json or pass provider/model/thinking explicitly on the delegate call.",
 	E_PLACE:
