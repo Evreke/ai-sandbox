@@ -49,6 +49,9 @@ import {
 	writeRelease,
 } from "./mailbox-store.ts";
 import { errText, fail, sleep, textResult, type ToolResult } from "./tool-result.ts";
+// Wave 4 item 2 (Law 1 truncation duty): worker-written question text is
+// capped in the rendered result via pi's own truncation helpers.
+import { capWorkerText } from "./text-cap.ts";
 import { resolveWatchConfig } from "./watch-config.ts";
 import { clampLines, renderDelegateLines } from "./fleet.ts";
 import { WORKER_NAME_RE, type QuestionEnvelope, type Transport } from "./host.ts";
@@ -193,10 +196,10 @@ export function registerMailboxTool(pi: import("@earendil-works/pi-coding-agent"
 
 			// --- read: side-effect-free scan of every known task dir -----------------
 			if (params.action === "read") {
-				const questions: QuestionEnvelope[] = [];
+				const questions: Array<{ q: QuestionEnvelope; dir: string }> = [];
 				for (const dir of knownTaskDirs(transport.backendName())) {
 					const q = readQuestion(questionPathFor(dir, params.name));
-					if (q) questions.push(q);
+					if (q) questions.push({ q, dir });
 				}
 				if (questions.length === 0) {
 					return textResult(
@@ -205,18 +208,26 @@ export function registerMailboxTool(pi: import("@earendil-works/pi-coding-agent"
 						{ action: "read", name: params.name, questions: [] },
 					);
 				}
-				const lines = questions.flatMap((q) => [
-					`Pending question from ${q.worker} (${q.ts}):`,
-					q.question,
-					q.context ? `Context: ${q.context}` : "",
-					q.options?.length ? `Options: ${q.options.join(" | ")}` : "",
-					`Answer via delegate_mailbox (action 'answer', name '${params.name}').`,
-					"",
-				]);
+				// Law 1 truncation duty (Wave 4 item 2): question body/context are
+				// worker-written — cap the RENDERED text; the full envelopes stay in
+				// details.questions and on disk (the notice names the q-file path).
+				const lines = questions.flatMap(({ q, dir }) => {
+					const fullCopyNote = `Full question: ${questionPathFor(dir, params.name)}.`;
+					const bodyCap = capWorkerText(q.question, fullCopyNote);
+					const contextCap = q.context ? capWorkerText(q.context, fullCopyNote) : null;
+					return [
+						`Pending question from ${q.worker} (${q.ts}):`,
+						bodyCap.text,
+						contextCap ? `Context: ${contextCap.text}` : "",
+						q.options?.length ? `Options: ${q.options.join(" | ")}` : "",
+						`Answer via delegate_mailbox (action 'answer', name '${params.name}').`,
+						"",
+					];
+				});
 				return textResult(lines.join("\n").trim(), {
 					action: "read",
 					name: params.name,
-					questions,
+					questions: questions.map((e) => e.q),
 				});
 			}
 

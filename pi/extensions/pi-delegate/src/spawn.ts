@@ -152,6 +152,9 @@ import { runGraceLoop } from "./grace.ts";
 // 4.1) — the structural kill of the byte-identical errText/asDelegateError
 // copies (audit finding 7).
 import { asDelegateError, errText, fail, textResult, typedCode, type ToolResult } from "./tool-result.ts";
+// Wave 4 item 2 (Law 1 truncation duty): worker-written report text is capped
+// in the rendered result via pi's own truncation helpers (src/text-cap.ts).
+import { capWorkerText } from "./text-cap.ts";
 // Wave 3 decomposition (step 5): the tolerant fs probes are ONE implementation
 // (src/fs-probe.ts) — the local reportExists copy is deleted (the grace loop's
 // injection keeps the reportExists name via the aliased import).
@@ -821,18 +824,20 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				);
 			}
 
-			// placementRef-only end state (Law 4, Wave 4): the ref is the ONLY
-			// required handle. A compliant adapter always returns one; a placement
-			// without it is an adapter contract violation — refuse with E_PLACE
-			// instead of threading `undefined` into startAgent/embodiment keys.
-			if (!placement.placementRef) {
+			// placementRef-only end state (Law 4, Wave 4): the ref is the primary
+			// handle; the legacy paneId stays as the documented fallback for legacy
+			// placement records (pre-ref cohorts). Only a placement with NEITHER
+			// handle is an adapter contract violation — refuse with E_PLACE instead
+			// of threading `undefined` into startAgent/embodiment keys.
+			const placementHandle = placement.placementRef ?? placement.paneId;
+			if (!placementHandle) {
 				return fail(
 					"E_PLACE",
-					`E_PLACE — ${mode} placement for ${params.name} returned no placementRef (adapter contract violation).`,
+					`E_PLACE — ${mode} placement for ${params.name} returned neither a placementRef nor a legacy paneId (adapter contract violation).`,
 					{ name: params.name, mode },
 				);
 			}
-			const placementRef: string = placement.placementRef;
+			const placementRef: string = placementHandle;
 
 			//    BUG_FIX_CONTEXT: symptom — a failed start left an orphaned pane/
 			//    worktree invisible to teardown because the manifest entry was only
@@ -1271,10 +1276,6 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 					placement.kind === "worktree"
 						? `worktree, branch ${placement.branch ?? branch}`
 						: "tab (shared checkout)";
-				const verdictLine =
-					report.status === "pass"
-						? `Report OK: status=pass — ${report.summary}`
-						: `Report OK: status=fail (honest failure — the worker ran and reported) — ${report.summary}`;
 				const b = gaugeSummary();
 				// Archive on successful collect — pass OR fail verdict (DESIGN.md §19.3).
 				// Best-effort by contract: null/throw → warning line, never an error.
@@ -1345,10 +1346,24 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				// note, never change this result's verdict.
 				const teardownNote = await teardownAfterCollect();
 				const teardownNoteLine = teardownNote ? `\n${teardownNote}` : "";
+				// Law 1 truncation duty (Wave 4 item 2): report.summary and the
+				// artifacts list are worker-written — the DISPLAY text is head-truncated
+				// to pi's default limits; the full report stays on disk (usedReportPath),
+				// in details.report, and in the archived copy. The notice tells the LLM
+				// what was cut and where the full copy lives.
+				const fullCopyNote = `Full report: ${usedReportPath}${archivePath ? ` (archived: ${archivePath})` : ""}.`;
+				const summaryCap = capWorkerText(report.summary, fullCopyNote);
+				const artifactsList = report.artifacts.length > 0 ? report.artifacts.join(", ") : "";
+				const artifactsCap = capWorkerText(artifactsList, fullCopyNote);
+				const reportDisplayTruncated = summaryCap.truncated || artifactsCap.truncated;
+				const verdictLine =
+					report.status === "pass"
+						? `Report OK: status=pass — ${summaryCap.text}`
+						: `Report OK: status=fail (honest failure — the worker ran and reported) — ${summaryCap.text}`;
 				return textResult(
 					`${extraNote}Worker ${canonical} finished in ${elapsedMs} ms (${placementDesc}).\n` +
 						`${verdictLine}\n` +
-						`Artifacts: ${report.artifacts.length > 0 ? report.artifacts.join(", ") : "(none)"}` +
+						`Artifacts: ${artifactsList ? artifactsCap.text : "(none)"}` +
 						archiveNote +
 						collectedStampNote +
 						teardownNoteLine +
@@ -1369,6 +1384,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 						elapsedMs,
 						startedAt: startedAtDate.toISOString(),
 						...(archivePath ? { archivePath } : { archiveWarning: "archive unavailable" }),
+						...(reportDisplayTruncated ? { reportDisplayTruncated: true } : {}),
 						...(collectedNote ? { collectedAtWarning: collectedNote } : {}),
 						...(teardownNote ? { teardownAfterCollect: teardownNote } : {}),
 						...(tierWarning ? { tierWarning } : {}),

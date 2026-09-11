@@ -120,6 +120,33 @@ function isProbeView(v: WorkerView): boolean {
 	return isProbeDir(v.dir);
 }
 
+/** Law 1 truncation duty (Wave 4 item 2): delegate_status renders one line
+ *  per worker EVER spawned (entries are never deleted from manifests) — the
+ *  rendered row list is capped at this many rows. Display cap only: the
+ *  full list stays in details.workers, and the omission is announced with an
+ *  "N more omitted" note. Most-relevant first: live workers before drained
+ *  ones, then recency (newest startedAt first). */
+export const STATUS_MAX_ROWS = 100;
+
+/** Order a worker-view selection most-relevant-first for display (live
+ *  workers before drained ones, then newest startedAt first).
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: views — the selected WorkerView list (any order)
+ * Output: a new sorted array (input untouched)
+ * Guarantees: pure; live = status "working"/"blocked"; unparseable dates
+ *   sort as oldest; never throws
+ * Raises: never
+ */
+export function orderStatusRows(views: WorkerView[]): WorkerView[] {
+	const liveRank = (v: WorkerView) => (v.status === "working" || v.status === "blocked" ? 0 : 1);
+	const recency = (v: WorkerView) => {
+		const t = Date.parse(v.startedAt);
+		return Number.isNaN(t) ? 0 : t;
+	};
+	return [...views].sort((a, b) => liveRank(a) - liveRank(b) || recency(b) - recency(a));
+}
+
 /**
  * F1 fleet-usage line for delegate_status (the chosen surface — smallest one
  * that makes the aggregate visible; the fleet overlay already shows per-
@@ -224,8 +251,17 @@ export function registerStatusTool(pi: import("@earendil-works/pi-coding-agent")
 				};
 			}
 
+			// Law 1 truncation duty (Wave 4 item 2): order most-relevant-first and
+			// cap the RENDERED rows; the full selection stays in details.workers and
+			// the omission is announced. Cap applies BEFORE the per-row I/O (mailbox
+			// markers, progress pings, session-JSONL gauges) — the cap bounds the
+			// tick cost too, not just the text.
+			const ordered = orderStatusRows(selected);
+			const omittedCount = Math.max(0, ordered.length - STATUS_MAX_ROWS);
+			const shown = omittedCount > 0 ? ordered.slice(0, STATUS_MAX_ROWS) : ordered;
+
 			const lines = await Promise.all(
-				selected.map(async (v: WorkerView) => {
+				shown.map(async (v: WorkerView) => {
 					const mailbox = await mailboxMarkers(v.dir, v.name);
 					const mailboxPart = mailbox ? ` ${mailbox}` : "";
 					// v1.5 (DESIGN.md §18): last progress ping when present, e.g.
@@ -258,6 +294,13 @@ export function registerStatusTool(pi: import("@earendil-works/pi-coding-agent")
 			if (blocked.length > 0) {
 				lines.push(
 					`Blocked: ${blocked.map((v) => v.name).join(", ")} — read the pane, then answer or re-brief.`,
+				);
+			}
+			// Law 1 truncation duty: announce the omitted rows (the details payload
+			// still carries the FULL worker list — display cap only).
+			if (omittedCount > 0) {
+				lines.push(
+					`${omittedCount} more omitted (display cap ${STATUS_MAX_ROWS} rows, live-first then recency) — full list in details.workers, or query a single worker via the name parameter.`,
 				);
 			}
 			// Resume hint (§19.3/§19.4): live fleet empty + non-empty archive.
