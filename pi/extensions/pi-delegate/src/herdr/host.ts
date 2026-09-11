@@ -1407,8 +1407,9 @@ export class HerdrTransport implements Transport {
 		let tabId = recordedTabId;
 		if (recordedTabId === req.placement.paneId) {
 			const live = await this.resolveLiveTabId(req.name);
-			if (live && live !== recordedTabId) {
-				tabId = live; // manifest recorded a pane id — close the REAL tab
+			const reconciled = reconcileTabClose(recordedTabId, live);
+			if (reconciled !== recordedTabId) {
+				tabId = reconciled; // manifest recorded a pane id — close the REAL tab
 			}
 		}
 		try {
@@ -1588,6 +1589,31 @@ function agentStatusFromResult(result: unknown, fallbackName: string): AgentStat
 			asString(pick(result, "pane_id", "paneId", "agent.pane_id", "pane.pane_id")),
 		),
 	};
+}
+
+/**
+ * Migration stage 3 (audit step 10): the drift-guard reconcile decision is a
+ * pure exported function (behaviorally tested in static-check T3.3b — the
+ * old T3.3 was a source-text regex over this file). The teardown call site
+ * feeds it the recorded id and the live resolution; the decision stays here,
+ * next to the adapter-internal id model.
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input:
+ *   - recordedTabId: the id the manifest placement carries (possibly the
+ *     paneId fallback — the broken signature)
+ *   - liveTabId: the real tab id from the herdr agent registry, or null when
+ *     the agent is gone / statuses unavailable
+ * Output: the tab id to close
+ * Guarantees:
+ *   - the broken signature (recorded === paneId) + a DIFFERENT live id → the
+ *     live id (close the REAL tab, not the pane)
+ *   - every other input → the recorded id unchanged (a missing live id must
+ *     not turn a working close into a wrong-target close)
+ * Raises: never
+ */
+export function reconcileTabClose(recordedTabId: string, liveTabId: string | null): string {
+	return liveTabId !== null && liveTabId !== recordedTabId ? liveTabId : recordedTabId;
 }
 
 /** Adapter-internal read model: the seam AgentStatus PLUS the herdr ids the

@@ -1773,6 +1773,41 @@ export function makeSender(
 }
 
 /**
+ * The production watcher log sink (UX fix, 2026-09-10), extracted for
+ * behavioral testing (migration stage 3, audit step 10 — replaces the
+ * static-check source-text pins T4.1/T4.2): every line goes to the audit
+ * file (append-only, best-effort); the pane shows ONLY lines that need a
+ * human — errors and anomalies ("already gone" — the pane vanished before
+ * the TTL close, the agent may still be alive detached; see
+ * resolveLiveTabId's drift guard).
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: none (EXTERNAL_DEPENDENCY below)
+ * Output: the sink (m) => void used by startWatcher
+ * Guarantees:
+ *   - every line is appended to ~/.pi/agent/delegate-watch.log with an ISO
+ *     timestamp prefix; append failures are swallowed (advisory)
+ *   - lines matching /\berror\b|\bfail|already gone|unavailable/i are ALSO
+ *     surfaced to the pane via console.error with the [pi-delegate watch]
+ *     prefix; routine bookkeeping never reaches the pane
+ * Raises: never
+ * EXTERNAL_DEPENDENCY: ~/.pi/agent/delegate-watch.log (append-only audit
+ *   file under $HOME); os.homedir() is cached by bun — tests must set $HOME
+ *   at child-process spawn time or redirect before the first call.
+ */
+export function makeWatcherLogSink(): (m: string) => void {
+	return (m: string): void => {
+		void appendFile(
+			join(homedir(), ".pi", "agent", "delegate-watch.log"),
+			`${new Date().toISOString()} ${m}\n`,
+		).catch(() => undefined); // audit is advisory — never throw past the tick
+		if (/\berror\b|\bfail|already gone|unavailable/i.test(m)) {
+			console.error(`[pi-delegate watch] ${m}`);
+		}
+	};
+}
+
+/**
  * Start the watcher for this session (DESIGN.md §21: headless-safe — NO
  * ctx.hasUI guard). Returns the dispose fn; also reachable via stopWatcher().
  */
@@ -1794,21 +1829,9 @@ export function startWatcher(
 		intervalMs: cfg.intervalMs,
 		self: { sessionFile, cwd: ctx.cwd },
 		send: makeSender(pi),
-		// Watcher log sink (UX fix, 2026-09-10): the default console.error sink
-		// surfaced INTERNAL bookkeeping (routine retire successes) into the user's
-		// pane. Every line now goes to the audit file (append-only, best-effort);
-		// the pane shows ONLY lines that need a human: errors and anomalies
-		// ("already gone" — the pane vanished before the TTL close, the agent may
-		// still be alive detached; see resolveLiveTabId's drift guard).
-		log: (m: string) => {
-			void appendFile(
-				join(homedir(), ".pi", "agent", "delegate-watch.log"),
-				`${new Date().toISOString()} ${m}\n`,
-			).catch(() => undefined); // audit is advisory — never throw past the tick
-			if (/\berror\b|\bfail|already gone|unavailable/i.test(m)) {
-				console.error(`[pi-delegate watch] ${m}`);
-			}
-		},
+		// Watcher log sink (UX fix, 2026-09-10) — extracted to makeWatcherLogSink
+		// (behaviorally tested; see that function's contract).
+		log: makeWatcherLogSink(),
 		// v1.12.1: the worker-stale threshold threads from watch.staleAfterMs
 		// (deps.detect can still override per-mount, e.g. in tests).
 		// §23: the retire TTL threads the same way.

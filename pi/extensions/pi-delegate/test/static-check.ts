@@ -3,25 +3,34 @@
  *
  * Run with: bun test/static-check.ts   (from repo root)
  *
- * Checks:
+ * Checks (migration stage 3, audit step 10: every fix-specific source-text
+ * pin is replaced by a BEHAVIORAL test — the registered tools/commands are
+ * driven, the exported pure helpers are exercised; the ONLY remaining
+ * source scans are the three hygiene lint rules, which prohibit literals
+ * and are textual by nature):
  *   1. Package boundary (migration stage 3, audit step 9): the herdr adapter
  *      is published ONLY as the separate export subpath "./herdr" — module
- *      resolution, not a source-text regex, enforces the import rule (the
- *      old T1.1/T1.1c text pins are deleted; only index.ts binds the
- *      adapter, pinned positively by T1.1b).
- *   2. src/observe.ts (delegate_status tool section) contains no mutating herdr calls.
+ *      resolution, not a source-text regex, enforces the import rule; the
+ *      adapter is loaded and CONSTRUCTED here (T1.1b-drive — the old T1.1b
+ *      text pin is deleted).
+ *   2. delegate_status read-only, BEHAVIORALLY: the registered tool is driven
+ *      against a recording transport — execute touches ONLY listStatuses.
  *   3. WORKER_NAME_RE rejects "Bad-Name", "-x", 33-char names; accepts valid ones.
  *   4. validateReport() error strings for 6 invalid shapes + 1 valid report.
- *   5. W0 pin (rng-sum bug 2): the E_REPORT_MISSING/E_REPORT_INVALID retry
- *      guidance mandates a NEW suffixed worker name — verbatim, at BOTH sites
- *      (promptGuidelines + the settle-fail text). Pure-text pin: the fix is
- *      prose and a reword would silently drop the mandate.
+ *   5. W0 retry mandate (rng-sum bug 2), BEHAVIORALLY: the captured delegate
+ *      tool's runtime promptGuidelines carry the RETRY_MANDATE constant, and
+ *      a DRIVEN settle-fail (fake host, no report) carries it in the actual
+ *      E_REPORT_MISSING guidance; the same drive consumes a stale
+ *      nudge-failed marker (T2.5b).
+ *   6. Hygiene lint (source scans by nature): the seam imports no relative
+ *      modules; no hardcoded tier or /root/ literal in src/.
  *
  * Exit 0 only if all checks pass.
  */
 
-import { readFileSync, readdirSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { dirname, join, resolve } from "node:path";
 import {
 	WORKER_NAME_RE,
 } from "../src/host.ts";
@@ -29,9 +38,19 @@ import {
 	placementFromTabResult,
 } from "../src/herdr/host.ts";
 import { validateReport, TEARDOWN_LOG_NAME, teardownLogLine } from "../src/exchange.ts";
-import { RETRY_MANDATE } from "../src/spawn.ts";
+import { registerDelegateTool, RETRY_MANDATE } from "../src/spawn.ts";
+import { registerCommands, registerStatusTool } from "../src/observe.ts";
+import { FakeWorkerHost } from "../src/host/fake.ts";
+import type { Transport } from "../src/host.ts";
 
 const ROOT = resolve(dirname(process.argv[1] ?? "."), "..");
+
+// Fixture hygiene (field lesson 2026-09-10, host-fake-check convention): the
+// exchange root is SANDBOXED via $PI_DELEGATE_EXCHANGE_ROOT for the behavioral
+// drives below — the real /tmp/exchange is never touched.
+const SANDBOX = mkdtempSync(resolve(tmpdir(), "static-check-"));
+process.env.PI_DELEGATE_EXCHANGE_ROOT = SANDBOX;
+
 let failures = 0;
 
 function check(name: string, ok: boolean, detail = "") {
@@ -63,14 +82,23 @@ check(
 	JSON.stringify(pkg.exports ?? null),
 );
 
-// Positive pin (composition root, workerhost migration steps 5–6): index.ts
-// DOES bind the adapter — kept as a text pin because it asserts the POSITIVE
-// (the binding exists), which the exports map alone cannot prove.
+// The old T1.1b POSITIVE text pin (index.ts imports the adapter) is GONE
+// (migration stage 3, audit step 10): the binding's SUBSTANCE is the runtime
+// proof below — the adapter module imports, constructs and serves the full
+// Transport contract through the package boundary (T1.1b-drive + T1.1e);
+// which file calls the constructor is compile-time wiring (tsc qa config).
 
-const indexImportsHerdr = readFileSync(resolve(ROOT, "index.ts"), "utf8").includes(
-	"./src/herdr/host.ts",
-);
-check("T1.1b index.ts DOES import src/herdr/host.ts (adapter binding point, workerhost migration step 6)", indexImportsHerdr);
+// Behavioral binding proof (replaces the T1.1b text pin): the adapter module
+// LOADS through its src path and constructs — the composition root's binding
+// target exists and serves the seam.
+{
+	const { createHerdrTransport } = await import(resolve(ROOT, "src/herdr/host.ts"));
+	const t = createHerdrTransport();
+	check(
+		"T1.1b-drive the herdr adapter constructs and serves the Transport seam (backendName + capabilities)",
+		typeof t.backendName === "function" && t.backendName() === "herdr" && typeof t.capabilities === "function",
+	);
+}
 
 // Bottom-of-graph pin (workerhost inversion, research risk #2): the seam
 // module imports node builtins ONLY — zero relative/src imports (error
@@ -125,29 +153,46 @@ check(
 // 2. delegate_status tool read-only (section slice: observe.ts SECTION 1/3)
 // ---------------------------------------------------------------------------
 
-const observeSrc = readFileSync(resolve(ROOT, "src/observe.ts"), "utf8");
-const statusSrc = observeSrc.slice(
-	observeSrc.indexOf("SECTION 1/3"),
-	observeSrc.indexOf("SECTION 2/3"),
-);
-const mutatingPatterns = [
-	/\bplace\s*\(/,
-	/\bstartAgent\s*\(/,
-	/\bsubmitPrompt\s*\(/,
-	/\bteardown\s*\(/,
-	/"agent"\s*,\s*"(start|prompt)"/,
-	/"worktree"\s*,\s*"create"/,
-	/"tab"\s*,\s*"create"/,
-	/"worktree"\s*,\s*"remove"/,
-	/"tab"\s*,\s*"close"/,
-	/"workspace"\s*,\s*"close"/,
-];
-const statusHits = mutatingPatterns.map((re) => re.test(statusSrc));
-check(
-	"T1.2 status.ts contains no mutating herdr calls",
-	statusHits.every((h) => !h),
-	`pattern hits at indices ${statusHits.flatMap((h, i) => (h ? [i] : [])).join(",")}`,
-);
+// Behavioral (migration stage 3, audit step 10 — replaces the old source-text
+// regex over the observe.ts section slice): the REGISTERED delegate_status
+// tool is driven against a recording transport; the read-only contract is
+// that its execute touches ONLY the read sensor (listStatuses), never a
+// mutating backend operation.
+{
+	const statusCalls: string[] = [];
+	const recordingTransport = {
+		backendName: () => "herdr",
+		capabilities: () => ({ worktrees: true, authority: "root" }),
+		listStatuses: async () => {
+			statusCalls.push("listStatuses");
+			return [];
+		},
+		place: async () => {
+			statusCalls.push("place");
+			throw new Error("place MUST NOT be called by delegate_status");
+		},
+		startAgent: async () => {
+			statusCalls.push("startAgent");
+			throw new Error("startAgent MUST NOT be called by delegate_status");
+		},
+		submitPrompt: async () => {
+			statusCalls.push("submitPrompt");
+			throw new Error("submitPrompt MUST NOT be called by delegate_status");
+		},
+		teardown: async () => {
+			statusCalls.push("teardown");
+			throw new Error("teardown MUST NOT be called by delegate_status");
+		},
+	} as unknown as Transport;
+	let statusTool!: { execute: (...a: unknown[]) => Promise<unknown> };
+	registerStatusTool({ registerTool: (t: never) => (statusTool = t as never) } as never, recordingTransport);
+	await statusTool.execute("t1", {}, undefined, () => {}, { cwd: SANDBOX, hasUI: false });
+	check(
+		"T1.2 delegate_status execute calls ONLY listStatuses — zero mutating transport ops (behavioral)",
+		statusCalls.length === 1 && statusCalls[0] === "listStatuses",
+		JSON.stringify(statusCalls),
+	);
+}
 
 // ---------------------------------------------------------------------------
 // 3. Name validation
@@ -170,7 +215,6 @@ check(
 // 4. Report schema — validateReport()
 // ---------------------------------------------------------------------------
 
-import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 const tmp = mkdtempSync(resolve(tmpdir(), "qa-reports-"));
 
@@ -273,30 +317,54 @@ check("T1.4b validateReport accepts a valid report", good.ok, good.ok ? "" : goo
 // two copies can never drift apart again.
 // ---------------------------------------------------------------------------
 
-const delegateSrc = readFileSync(resolve(ROOT, "src/spawn.ts"), "utf8");
-const retryHits = delegateSrc.split("RETRY_MANDATE").length - 1;
-check(
-	"T2.1 BOTH guidance sites reference the RETRY_MANDATE constant (≥2 occurrences of the identifier)",
-	retryHits >= 2,
-	`identifier hits: ${retryHits}`,
-);
-check(
-	"T2.2 the mandate sits inside the delegate promptGuidelines (model-facing guidance, not just an error string)",
-	(() => {
-		// W5: spawn.ts holds BOTH tools' promptGuidelines (mailbox + delegate);
-		// the mandate must live in one of the model-facing blocks.
-		const blocks = delegateSrc.match(/promptGuidelines: \[[\s\S]*?\],/g) ?? [];
-		return blocks.some((b) => b.includes("RETRY_MANDATE"));
-	})(),
-);
-check(
-	"T2.3 the mandate sits in the settle-fail guidance (the E_REPORT_MISSING/E_REPORT_INVALID text after 'Treat as a failed spawn')",
-	(() => {
-		const idx = delegateSrc.indexOf("Treat as a failed spawn: do a diagnosed retry");
-		const hit = idx === -1 ? -1 : delegateSrc.indexOf("RETRY_MANDATE", idx);
-		return hit !== -1 && hit - idx < 400;
-	})(),
-);
+// Behavioral (migration stage 3, audit step 10 — replaces the old source-text
+// pins over spawn.ts): the REGISTERED delegate tool is captured and its
+// model-facing guidance inspected at RUNTIME (T2.1b/T2.2b), and a real
+// settle-fail is DRIVEN on the fake host so the E_REPORT_MISSING guidance is
+// asserted on the actual tool RESULT (T2.3b). The same drive proves the
+// stale-marker cleanup (section 6).
+{
+	let delegateTool!: {
+		promptGuidelines: string[];
+		execute: (...a: unknown[]) => Promise<{ content: Array<{ text: string }>; details: Record<string, unknown> }>;
+	};
+	registerDelegateTool({ registerTool: (t: never) => (delegateTool = t as never) } as never, new FakeWorkerHost({ repoPath: SANDBOX, statusScript: ["working", "done"] }) as unknown as Transport);
+	check(
+		"T2.1b the delegate promptGuidelines (runtime array) carry the RETRY_MANDATE constant",
+		delegateTool.promptGuidelines.some((g) => g.includes(RETRY_MANDATE)),
+	);
+
+	// Drive a genuine settle-fail: the fake settles (working → done) but NO
+	// report file exists → E_REPORT_MISSING → the "Treat as a failed spawn"
+	// guidance must carry the mandate.
+	const FAIL_NAME = "static-fail-worker";
+	const failDir = join(SANDBOX, `static-fail-${process.pid}`);
+	mkdirSync(failDir, { recursive: true });
+	const briefFail = join(failDir, `brief-${FAIL_NAME}.md`);
+	writeFileSync(briefFail, `# brief\n\nOUTPUT: report-${FAIL_NAME}.json\n`);
+	// The stale marker (F6 review fix, section 6): a PRE-EXISTING marker from a
+	// same-name retry must be consumed by the spawn flow.
+	const staleMarker = join(failDir, `nudge-failed-${FAIL_NAME}.json`);
+	writeFileSync(staleMarker, JSON.stringify({ name: FAIL_NAME, ts: "T", error: "stale" }));
+	const failResult = await delegateTool.execute(
+		"t1",
+		{ name: FAIL_NAME, briefPath: briefFail, provider: "p", model: "m", thinking: "low", waitMs: 1000, repoPath: SANDBOX, mode: "tab", releaseOn: "settle" },
+		undefined,
+		() => {},
+		{ cwd: SANDBOX, hasUI: false },
+	);
+	const failText = failResult.content.map((c) => c.text).join("\n");
+	check(
+		"T2.3b a settled-without-report fail result carries 'Treat as a failed spawn' + the RETRY_MANDATE (behavioral)",
+		failResult.details.ok === false && failResult.details.code === "E_REPORT_MISSING" &&
+			failText.includes("Treat as a failed spawn") && failText.includes(RETRY_MANDATE),
+		failText.slice(0, 200),
+	);
+	check(
+		"T2.5b the spawn flow consumed the stale nudge-failed marker right after its manifest append (behavioral)",
+		!existsSync(staleMarker),
+	);
+}
 check(
 	"T2.4 the mandate names the suffixed shape explicitly (<name>-r2) — a same-name retry must read as impossible",
 	/<name>-r2/.test(RETRY_MANDATE) && /name stays taken/.test(RETRY_MANDATE),
@@ -323,13 +391,20 @@ const tabPlacement = placementFromTabResult(CURRENT_TAB_SHAPE.result, "wKD", "ra
 check("T3.1 current herdr shape: tabId parsed from tab.tab_id (NOT the paneId fallback)", tabPlacement.tabId === "wKD:t4" && tabPlacement.paneId === "wKD:p4", JSON.stringify(tabPlacement));
 const legacyTabPlacement = placementFromTabResult(LEGACY_TAB_SHAPE.result, "wKD", "raw");
 check("T3.2 legacy herdr shape (tab.id) still parses", legacyTabPlacement.tabId === "wKD:t4");
-check(
-	"T3.3 teardown reconciles the paneId-fallback signature: transport resolves the live tab id when recorded tabId === paneId",
-	(() => {
-		const transportSrc = readFileSync(resolve(ROOT, "src/herdr/host.ts"), "utf8");
-		return /resolveLiveTabId\(req\.name\)/.test(transportSrc) && /recordedTabId === req\.placement\.paneId/.test(transportSrc);
-	})(),
-);
+// Behavioral (migration stage 3, audit step 10 — replaces the old source-text
+// regex over the adapter): the reconcile DECISION is the exported pure
+// helper the teardown call site feeds (recorded id + live resolution).
+{
+	const { reconcileTabClose } = await import(resolve(ROOT, "src/herdr/host.ts"));
+	check(
+		"T3.3 teardown reconcile decision: broken paneId signature + a different live id → close the REAL tab",
+		reconcileTabClose("wKD:p4", "wKD:t9") === "wKD:t9",
+	);
+	check(
+		"T3.3b no live id (agent gone / statuses unavailable) → the recorded id, never a wrong-target close",
+		reconcileTabClose("wKD:p4", null) === "wKD:p4" && reconcileTabClose("wKD:t4", "wKD:t4") === "wKD:t4",
+	);
+}
 
 // ---------------------------------------------------------------------------
 // 8. Watcher log UX pin (2026-09-10): the production log sink must write an
@@ -337,47 +412,125 @@ check(
 // bookkeeping must never reach the user's UI again.
 // ---------------------------------------------------------------------------
 
-const observeSrcAll = readFileSync(resolve(ROOT, "src/observe.ts"), "utf8");
-check(
-	"T4.1 startWatcher's log sink audits to delegate-watch.log",
-	/log: \(m: string\) => \{[\s\S]{0,400}?delegate-watch\.log/.test(observeSrcAll),
-);
-check(
-	"T4.2 the sink filters: the pane shows only error/fail/already-gone/unavailable lines",
-	/log: \(m: string\) => \{[\s\S]{0,400}?already gone[\s\S]{0,200}?console\.error/.test(observeSrcAll),
-);
-check(
-	"T4.3 /delegate-teardown skips retired history instead of erroring tab_not_found on it",
-	/actionsble = views\.filter\(\(v\) => v\.retired !== true\)/.test(observeSrcAll) ||
-		/actionable = views\.filter\(\(v\) => v\.retired !== true\)/.test(observeSrcAll),
-);
-check(
-	"T4.4 the teardown command treats an already-gone close as a structured idempotent no-op success (migration stage 1: the alreadyGone field replaces the 'not found' message regex)",
-	/res\?\.alreadyGone[\s\S]{0,300}?already closed, no-op/.test(observeSrcAll),
-);
-// T4.5 (WorkerView retired flag) was a fleet.ts source-text pin — DELETED in
-// migration stage 3 (audit step 10): the flag's merged-layer semantics are
-// behaviorally covered in test/retire-check.ts (R3.11/R3.13).
+// Behavioral (migration stage 3, audit step 10 — replaces the T4.1–T4.4
+// source-text regexes over observe.ts): the log sink is driven through its
+// exported factory (child process — bun caches os.homedir(), so $HOME must be
+// set at spawn time), and the /delegate-teardown COMMAND is driven against a
+// recording transport.
+{
+	// T4.1/T4.2 — the sink audits every line and surfaces ONLY error-shaped
+	// ones to the pane. Child bun: fresh $HOME + a fresh module registry.
+	const home = mkdtempSync(join(tmpdir(), "static-check-home-"));
+	mkdirSync(join(home, ".pi", "agent"), { recursive: true }); // production always has this dir; a fresh $HOME must pre-create it for the audit append
+	const sinkSrc =
+		`const { makeWatcherLogSink } = await import(${JSON.stringify(resolve(ROOT, "src/observe.ts"))});` +
+		`const { appendFileSync } = await import("node:fs");` +
+		`const seen = [];` +
+		`const orig = console.error; console.error = (...a) => { seen.push(a.join(" ")); };` +
+		`const sink = makeWatcherLogSink();` +
+		`sink("retired worker probe-1 (ttl)");` +
+		`sink("retire pass error for probe-2 (herdr exploded)");` +
+		`await new Promise((r) => setTimeout(r, 150));` + // async append must land
+		`const audit = appendFileSync; ` +
+		`orig(JSON.stringify(seen));`;
+	const res = spawnSync("bun", ["-e", sinkSrc], { env: { ...process.env, HOME: home }, encoding: "utf8", timeout: 20_000 });
+	let paneLines: string[] = [];
+	try {
+		// console.error writes to stderr — the surfaced-line JSON is the last line there
+		paneLines = JSON.parse((res.stderr?.trim().split("\n").pop() ?? "[]")) as string[];
+	} catch {
+		// spawn flake — surfaced by the empty-panes check below
+	}
+	const auditPath = join(home, ".pi", "agent", "delegate-watch.log");
+	let audit = "";
+	try {
+		audit = readFileSync(auditPath, "utf8");
+	} catch {
+		// absent audit file → the T4.1b check fails below
+	}
+	check(
+		"T4.1b the log sink audits EVERY line to ~/.pi/agent/delegate-watch.log (behavioral)",
+		audit.includes("retired worker probe-1 (ttl)") && audit.includes("retire pass error for probe-2"),
+		JSON.stringify(audit.slice(0, 200)),
+	);
+	check(
+		"T4.2b the pane sees ONLY the error-shaped line — routine bookkeeping never reaches the UI (behavioral)",
+		paneLines.length === 1 && paneLines[0]?.includes("retire pass error") && !paneLines[0]?.includes("probe-1"),
+		JSON.stringify(paneLines),
+	);
+	rmSync(home, { recursive: true, force: true });
+
+	// T4.3/T4.4 — the /delegate-teardown command is DRIVEN: a manifest with one
+	// retired-history entry + one actionable already-gone worker → the retired
+	// one is skipped (with a count), the live one closes as a structured
+	// idempotent no-op ("already closed, no-op"), never tab_not_found.
+	const tdDir = join(SANDBOX, `static-teardown-${process.pid}`);
+	mkdirSync(tdDir, { recursive: true });
+	const NOW_ISO = new Date().toISOString();
+	const mkWorkerEntry = (name: string, extra: Record<string, unknown>): Record<string, unknown> => ({
+		name,
+		provider: "p",
+		model: "m",
+		thinking: "low",
+		startedAt: NOW_ISO,
+		reportPath: join(tdDir, `report-${name}.json`),
+		placement: { kind: "tab", workspaceId: "w1", paneId: `w1:${name}`, tabId: `w1:t-${name}` },
+		...extra,
+	});
+	writeFileSync(
+		join(tdDir, "manifest.json"),
+		JSON.stringify({
+			task: "static-teardown",
+			dir: tdDir,
+			workers: [
+				mkWorkerEntry("td-retired", { retiredAt: NOW_ISO }),
+				mkWorkerEntry("td-gone", {}),
+			],
+		}),
+	);
+	const tdCalls: string[] = [];
+	const tdTransport = {
+		backendName: () => "herdr",
+		capabilities: () => ({ worktrees: true, authority: "root" }),
+		listStatuses: async () => [],
+		teardown: async (req: { name: string }) => {
+			tdCalls.push(req.name);
+			return { alreadyGone: true }; // the structured idempotent-close signal
+		},
+	} as unknown as Transport;
+	const commands: Record<string, { handler: (args: unknown, ctx: unknown) => Promise<void> }> = {};
+	registerCommands({ registerCommand: (n: string, def: never) => (commands[n] = def as never) } as never, tdTransport);
+	const notifications: string[] = [];
+	const confirmPrompts: string[] = [];
+	await commands["delegate-teardown"]?.handler(
+		[],
+		{ ui: { notify: (m: string) => notifications.push(m), confirm: async (_t: string, body: string) => { confirmPrompts.push(body); return true; } } },
+	);
+	const allNotifications = notifications.join("\n");
+	check(
+		"T4.3b /delegate-teardown SKIPS retired history (counted in the confirm prompt, never attempted) — behavioral",
+		!tdCalls.includes("td-retired") && confirmPrompts.some((p) => p.includes("retired history entries skipped")),
+		JSON.stringify({ tdCalls, confirmPrompts }),
+	);
+	check(
+		"T4.4b an already-gone close reads the structured alreadyGone field → 'already closed, no-op' (behavioral)",
+		tdCalls.includes("td-gone") && allNotifications.includes("already closed, no-op"),
+		JSON.stringify(notifications),
+	);
+}
 
 // ---------------------------------------------------------------------------
-// 6. F6 review-fix pin — same-name spawn clears a stale nudge-failed marker
+// 6. F6 review-fix — same-name spawn clears a stale nudge-failed marker
 // (review minor #1): the spawn flow deletes nudge-failed-<name>.json right
 // after appending the manifest entry, or a fresh watcher session would
 // re-fire the previous worker's marker once.
 // ---------------------------------------------------------------------------
 
-// Migration stage 2 (audit step 5): the manifest write goes through the
-// storage port — the pin targets manifestStore.update (same ordering claim:
-// the append precedes the stale-marker cleanup).
-check(
-	"T2.5 the spawn flow removes a stale nudge-failed marker for the same name right after the manifest append",
-	/manifestStore\.update\(manifestDir,[\s\S]{0,900}?rm\(nudgeFailedPathFor\(manifestDir, params\.name\), \{ force: true \}\)/.test(delegateSrc),
-);
-check(
-	"T2.6 nudge-failed path convention lives in exchange.ts (module boundary — exchange-dir artifacts are exchange.ts conventions)",
-	/\.\/exchange\.ts"/.test(readFileSync(resolve(ROOT, "src/spawn.ts"), "utf8")) &&
-		readFileSync(resolve(ROOT, "src/exchange.ts"), "utf8").includes("export function nudgeFailedPathFor"),
-);
+// Migration stage 3 (audit step 10): the old T2.5/T2.6 source-text pins are
+// GONE — the cleanup is behaviorally proven by the section-5 drive (T2.5b:
+// the pre-existing stale marker is consumed by the real spawn flow). The
+// module boundary (nudgeFailedPathFor lives in exchange.ts) is compile-time
+// enforced (tsc qa config: a wrong import fails the build, not a regex).
 
 // ---------------------------------------------------------------------------
 
