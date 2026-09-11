@@ -2,10 +2,11 @@
 
 Status: **APPROVED 2026-09-05** · Owner: root tech lead (pi orchestrator) · Date: 2026-09-05
 
-> **Document status** (2026-09-11): the module map (§4.1) and the architecture sections
-> are verified against the actual file tree and `pi/extensions/pi-delegate/package.json`
-> v1.16.1. Sections §5–§24 are the historical design log — file paths inside them predate
-> layout v2; §4.1 is the current map.
+> **Document status** (2026-09-12): the module map (§4.1) is verified against the
+> actual file tree at layout v3 (the healing split — see the "layout v3" header at the
+> end of this document). Sections §5–§24 are the historical design log; the file
+> references in §5, §7, §8, §21–§23 have been updated to the current module names,
+> while the v1.x feature-history sections keep their original paths.
 
 ---
 
@@ -45,7 +46,8 @@ overlay (#5).
 
 ### 4.1 Module layout
 
-Verified against the file tree on 2026-09-11 (v1.16.1). Canonical term for the backend
+Verified against the file tree on 2026-09-12 (layout v3 — the healing split; the
+base version line is still 1.16.1, the release PR bumps it). Canonical term for the backend
 seam is **WorkerHost**; the TypeScript interface keeps its historical frozen type name
 `Transport` — same thing, an alias, not a second concept.
 
@@ -54,41 +56,74 @@ pi-delegate/
 ├── DESIGN.md                 # this document
 ├── index.ts                  # composition root: reads the config "host" key (default
 │                             #   herdr), binds ONE WorkerHost adapter and injects it;
-│                             #   the ONLY module allowed to import a backend adapter
+│                             #   mounts the fleet UI + the watcher (via compose.ts),
+│                             #   calls registerCommands. The ONLY module allowed to
+│                             #   import a backend adapter
 ├── src/
-│   ├── spawn.ts              # what the orchestrator DOES: delegate + mailbox tools,
-│   │                         #   the spawn pipeline (place → manifest → start → brief
-│   │                         #   → settle → collect), budget governor, LLM-facing
-│   │                         #   prompt contract. Must never observe (no watcher) and
-│   │                         #   never read other sessions' fleets
-│   ├── observe.ts            # what the orchestrator KNOWS: delegate_status (read-only),
-│   │                         #   the event-driven watcher, the §23 retire engine,
-│   │                         #   the durable delivered-facts policy (stage B: key
-│   │                         #   shape, tick order, commit-after-send, GC),
-│   │                         #   watch/collect config resolution, /delegate-fleet +
-│   │                         #   /delegate-teardown commands. Must never spawn or
-│   │                         #   mutate a worker outside the retire/teardown contracts
-│   ├── fleet.ts              # all pixels: ownership classification, text primitives,
-│   │                         #   ambient widget, tool-result rendering, the fleet
-│   │                         #   overlay, worker-view aggregation. Read-only by
-│   │                         #   contract; owns line-width clamping
-│   ├── exchange.ts           # everything durable on disk: exchange-dir conventions,
-│   │                         #   manifests, reports, schemas, mailbox files, archive,
-│   │                         #   the watcher satellites (retire stamps + the durable
-│   │                         #   delivered-facts store, stage B). Owns
-│   │                         #   append-before-start (file side), atomic
-│   │                         #   serialized manifest writes, answer-consumed mtime
+│   ├── spawn.ts              # what the orchestrator DOES: the delegate tool and its
+│   │                         #   pipeline (place → manifest → start → brief → settle
+│   │                         #   → grace → collect), the budget governor (§14/§20),
+│   │                         #   the §22 collect-time teardown, the LLM-facing
+│   │                         #   promptGuidelines contract. Must never observe (no
+│   │                         #   watcher) and never read other sessions' fleets
+│   ├── observe.ts            # FACADE ONLY: re-exports the observation family's public
+│   │                         #   surface for one release window (per the Wave 3 plan);
+│   │                         #   owns no code — import sites flip to the split modules
+│   ├── watch-config.ts       # the tolerant watch/collect config resolution (§21, §22)
+│   │                         #   — kills the spawn→observe dependency edge (Law 6 pin:
+│   │                         #   spawn.ts must not import the observation family)
+│   ├── watch-detect.ts       # the watcher's event model + snapshot + detection: event
+│   │                         #   kinds/keys, the manifest+status merge, the detection
+│   │                         #   priority ladder, the dedup/reset cache loop
+│   ├── watcher.ts            # the event-driven watcher LOOP + delivery (§21) + the
+│   │                         #   session-keyed mount lifecycle (a second mount for the
+│   │                         #   same session file is REFUSED — Law 3, audit D2)
+│   ├── watch-retire.ts       # the §23 retire engine (extension-side auto-teardown of
+│   │                         #   drained worker panes; ACK or TTL)
+│   ├── watch-store.ts        # the watcher's satellite persistence: retire-stamp layers
+│   │                         #   (watch-<key>.json) + the durable delivered-facts
+│   │                         #   store (delivered-<key>.json) — one writer per file
+│   ├── watch-role.ts         # the CANONICAL ownership verdict (a leaf with zero
+│   │                         #   production imports): sessionRole + workerAudienceMatch,
+│   │                         #   folded by delivery, the mount gate and the UI display
+│   ├── compose.ts            # the watcher mount decision (migration stage 3): WHICH
+│   │                         #   session mounts a watcher — a pure worker mounts none,
+│   │                         #   a tier-1 owner a child-scoped one, else yes
+│   ├── status-tool.ts        # the delegate_status tool (§5.2, read-only; rows capped
+│   │                         #   at STATUS_MAX_ROWS with an omission note)
+│   ├── commands.ts           # /delegate-fleet + /delegate-teardown (user-invoked,
+│   │                         #   frozen surface)
+│   ├── fleet.ts              # all pixels: ownership classification (display), text
+│   │                         #   primitives, ambient widget, tool-result rendering,
+│   │                         #   the fleet overlay, worker-view aggregation. Read-only
+│   │                         #   by contract; owns line-width clamping
+│   ├── exchange.ts           # the exchange-root conventions (exchangeRoot incl. the
+│   │                         #   PI_DELEGATE_EXCHANGE_ROOT override, brief validation,
+│   │                         #   conventional report paths, the F1 fleet accounting)
+│   │                         #   + the transition facade over the extracted exchange
+│   │                         #   modules; owns append-before-start (file side) and
+│   │                         #   answer-consumed mtime
+│   ├── archive.ts            # the durable report archive (§19.3: ~/.pi/agent/
+│   │                         #   delegate-archive, 30-day TTL prune, task listing)
+│   ├── manifest-store.ts     # the manifest protocol: types, tolerant read, atomic
+│   │                         #   serialized update, the ManifestStore port (file +
+│   │                         #   in-memory) + the global scan (foreign-backend filter)
+│   ├── report-schema.ts      # strict report validation (§6 base schema + §16–§17 brief
+│   │                         #   fragments + the schema library with $extends)
+│   ├── mailbox-store.ts      # the mailbox file lifecycle (§12, §23): q-/a-/release-/
+│   │                         #   nudge-failed envelope paths, tolerant readers, atomic
+│   │                         #   writers, envelope types
 │   ├── host.ts               # the WorkerHost seam: the Transport interface (frozen
 │   │                         #   type name), req/result types, the E_* taxonomy +
 │   │                         #   guidance, report/mailbox contracts, briefPrompt,
 │   │                         #   budget constants. Imports node builtins ONLY —
 │   │                         #   bottom of the graph, never imports another src/ module
-│   ├── host/fake.ts          # in-memory WorkerHost adapter (tests): statusScript-driven
-│   │                         #   settle, `fake:<n>` refs. Imports only the seam + exchange
 │   ├── herdr/host.ts         # the herdr adapter: CLI plumbing (runHerdr + SIGKILL
 │   │                         #   escalation), NDJSON socket client, the mutation queue,
 │   │                         #   result mappers, adapter-private id codec. Imported
 │   │                         #   ONLY by index.ts
+│   ├── host/fake.ts          # in-memory WorkerHost adapter (tests): statusScript-driven
+│   │                         #   settle, `fake:<n>` refs. Imports only the seam + exchange
 │   ├── usage.ts              # the gauge layer: the ONLY session-JSONL parser (one-parser
 │   │                         #   law); budget/context math (§20), tolerant config
 │   │                         #   resolvers. Stateless and read-only
@@ -97,6 +132,22 @@ pi-delegate/
 │   │                         #   (name + run ordinal + placementRef), validate-then-patch
 │   │                         #   manifest stamps. Every stamp write is a reducer
 │   │                         #   transition — illegal ones are structured refusals
+│   ├── tool-result.ts        # the shared tool-result vocabulary: the §7 structured
+│   │                         #   error contract, errText/asDelegateError coercion,
+│   │                         #   the abort-aware sleep (leaf, zero I/O)
+│   ├── clock.ts              # the injectable clock/delay port (systemClock /
+│   │                         #   VirtualClock) — time-dependent pipeline sections are
+│   │                         #   testable without real waiting
+│   ├── grace.ts              # the settle→collect seam as an explicit state machine
+│   │                         #   (the graceTransition priority ladder + runGraceLoop;
+│   │                         #   every dependency injected, no module state)
+│   ├── mailbox-tool.ts       # the delegate_mailbox tool (§12: read/answer/steer,
+│   │                         #   §23: release ACK)
+│   ├── fs-probe.ts           # the ONE tolerant filesystem-probe cluster — a missing
+│   │                         #   or unreadable path yields the probe's empty answer,
+│   │                         #   never a throw (advisory-by-contract support)
+│   ├── text-cap.ts           # the Law 1 truncation duty (§5.4): pi's truncateHead at
+│   │                         #   pi's default limits; the LLM is told what was cut
 │   └── expaths.ts            # portable (Windows + POSIX) path builders for the exchange
 │                             #   layer; node:path only, never imports another src/ module
 └── test/                     # QA harness (regression checks per field incident; see
@@ -104,13 +155,16 @@ pi-delegate/
 ```
 
 Each module is the single owner of the invariants named in its MODULE_CONTRACT header and
-must not reach into a neighbor's: `spawn.ts` never observes, `observe.ts` never spawns,
-only `index.ts` imports an adapter, only `usage.ts` parses session JSONL, only
-`exchange.ts`/`expaths.ts` build exchange paths.
+must not reach into a neighbor's: `spawn.ts` never observes, the observation family never
+spawns or mutates a worker outside the retire/teardown contracts, only `index.ts` imports
+an adapter, only `usage.ts` parses session JSONL, only the exchange layer
+(`exchange.ts`/`expaths.ts` and the extracted stores) builds exchange paths.
 
-Dependency rule (enforced by test/static-check.ts): no src/ module imports a backend
+Dependency rules (enforced by test/static-check.ts): no src/ module imports a backend
 adapter (`src/herdr/host.ts`, `src/host/fake.ts`) — the adapter is bound and injected once
-in `index.ts`.
+in `index.ts`; `spawn.ts` must not import the observation family (config moved to
+`watch-config.ts`, Law 6 pin); the exchange-layer leaves (`expaths.ts`, `host.ts`) stay
+leaves.
 
 ### 4.2 WorkerHost interface (the seam — historical type name `Transport`)
 
@@ -219,6 +273,25 @@ collect-time auto-teardown of §22 (v1.12.1, user-decided default ON): a worker 
 was strictly collected is torn down right after the collect result is built, with the same
 audit format and the same advisory contract.
 
+### 5.4 Output truncation caps (Law 1 — the truncation duty)
+
+Every tool return path that can carry worker-written content is bounded by pi's OWN
+truncation helpers (src/text-cap.ts imports `truncateHead` from the platform package —
+Law 1: import, never reimplement; the limits are pi's `DEFAULT_MAX_BYTES`/`DEFAULT_MAX_LINES`,
+50 KB / 2000 lines by default):
+
+- **delegate** — the collected report's summary and artifacts list are capped, with an
+  explicit note telling the LLM what was cut and where the full copy lives (the report
+  file on disk, the archive copy — both named in the note).
+- **delegate_mailbox** — question bodies and context are capped the same way, with a
+  pointer to the full question file.
+- **delegate_status** — rows are capped at `STATUS_MAX_ROWS` (100), live-first then
+  recency, with an "N more omitted" note; the full list stays in the result details
+  (`details.workers`), and querying a single worker by `name` bypasses the cap.
+
+Critical invariant: capping bounds only the RENDERED text — the full data always stays
+available on disk and/or in the tool result's details.
+
 ## 6. Exchange dir conventions (compiled from skill §1–§2)
 
 ```
@@ -272,6 +345,16 @@ of re-flattening it positionally:
 > `unknown` are a documented backlog item — today they degrade into existing codes /
 > unknown-status rather than first-class taxonomy entries.
 
+**Law 8 note — control flow vs genuine failure.** The E_* taxonomy deliberately deviates
+from pi's throw-to-signal-error convention: errors are RETURNED as structured failed tool
+results, never thrown raw across the tool boundary. Two result classes are CONTROL FLOW,
+not failures: `E_TIMEOUT` (the settle wait expired — the detach handoff: the worker keeps
+running, the orchestrator ends its turn and the background watcher wakes it) and the
+AWAITING_ANSWER result shape (a pending mailbox question — a conversation state, not an
+error; answered via `delegate_mailbox`). Everything else in the table above is a genuine
+failure with embedded recovery guidance. This deviation is deliberate and documented
+(ARCHITECTURE.md Law 8).
+
 ## 8. Testing strategy (Phase QA)
 
 - **Static/design conformance**: dependency-rule check (tools never import herdr.ts),
@@ -281,8 +364,11 @@ of re-flattening it positionally:
   config resolution (child process with `$HOME`), every event detection from temp-dir
   fixtures, dedup/reset (including the keys of vanished workers), one-send-per-batch
   delivery, failed-delivery rollback + re-fire, inert headless sender, self-mute.
-  The dependency rule for `src/observe.ts` (which owns the watcher engine since layout v2) is pinned twice on purpose: here (W1.1) and
-  in the canonical `static-check.ts` T1.1 list.
+  The dependency rule for the watcher modules (`src/watcher.ts` + `watch-detect.ts` since
+layout v3; observe.ts, which used to own the watcher engine since layout v2, is a facade
+now) is enforced structurally — the old W1.1 text pins were replaced by module resolution
+(the package exports map) and static-check T1.1e — with the mount decision behaviorally
+tested in test/composer-check.ts.
 - **Transport contract tests** against real herdr, cheap: `capabilities()`, placement+
   teardown round-trip in a throwaway repo, name uniquification.
 - **Live E2E (the DoD demo)**: from a pi session with the extension loaded, call `delegate`
@@ -768,13 +854,15 @@ no gauges, no abort short of Esc, and the worker had finished long before.
 The fix is not a better sleep; it is removing the need to wait: the extension
 wakes the orchestrator when a worker actually needs attention.
 
-**Module.** `src/observe.ts` — the watcher engine (a background poller independent of the fleet UI
-(no `ctx.hasUI` guard: the wake-up matters headless too). Mounted on
-`session_start`, stopped on `session_shutdown` (module-level registry, exactly
-the `mountFleetUI`/`disposeFleetUI` shape; double-start replaces). It takes the
-`Transport` injected by `index.ts` and imports `transport/types.ts` +
-`exchange.ts` + `usage.ts` only — the dependency rule holds (pinned by
-`test/watcher-check.ts` W1).
+**Module.** `src/watcher.ts` — the watcher engine's tick loop, delivery and
+session-keyed mount lifecycle (layout v3 split: detection in `watch-detect.ts`, the
+§23 retire pass in `watch-retire.ts`, config resolution in `watch-config.ts`, the
+satellite stores in `watch-store.ts`; `observe.ts` is a facade over them). A background
+poller independent of the fleet UI (no `ctx.hasUI` guard: the wake-up matters headless
+too). Mounted per session on `session_start` (through `src/compose.ts`, §21.1), stopped on
+`session_shutdown`; a second mount for the same session file is REFUSED (Law 3, audit D2).
+It takes the `Transport` injected by `index.ts` and imports the seam (`host.ts`), the
+exchange/watch stores and `usage.ts` only — the dependency rule holds.
 
 **Each tick** aggregates `transport.listStatuses()` (tolerant — unreachable →
 statuses *unknown*, which is NOT "everyone died"), `scanAllManifests()` and the
@@ -871,7 +959,12 @@ noise from a session that can never deliver; the "headless watcher is silent
 but unbroken" contract). A throw (or a rejected promise) rolls the batch's
 dedup keys back out of `seen` — a transient send error must never permanently
 swallow a wake-up, which is the failure this module exists to prevent
-(W9.13–W9.13c) — and writes NOTHING to the store. Full delivery CONFIRMATION
+(W9.13–W9.13c) — and writes NOTHING to the store. Since Wave 2 (Law 3, audit
+B4) the outcome is CLASSIFIED, not binary: a sink that QUEUES the wake-up and
+only then throws ("accepted by pi") counts as DELIVERED — the durable record
+commits and the batch does not re-fire; only a genuine PRE-delivery failure
+rolls back (regression: `test/watcher-check.ts` W19, `test/double-mount-check.ts`
+for the session-keyed mount refusal). Full delivery CONFIRMATION
 would require changes on the pi side (out of scope for stage B): the runtime
 swallows asynchronous send failures, so "no synchronous exception" is the only
 honest signal — therefore every real send is also recorded as a line in the
@@ -953,8 +1046,8 @@ none of them can corrupt a spawn or a collect result). One fix shape each:
   sessions' 14 stale reports); `pruneArchive` gives the archive a 30-day TTL.
 
   **The role table (guideline §3.4, mandatory in code AND design) — one
-  table implemented by `sessionRole` (src/watch-role.ts) and folded by the
-  mount gate (src/compose.ts), delivery (src/observe.ts detectWorkerEvents)
+  table implemented by `sessionRole` (src/watch-role.ts) and folded by the mount
+  gate (src/compose.ts), delivery (src/watch-detect.ts detectWorkerEvents)
   and the UI (src/fleet.ts classifyOwnership):**
 
   | Role | Definition | Mount local watcher? | Receives wake for worker W? |
@@ -1015,8 +1108,8 @@ inside one process; inter-process safety comes from the file NAME, not from a
 lock). I/O reuses the shared blocks: atomic write via temp file + rename,
 tolerant read — a missing, corrupt or torn file reads as an EMPTY store
 (worst case one repeated wake-up, never a throw). Policy (key shape, tick
-algorithm, commits) lives in `src/observe.ts`; the file I/O lives in
-`src/exchange.ts` — the same split as the retire stamps.
+algorithm, commits) lives in `src/watch-detect.ts`; the file I/O lives in
+`src/watch-store.ts` — the same split as the retire stamps.
 
 **File schema.** `{ schemaVersion: 1, audienceSessionPath, records }` where
 `records` maps the canonical record key
@@ -1185,7 +1278,7 @@ the same `<exchange dir>/teardown.log`, suffixed `(auto-after-collect)` so the
 automatic path is distinguishable from manual sweeps.
 
 **Config** (same tolerant style as `resolveWatchConfig` — missing/corrupt/
-partial → defaults, never throws, `resolveCollectConfig` in `src/observe.ts`):
+partial → defaults, never throws, `resolveCollectConfig` in `src/watch-config.ts`):
 
 ```json
 { "collect": { "teardownAfterCollect": true } }
@@ -1193,7 +1286,7 @@ partial → defaults, never throws, `resolveCollectConfig` in `src/observe.ts`):
 
 Default TRUE (user-locked); only an explicit boolean moves off the default.
 
-### 22.2 `worker-stale` watcher event (`src/observe.ts`)
+### 22.2 `worker-stale` watcher event (`src/watch-detect.ts`)
 
 New kind in the §21 union. Fires when the manifest records `collectedAt`,
 `now − collectedAt > watch.staleAfterMs` (default 30 min, floor 60 s), and the
@@ -1208,7 +1301,7 @@ event deliberately does not bypass it, so a stale worker wakes ONLY its owner
 silent. This is F3's visible-half complement: torn-down-and-gone workers stay
 invisible, collected-but-still-mounted workers become loud.
 
-### 22.3 The stale age tail (`src/ui/fleet.ts`)
+### 22.3 The stale age tail (`src/fleet.ts`)
 
 v1.12.1 rendered this condition as the folded group's `s` letter; **v1.13.0
 (fleet-UX wave 4) retires the letter and spells the claim out** — the
@@ -1298,7 +1391,7 @@ report by contract, so condition 1 can never hold; a probe whose smoke verdict
 is in (settled done/idle, no pending question) closes IMMEDIATELY, no stamp,
 no TTL wait.
 
-### 23.3 Mechanics (`src/observe.ts` — retire pass, `src/exchange.ts` — release markers, `src/spawn.ts` — mailbox tool actions)
+### 23.3 Mechanics (`src/watch-retire.ts` — retire pass, `src/mailbox-store.ts` — release markers, `src/mailbox-tool.ts` — mailbox tool actions)
 
 - **Close capability.** herdr has NO `pane close` verb (verified against the
   CLI: panes close only via their container). The real verbs are `tab close`
@@ -1495,3 +1588,43 @@ stage-3 merge this section is folded into the corresponding sections above.
   `usage.ts` holds again); watcher mounting is extracted into a composition
   module with injectable dependencies; the remaining first-wave source-text
   pins are replaced by a behavioral mount test.
+
+# layout v3 — the healing split (2026-09-12)
+
+The Wave 3 decomposition (STABILIZATION.md) executed Law 5 on the three god-modules of
+layout v2. Verbatim moves only; the user-visible surface (tool names, parameter shapes,
+`/delegate-*` command names, manifest kinds, journal events, E_* codes) never moved.
+Where everything lives (§4.1 is the canonical map; this header is the narrative):
+
+- **The exchange family.** `exchange.ts` keeps the exchange-root conventions
+  (exchangeRoot, brief validation, conventional report paths, the F1 fleet accounting)
+  and serves as the transition facade; the durable-file owners are `archive.ts` (the
+  §19.3 archive + TTL prune), `manifest-store.ts` (manifest protocol + the
+  ManifestStore port + the global scan), `report-schema.ts` (base validation + brief
+  fragments + the §16 schema library), `mailbox-store.ts` (the q-/a-/release-/
+  nudge-failed envelopes) and `watch-store.ts` (the watcher's satellites: retire-stamp
+  layers + the durable delivered-facts store).
+- **The observe family.** `observe.ts` is a facade only — one release window, then the
+  remaining import sites flip and it retires. `watch-config.ts` owns the tolerant
+  watch/collect config (kills the spawn→observe dependency edge — Law 6 pin: spawn
+  never imports the observation family); `watch-detect.ts` owns the event model,
+  snapshot and detection; `watcher.ts` owns the tick loop, delivery and the
+  session-keyed mount lifecycle (a second mount for the same session file is refused —
+  Law 3); `watch-retire.ts` owns the §23 retire engine; `status-tool.ts` owns
+  delegate_status; `commands.ts` owns the /delegate-* commands.
+- **The spawn family.** `spawn.ts` keeps the delegate pipeline (§5.1) and its
+  promptGuidelines; the helpers are `tool-result.ts` (the structured tool-result
+  vocabulary + error coercion), `clock.ts` (the injectable clock/delay port),
+  `grace.ts` (the settle→collect state machine) and `mailbox-tool.ts` (the
+  delegate_mailbox tool). Only the two execute() phases that read no closure state
+  (tier resolution, schema resolution) are lifted as pure functions — the full
+  execute() shrink is the post-release backlog (ROADMAP.md).
+- **Dedup clusters.** `fs-probe.ts` is the one tolerant filesystem-probe
+  implementation; `text-cap.ts` is the Law 1 truncation duty (§5.4).
+- **Unchanged from layout v2:** fleet.ts, usage.ts, lifecycle.ts, the host.ts seam,
+  host/fake.ts, herdr/host.ts, expaths.ts. New since the workerhost split:
+  `compose.ts` (the watcher mount decision) and `watch-role.ts` (the canonical
+  ownership verdict, a leaf).
+
+New dependency pins (test/static-check.ts): spawn.ts must not import the observation
+family; the exchange-layer leaves (expaths.ts, host.ts) stay leaves.
