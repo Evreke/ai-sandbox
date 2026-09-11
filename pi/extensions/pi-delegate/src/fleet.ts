@@ -60,13 +60,17 @@
  */
 
 import { stat } from "node:fs/promises";
+import { basename } from "node:path";
 import type { ExtensionCommandContext, ExtensionContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import {
 	answerPathFor,
 	exchangeRoot,
+	isProbeDir,
 	manifestStore,
 	mergeRetireStamps,
+	progressPathFor,
 	questionPathFor,
+	readLastProgress,
 	readWatchStampLayers,
 } from "./exchange.ts";
 import { taskSlug } from "./expaths.ts";
@@ -335,16 +339,32 @@ export interface FleetUIDeps {
 // ---------------------------------------------------------------------------
 // Module-level mount registry: /delegate-teardown restores the footer via
 // disposeFleetUI() without needing the dispose handle that mountFleetUI
-// returned (possibly in a different closure). Double-mount replaces.
+// returned (possibly in a different closure). Double-mount replaces — and the
+// replace DISPOSES the old handle (never leaks). Wave 2 (Law 3): the registry
+// lives on globalThis so a double module load (two copies of this module)
+// still shares one registry — a re-mount replaces the previous widget instead
+// of stacking a second one.
 // ---------------------------------------------------------------------------
 
-let activeDispose: (() => void) | null = null;
+const FLEET_MOUNT_REGISTRY_KEY = "__piDelegateFleetMountDispose";
+
+/** The currently mounted fleet UI's dispose (globalThis slot — shared across
+ *  module copies; null when nothing is mounted). */
+let activeDispose: (() => void) | null;
+try {
+	activeDispose = ((globalThis as unknown as Record<string, unknown>)[FLEET_MOUNT_REGISTRY_KEY] as
+		| (() => void)
+		| undefined) ?? null;
+} catch {
+	activeDispose = null;
+}
 
 /** Dispose the currently mounted fleet UI (widget cleared, default footer
  *  restored). Safe to call when nothing is mounted. */
 export function disposeFleetUI(): void {
 	const d = activeDispose;
 	activeDispose = null;
+	(globalThis as unknown as Record<string, unknown>)[FLEET_MOUNT_REGISTRY_KEY] = null;
 	d?.();
 }
 
@@ -451,9 +471,13 @@ export function mountFleetUI(ctx: ExtensionContext, deps: FleetUIDeps): () => vo
 			// Defensive: restore the native footer if any older build replaced it.
 			ctx.ui.setFooter(undefined);
 		}
-		if (activeDispose === dispose) activeDispose = null;
+		if (activeDispose === dispose) {
+			activeDispose = null;
+			(globalThis as unknown as Record<string, unknown>)[FLEET_MOUNT_REGISTRY_KEY] = null;
+		}
 	};
 	activeDispose = dispose;
+	(globalThis as unknown as Record<string, unknown>)[FLEET_MOUNT_REGISTRY_KEY] = dispose;
 	return dispose;
 }
 
@@ -681,7 +705,7 @@ function isEscape(data: string): boolean {
 // manifest but are not projected onto WorkerView — read them tolerantly.
 // ---------------------------------------------------------------------------
 
-interface ManifestExtras {
+export interface ManifestExtras {
 	sessionPath?: string;
 	budgetTokens?: number;
 	briefPath?: string;
@@ -710,8 +734,11 @@ interface ManifestExtras {
  *     {} or field omitted; NEVER throws
  *   - read-only
  * Raises: none
+ * Wave 2 (Law 9): this is the ONE manifest-extras reader — the ambient widget
+ * (buildWidgetRows) and the overlay (buildRow) both consume it; the former
+ * index.ts copy is deleted.
  */
-async function readManifestExtras(dir: string, name: string): Promise<ManifestExtras> {
+export async function readManifestExtras(dir: string, name: string): Promise<ManifestExtras> {
 	try {
 		// Migration stage 2 (audit step 5): the raw manifest.json re-parse is
 		// GONE — the read goes through the manifest storage port (manifestStore,
@@ -726,6 +753,9 @@ async function readManifestExtras(dir: string, name: string): Promise<ManifestEx
 		const extras: ManifestExtras = {};
 		if (typeof w.sessionPath === "string" && w.sessionPath.length > 0) {
 			extras.sessionPath = w.sessionPath;
+		}
+		if (typeof w.budgetTokens === "number" && Number.isFinite(w.budgetTokens) && w.budgetTokens > 0) {
+			extras.budgetTokens = w.budgetTokens;
 		}
 		if (typeof w.orchestratorSessionPath === "string" && w.orchestratorSessionPath.length > 0) {
 			extras.orchestratorSessionPath = w.orchestratorSessionPath;
@@ -749,6 +779,64 @@ async function readManifestExtras(dir: string, name: string): Promise<ManifestEx
 	} catch {
 		return {}; // missing/corrupt manifest → zero-usage row, never throw
 	}
+}
+
+/**
+ * Build the ambient widget's rows (Wave 2, Law 9 — ONE row assembly): the
+ * verbatim move of the former inline mapping in index.ts's FleetUIDeps.getRows
+ * (that copy is deleted). Field-by-field behavior is IDENTICAL to the old
+ * widget path: isProbe comes from isProbeDir(dir) (the overlay's buildRow
+ * derives it from extras.briefPath === "" — a documented difference, both
+ * pinned by their own checks); budgetPct stays nullable (the overlay coerces
+ * to 0); lastPing degrades to undefined on read failure.
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input:
+ *   - views: worker views (as produced by buildWorkerView)
+ *   - self: THIS session's identity (ownership classification — fail-closed)
+ * Output: one FleetWidgetRow per view, same order
+ * Guarantees:
+ *   - never throws: manifest reads, session-usage parses and ping reads all
+ *     degrade (absent extras → zero gauges, no ping marker)
+ *   - read-only: manifest + session JSONL + ping file reads only
+ * Raises: none
+ * EXTERNAL_DEPENDENCY: manifest.json, worker session JSONLs and
+ *   p-<name>.jsonl pings under the exchange dirs (via readManifestExtras /
+ *   parseSessionUsage / readLastProgress).
+ */
+export async function buildWidgetRows(views: WorkerView[], self: SelfIdentity): Promise<FleetWidgetRow[]> {
+	return Promise.all(
+		views.map(async (v) => {
+			const extras = await readManifestExtras(v.dir, v.name);
+			const usage = parseSessionUsage(extras.sessionPath ?? "");
+			const window = resolveContextWindow(extras.model);
+			let lastPing: FleetWidgetRow["lastPing"];
+			try {
+				lastPing = readLastProgress(progressPathFor(v.dir, v.name)) ?? undefined;
+			} catch {
+				lastPing = undefined; // advisory — absent ping → no marker
+			}
+			return {
+				name: v.name,
+				status: v.status,
+				kind: v.kind,
+				branch: v.branch,
+				reportExists: v.reportExists,
+				isProbe: isProbeDir(v.dir),
+				inputTokens: usage.input,
+				outputTokens: usage.output,
+				budgetPct: contextPct(usage, window),
+				lastPing,
+				ownership: classifyOwnership(
+					extras.orchestratorSessionPath,
+					self,
+					v.placement,
+					extras.masterSessionPath,
+				),
+				task: basename(v.dir),
+			};
+		}),
+	);
 }
 
 /** File mtime in ms, or 0 when missing/unreadable. Read-only. */

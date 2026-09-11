@@ -39,7 +39,16 @@
  * detectWorkerEvents, detectEvents, RetireReason, RetireDecision, RetireEval,
  * mailboxDrained, evaluateRetire, RetirePassOptions, retirePass,
  * formatEventBatch, formatWakeUpAuditLine, WatcherDeps, WatcherHandle, createWatcher, stopWatcher,
- * makeSender, startWatcher, registerCommands, formatFleetUsageLine (F1).
+ * makeSender, markDeliveredBeforeThrow, startWatcher, registerCommands,
+ * formatFleetUsageLine (F1).
+ * Wave 2 (session lifecycle, Law 3): watcher mounts are keyed by session file
+ * in a globalThis registry — a second mount for an already-mounted session is
+ * REFUSED (keeps the first instance), closing the double-module-load double-
+ * delivery class (audit D2). RESIDUAL, documented deliberately: two SEPARATE
+ * pi processes mounting watchers over the same session file are NOT arbitrated
+ * here (no cross-process lockfile in this wave) — the durable per-audience
+ * delivered-facts store (delivered-<watcherKey>.json) is the cross-process
+ * dedup backstop, and delivery is fail-closed on identity (stage A).
  * Critical invariants (owned here, per report-ref-map.json hiddenInvariants):
  *   - collectedAt-dedup (reader side): report-ready/report-invalid are SILENT
  *     once the manifest records collectedAt — the watcher `seen` dedup is
@@ -2129,13 +2138,46 @@ export function createWatcher(deps: WatcherDeps): WatcherHandle {
 }
 
 // ---------------------------------------------------------------------------
-// Lifecycle registry (mirrors fleet.ts mount/dispose: module-level, so
-// session_shutdown can stop what session_start started; double-start replaces)
+// Lifecycle registry (Wave 2, Law 3): KEYED mounts live in a globalThis
+// registry by session file — module copies loaded twice still share
+// globalThis, so a double module load cannot silently start a second watcher
+// for the same session (audit D2): the second mount is REFUSED and the first
+// instance's stop handle is returned. The module-global activeStop survives
+// ONLY as the fallback for mounts whose session identity is unknown
+// (sessionFile undefined — cannot be keyed); those keep the legacy
+// double-start-replaces semantics, scoped to anonymous mounts only.
 // ---------------------------------------------------------------------------
 
 let activeStop: (() => void) | null = null;
 
-/** Stop the running watcher (idempotent, safe when nothing is running). */
+/** globalThis slot of the per-session watcher mount registry (survives a
+ *  double module load — two copies of this module share one globalThis). */
+const WATCHER_MOUNT_REGISTRY_KEY = "__piDelegateWatcherMounts";
+
+/**
+ * The per-session watcher mount registry (Wave 2, Law 3).
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: none
+ * Output: the process-wide Map<sessionFile, stopHandle> — created lazily on
+ *   globalThis so every module copy sees the SAME registry
+ * Guarantees:
+ *   - a corrupted/non-Map slot is replaced with a fresh Map (defensive)
+ * Raises: never
+ */
+function watcherMountRegistry(): Map<string, () => void> {
+	const g = globalThis as unknown as Record<string, unknown>;
+	const existing = g[WATCHER_MOUNT_REGISTRY_KEY];
+	if (existing instanceof Map) return existing as Map<string, () => void>;
+	const fresh = new Map<string, () => void>();
+	g[WATCHER_MOUNT_REGISTRY_KEY] = fresh;
+	return fresh;
+}
+
+/** Stop the running anonymous watcher (idempotent, safe when nothing is
+ *  running). DEPRECATED fallback kept for compatibility: production code
+ *  tears watchers down through the per-session stop handles (Law 3) — the
+ *  module-global registry is no longer the shutdown path. */
 export function stopWatcher(): void {
 	const s = activeStop;
 	activeStop = null;
@@ -2215,21 +2257,59 @@ export function makeWatcherLogSink(): (m: string) => void {
 
 /**
  * Start the watcher for this session (DESIGN.md §21: headless-safe — NO
- * ctx.hasUI guard). Returns the dispose fn; also reachable via stopWatcher().
+ * ctx.hasUI guard). Returns the dispose fn.
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input:
+ *   - pi: the extension API (delivery sink via makeSender)
+ *   - transport: the injected WorkerHost seam
+ *   - ctx.cwd / ctx.sessionManager: the session identity (sessionFile read
+ *     tolerantly — a throwing getter degrades to undefined, the mount lives)
+ * Output: the stop handle for THIS mount. For an already-mounted session file
+ *   the handle of the FIRST (still running) instance.
+ * Guarantees:
+ *   - Wave 2 (Law 3, audit D2): mounts are keyed by session file in a
+ *     globalThis registry (shared across module copies). A second mount for
+ *     an ALREADY-MOUNTED session file is REFUSED — logged, first instance
+ *     kept, no second interval started; the first instance's stop handle is
+ *     returned so the caller stays handle-complete.
+ *   - a mount with an UNKNOWN session file (degraded identity) cannot be
+ *     keyed — it keeps the legacy double-start-replaces semantics, scoped to
+ *     anonymous mounts only (module-global activeStop fallback).
+ *   - the returned stop handle is idempotent and unregisters the mount from
+ *     the registry when it is still the current entry.
+ * Raises: never (all failures are advisory by §21)
  */
 export function startWatcher(
 	pi: import("@earendil-works/pi-coding-agent").ExtensionAPI,
 	transport: Transport,
 	ctx: { cwd?: string; sessionManager?: { getSessionFile?: () => string | undefined } },
 ): () => void {
-	stopWatcher(); // idempotent double-start replaces the previous mount
-	const cfg = resolveWatchConfig();
 	let sessionFile: string | undefined;
 	try {
 		sessionFile = ctx.sessionManager?.getSessionFile?.();
 	} catch {
 		sessionFile = undefined; // self-identification degrades, watcher lives
 	}
+	// Wave 2 (Law 3, audit D2): a second mount for an already-mounted session
+	// file is REFUSED — keep the first instance (its dedup state stays
+	// authoritative; two live watchers for one session would deliver every
+	// wake twice — the double-delivery bug class this closes).
+	if (sessionFile !== undefined) {
+		const existing = watcherMountRegistry().get(sessionFile);
+		if (existing) {
+			console.error(
+				`[pi-delegate watch] second watcher mount refused for session ${sessionFile} — already mounted ` +
+					"(double module-load guard, Law 3); keeping the first instance",
+			);
+			return existing;
+		}
+	} else {
+		// Unknown identity: not keyable — legacy replace among anonymous mounts
+		// only (never touches a keyed session's watcher).
+		stopWatcher();
+	}
+	const cfg = resolveWatchConfig();
 	const handle = createWatcher({
 		transport,
 		intervalMs: cfg.intervalMs,
@@ -2252,11 +2332,14 @@ export function startWatcher(
 		},
 		durableDelivery: cfg.durableDelivery,
 	});
+	const registry = sessionFile !== undefined ? watcherMountRegistry() : null;
 	const stop = (): void => {
 		handle.stop();
+		if (registry && registry.get(sessionFile as string) === stop) registry.delete(sessionFile as string);
 		if (activeStop === stop) activeStop = null;
 	};
-	activeStop = stop;
+	if (registry) registry.set(sessionFile as string, stop);
+	else activeStop = stop; // anonymous mount — legacy fallback registry only
 	return stop;
 }
 

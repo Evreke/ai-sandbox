@@ -74,6 +74,10 @@ export interface SessionWatcherDeps {
 export interface SessionWatcherResult {
 	/** True when the watcher was mounted for this session. */
 	mounted: boolean;
+	/** Wave 2 (Law 3): the mounted watcher's stop handle — the session
+	 *  context stores it and session_shutdown tears THIS session's watcher
+	 *  down with it. Undefined when not mounted (pure worker session). */
+	stop?: () => void;
 }
 
 /**
@@ -92,7 +96,10 @@ export interface SessionWatcherResult {
  *     from the mount side to the delivery side, where §3.6 requires it)
  *   - injected collaborators default to the production ones (scan via
  *     manifestStore + the Transport's backend name)
- * Output: { mounted } — whether startWatcher ran
+ * Output: { mounted, stop } — whether startWatcher ran, plus the mounted
+ *   watcher's stop handle (Wave 2, Law 3: mounts return handles; the session
+ *   context in index.ts owns this handle and session_shutdown uses it) —
+ *   undefined when not mounted
  * Guarantees:
  *   - PURE worker (isWorkerSession true, ownsChildManifests false) → NOT
  *     mounted; worker-orchestrator or peer orchestrator or bystander →
@@ -112,12 +119,13 @@ export function mountSessionWatcher(deps: SessionWatcherDeps): SessionWatcherRes
 	const isWorker = (deps.workerGate ?? isWorkerSession)(deps.self, manifests);
 	const ownsChildren = (deps.childOwnerGate ?? ownsChildManifests)(deps.self, manifests);
 	const mounted = !isWorker || ownsChildren;
+	let stop: (() => void) | undefined;
 	if (mounted) {
-		(deps.mount ?? startWatcher)(deps.pi, deps.transport, {
+		stop = (deps.mount ?? startWatcher)(deps.pi, deps.transport, {
 			cwd: deps.self.cwd,
 			sessionManager: deps.sessionManager,
 		});
 	}
 	(deps.prune ?? pruneArchive)(); // §19.3 retention: once per session start
-	return { mounted };
+	return { mounted, stop };
 }
