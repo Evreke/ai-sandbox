@@ -88,6 +88,7 @@ import {
 	aggregateTaskUsage,
 	archiveReport,
 	archiveRoot,
+	exchangeRoot,
 	listArchivedTasks,
 	type TaskUsageSnapshot,
 } from "./exchange.ts";
@@ -312,7 +313,7 @@ export function registerStatusTool(pi: import("@earendil-works/pi-coding-agent")
 			if (selected.length === 0) {
 				const hint = params.name
 					? `No delegate worker named "${params.name}" (known workers: ${views.map((v) => v.name).join(", ") || "none"}).`
-					: "No delegate workers known (no manifests under /tmp/exchange).";
+					: `No delegate workers known (no manifests under ${exchangeRoot()}).`;
 				const archiveHint = await resumeHint();
 				return {
 					content: [{ type: "text", text: archiveHint ? `${hint}\n${archiveHint}` : hint }],
@@ -1882,7 +1883,7 @@ function asDelegateError(err: unknown): DelegateError | null {
 
 async function logTo(dir: string, line: string): Promise<void> {
 	try {
-		await appendFile(`${dir}/${TEARDOWN_LOG_NAME}`, teardownLogLine(line));
+		await appendFile(join(dir, TEARDOWN_LOG_NAME), teardownLogLine(line));
 	} catch {
 		// best-effort audit log — never block teardown on logging failure
 	}

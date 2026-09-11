@@ -93,7 +93,7 @@
 // ./observe.ts, ui render helpers in ./fleet.ts, the transport surface in
 // ./transport.ts (facades remain at the old paths until W5).
 import { appendFile, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import type { Theme } from "@earendil-works/pi-coding-agent";
@@ -106,7 +106,6 @@ import {
 	ensureExchangeDir,
 	exchangeRoot,
 	isProbeDir,
-	PROBE_DIR_SUFFIX,
 	persistTaskUsageSnapshot,
 	progressPathFor,
 	questionPathFor,
@@ -139,6 +138,7 @@ import {
 import { resolveCollectConfig, resolveWatchConfig } from "./observe.ts";
 import { nextEmbodiment, stampCollected } from "./lifecycle.ts";
 import { nudgeFailedPathFor } from "./exchange.ts";
+import { probeDirPathFor, questionArchivePathFor } from "./expaths.ts";
 import { clampLines, notifyFleetIdle, renderDelegateLines } from "./fleet.ts";
 import {
 	CONTEXT_CRITICAL_PCT,
@@ -341,7 +341,7 @@ export function registerMailboxTool(pi: import("@earendil-works/pi-coding-agent"
 				if (questions.length === 0) {
 					return textResult(
 						`No pending question for worker ${params.name} in any known task dir ` +
-							`(no readable q-${params.name}.json under /tmp/exchange).`,
+							`(no readable q-${params.name}.json under ${exchangeRoot()}).`,
 						{ action: "read", name: params.name, questions: [] },
 					);
 				}
@@ -365,7 +365,7 @@ export function registerMailboxTool(pi: import("@earendil-works/pi-coding-agent"
 			if (!dir) {
 				return fail(
 					"E_NAME",
-					`E_NAME — no delegate worker named "${params.name}" is known (no manifest under /tmp/exchange references it). ` +
+					`E_NAME — no delegate worker named "${params.name}" is known (no manifest under ${exchangeRoot()} references it). ` +
 						"Check delegate_status for known workers; a worker must have been spawned via delegate first.",
 					{ action: params.action, name: params.name },
 				);
@@ -446,7 +446,7 @@ export function registerMailboxTool(pi: import("@earendil-works/pi-coding-agent"
 			try {
 				await rename(
 					questionPathFor(dir, params.name),
-					`${dir}/q-${params.name}.answered-${Date.now()}.json`,
+					questionArchivePathFor(dir, params.name, Date.now()),
 				);
 				archiveNote = " Pending question archived.";
 			} catch (err) {
@@ -603,7 +603,7 @@ const PROBE_TIMEOUT_MS = 120_000;
  *  the exchange root). Derived from exchangeRoot() so sandboxed tests
  *  ($PI_DELEGATE_EXCHANGE_ROOT) never touch the live /tmp/exchange root. */
 function probeExchangeDir(): string {
-	return `${exchangeRoot()}/${PROBE_DIR_SUFFIX}`;
+	return probeDirPathFor(exchangeRoot());
 }
 /** Fixed probe prompt (DESIGN.md §5.1 step 4). */
 const PROBE_PROMPT = "Reply with exactly: OUTPUT: OK";
@@ -618,7 +618,7 @@ const delegateParams = Type.Object({
 	name: Type.String({ description: "Worker name; must match [a-z][a-z0-9_-]{0,31}" }),
 	briefPath: Type.String({
 		description:
-			"Absolute or cwd-relative path to the brief file under /tmp/exchange/<task>/; a leading @ is stripped (ignored for probe)",
+			`Absolute or cwd-relative path to the brief file under ${exchangeRoot()}/<task>/; a leading @ is stripped (ignored for probe)`,
 	}),
 	mode: Type.Optional(StringEnum(["worktree", "tab", "probe"] as const, {
 		description:
@@ -675,7 +675,7 @@ async function reportExists(path: string): Promise<boolean> {
  */
 async function logTeardownAudit(dir: string, line: string): Promise<void> {
 	try {
-		await appendFile(`${dir}/${TEARDOWN_LOG_NAME}`, teardownLogLine(line));
+		await appendFile(join(dir, TEARDOWN_LOG_NAME), teardownLogLine(line));
 	} catch {
 		// best-effort audit log — never block teardown on logging failure
 	}
@@ -1010,7 +1010,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			"Esc detaches without killing the worker. Report status 'fail' still means the worker ran and reported honestly.",
 		promptSnippet: "Spawn a worker with a brief file and block until its report lands",
 		promptGuidelines: [
-			"Use delegate only after the brief file exists under /tmp/exchange/<task>/ — pass its path as briefPath; the brief is the worker's instructions and its OUTPUT section must point at report-<name>.json.",
+			"Use delegate only after the brief file exists under ${exchangeRoot()}/<task>/ — pass its path as briefPath; the brief is the worker's instructions and its OUTPUT section must point at report-<name>.json.",
 			"delegate blocks until the worker settles; the worker's report file is the completion criterion, not the agent status — status fail in the report is still an honest completion.",
 			"If delegate returns E_REPORT_MISSING or E_REPORT_INVALID, do a diagnosed retry with root cause + fix shape (at most 2 repeats, then escalate); never repeat verbatim. " +
 			RETRY_MANDATE,
@@ -1143,7 +1143,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				} catch (err) {
 					const de = asDelegateError(err);
 					const guidance =
-						de?.guidance ?? "Write the brief file under /tmp/exchange/<task>/ first, then call delegate again.";
+						de?.guidance ?? `Write the brief file under ${exchangeRoot()}/<task>/ first, then call delegate again.`;
 					return fail("E_BRIEF", `E_BRIEF — ${errText(err)}\n${guidance}`, {
 						briefPath,
 						name: params.name,
