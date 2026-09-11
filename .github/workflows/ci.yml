@@ -22,9 +22,10 @@ jobs:
         with:
           bun-version: latest
 
-      # typebox is a peerDependency — the repo carries bun.lock but no
-      # node_modules, and the check scripts spawn bun subprocesses that must
-      # resolve it (bare runner → E_RESOLVE without this step).
+      # typebox is a peerDependency (optional, range *) — the repo carries
+      # bun.lock but no node_modules, and the check scripts spawn bun
+      # subprocesses that must resolve it (bare runner → E_RESOLVE without
+      # this step).
       - name: Install dependencies (frozen lockfile)
         working-directory: pi/extensions/pi-delegate
         run: bun install --frozen-lockfile

@@ -29,9 +29,9 @@ jobs:
         with:
           bun-version: latest
 
-      # Same as ci.yml: typebox is a peerDependency, the checkout has no
-      # node_modules — without the install every check that spawns a bun
-      # subprocess fails with a package-resolution error.
+      # Same as ci.yml: typebox is a peerDependency (optional, range *), the
+      # checkout has no node_modules — without the install every check that
+      # spawns a bun subprocess fails with a package-resolution error.
       - name: Install dependencies (frozen lockfile)
         working-directory: pi/extensions/pi-delegate
         run: bun install --frozen-lockfile
