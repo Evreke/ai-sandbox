@@ -277,7 +277,7 @@ of re-flattening it positionally:
   config resolution (child process with `$HOME`), every event detection from temp-dir
   fixtures, dedup/reset (including the keys of vanished workers), one-send-per-batch
   delivery, failed-delivery rollback + re-fire, inert headless sender, self-mute.
-  The dependency rule for `src/watch.ts` is pinned twice on purpose: here (W1.1) and
+  The dependency rule for `src/observe.ts` (which owns the watcher engine since layout v2) is pinned twice on purpose: here (W1.1) and
   in the canonical `static-check.ts` T1.1 list.
 - **Transport contract tests** against real herdr, cheap: `capabilities()`, placement+
   teardown round-trip in a throwaway repo, name uniquification.
@@ -754,7 +754,7 @@ no gauges, no abort short of Esc, and the worker had finished long before.
 The fix is not a better sleep; it is removing the need to wait: the extension
 wakes the orchestrator when a worker actually needs attention.
 
-**Module.** `src/watch.ts` — a background poller independent of the fleet UI
+**Module.** `src/observe.ts` — the watcher engine (a background poller independent of the fleet UI
 (no `ctx.hasUI` guard: the wake-up matters headless too). Mounted on
 `session_start`, stopped on `session_shutdown` (module-level registry, exactly
 the `mountFleetUI`/`disposeFleetUI` shape; double-start replaces). It takes the
@@ -918,7 +918,7 @@ silent. USER DECISIONS locked: teardown default **ON**, grace **0**, only on
 **VALID** collect, foreign fleets never mutated (they are not mutated anyway —
 collect is own-fleet by construction).
 
-### 22.1 Teardown-after-collect (`src/tools/delegate.ts`)
+### 22.1 Teardown-after-collect (`src/spawn.ts`)
 
 After a successful strict collect — report valid, `collectedAt` stamped, the
 result text already built — the tool calls `transport.teardown({ name,
@@ -944,7 +944,7 @@ the same `<exchange dir>/teardown.log`, suffixed `(auto-after-collect)` so the
 automatic path is distinguishable from manual sweeps.
 
 **Config** (same tolerant style as `resolveWatchConfig` — missing/corrupt/
-partial → defaults, never throws, `resolveCollectConfig` in `src/watch.ts`):
+partial → defaults, never throws, `resolveCollectConfig` in `src/observe.ts`):
 
 ```json
 { "collect": { "teardownAfterCollect": true } }
@@ -952,7 +952,7 @@ partial → defaults, never throws, `resolveCollectConfig` in `src/watch.ts`):
 
 Default TRUE (user-locked); only an explicit boolean moves off the default.
 
-### 22.2 `worker-stale` watcher event (`src/watch.ts`)
+### 22.2 `worker-stale` watcher event (`src/observe.ts`)
 
 New kind in the §21 union. Fires when the manifest records `collectedAt`,
 `now − collectedAt > watch.staleAfterMs` (default 30 min, floor 60 s), and the
@@ -1057,7 +1057,7 @@ report by contract, so condition 1 can never hold; a probe whose smoke verdict
 is in (settled done/idle, no pending question) closes IMMEDIATELY, no stamp,
 no TTL wait.
 
-### 23.3 Mechanics (`src/watch.ts`, `src/exchange.ts`, `src/tools/mailbox.ts`)
+### 23.3 Mechanics (`src/observe.ts` — retire pass, `src/exchange.ts` — release markers, `src/spawn.ts` — mailbox tool actions)
 
 - **Close capability.** herdr has NO `pane close` verb (verified against the
   CLI: panes close only via their container). The real verbs are `tab close`
