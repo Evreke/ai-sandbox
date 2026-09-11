@@ -644,7 +644,11 @@ function dOwnCheckLegacy(t: FakeTransport): boolean {
 	);
 	check(
 		"R6.7 retirePass gates on the master switch (no-op when disabled)",
-		/opts\.retireEnabled \?\? resolveWatchConfig\(\)\.retire/.test(watchSrc) && /if \(!enabled\) return \[\];/.test(watchSrc),
+		// Wave 3 decomposition: the pass itself lives in src/watch-retire.ts.
+		(() => {
+			const retireSrc = readFileSync(resolve(ROOT, "src/watch-retire.ts"), "utf8");
+			return /opts\.retireEnabled \?\? resolveWatchConfig\(\)\.retire/.test(retireSrc) && /if \(!enabled\) return \[\];/.test(retireSrc);
+		})(),
 	);
 
 	// writeRelease → releasePathFor roundtrip (the ACK surface end to end).
