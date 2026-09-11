@@ -51,22 +51,33 @@ export function archiveRoot(): string {
  * no "report-" prefix; R6 fix: collected reports are already named
  * report-<worker>.json, a prefix here double-prefixed them), and (re)write
  * <archiveRoot>/<task>/manifest.json from the given manifest object.
- * Best-effort by contract: return the archive report path on success,
- * null on ANY failure (caller shows a warning, never an error).
+ * Best-effort by contract: return the archive report path on success; on
+ * ANY failure dest=null + the human-readable error (Wave 4 item 6: the
+ * reason is surfaced — the caller renders it in the collect note — never a
+ * throw, never a bare silent null).
  */
+/** Outcome of the best-effort report archive (Wave 4 item 6 — silent-catch
+ *  surfacing): dest is the archived report path, or null when the archive
+ *  failed; error carries the human-readable WHY (never thrown). */
+export interface ArchiveOutcome {
+	dest: string | null;
+	/** The failure reason (e.g. the fs error message) when dest is null. */
+	error?: string;
+}
+
 export function archiveReport(
 	taskDir: string,
 	reportPath: string,
 	manifest: Record<string, unknown>,
-): string | null {
+): ArchiveOutcome {
 	try {
 		const task = path.basename(taskDir);
-		if (task.length === 0) return null;
+		if (task.length === 0) return { dest: null };
 		const dir = path.join(archiveRoot(), task);
 		fs.mkdirSync(dir, { recursive: true });
 
 		const reportName = path.basename(reportPath);
-		if (reportName.length === 0) return null;
+		if (reportName.length === 0) return { dest: null };
 		const dest = path.join(dir, reportName);
 		fs.copyFileSync(reportPath, dest);
 
@@ -77,10 +88,12 @@ export function archiveReport(
 		// used instead, so the write protocol has exactly one implementation.
 		const manifestPath = path.join(dir, "manifest.json");
 		atomicWriteFileSync(manifestPath, `${JSON.stringify(manifest, null, "\t")}\n`);
-		return dest;
-	} catch {
-		// Best-effort by contract: ANY failure → null, never throw.
-		return null;
+		return { dest };
+	} catch (err) {
+		// Best-effort by contract: ANY failure → { dest: null, error }, never
+		// throw. Wave 4 item 6 (reliability finding 7): the reason is SURFACED
+		// (the collect note renders it) instead of collapsing to a bare null.
+		return { dest: null, error: err instanceof Error ? err.message : String(err) };
 	}
 }
 

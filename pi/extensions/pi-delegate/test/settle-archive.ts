@@ -470,8 +470,8 @@ try {
 	const dest = archiveReport(taskDir, reportPath, manifest);
 	check(
 		"A.2 archiveReport returns <root>/<task>/<basename(reportPath)> unprefixed",
-		dest === join(archiveRoot(), "v16-demo", "report-demo-worker.json"),
-		`dest=${dest}`,
+		dest.dest === join(archiveRoot(), "v16-demo", "report-demo-worker.json"),
+		`dest=${JSON.stringify(dest)}`,
 	);
 	let copied = "";
 	try {
@@ -509,16 +509,16 @@ try {
 	writeFileSync(plainPath, "{}");
 	check(
 		"A.3b non-prefixed basename preserved as-is",
-		archiveReport(taskDir, plainPath, manifest) === join(archiveRoot(), "v16-demo", "collected.json"),
+		archiveReport(taskDir, plainPath, manifest).dest === join(archiveRoot(), "v16-demo", "collected.json"),
 	);
 
-	// 5.4 failure tolerance: unreadable source report → null, never throw.
+	// 5.4 failure tolerance: unreadable source report → dest null, never throw.
 	check(
-		"A.4 missing source report → null (never throws)",
-		archiveReport(taskDir, join(taskDir, "nope.json"), manifest) === null,
+		"A.4 missing source report → dest null (never throws)",
+		archiveReport(taskDir, join(taskDir, "nope.json"), manifest).dest === null,
 	);
-	// 5.5 failure tolerance: empty taskDir basename → null.
-	check("A.5 empty taskDir basename → null", archiveReport("/", reportPath, manifest) === null);
+	// 5.5 failure tolerance: empty taskDir basename → dest null.
+	check("A.5 empty taskDir basename → dest null", archiveReport("/", reportPath, manifest).dest === null);
 
 	// 5.6 task dirs WITHOUT manifest.json are not listed.
 	mkdirSync(join(archiveRoot(), "half-written"), { recursive: true });
@@ -566,6 +566,23 @@ try {
 	check("A.10 missing archiveRoot → 0 pruned, never throws", pruneArchive() === 0);
 	process.env.PI_CODING_AGENT_DIR = join(fakeHome, ".pi", "agent");
 	rmSync(missingHome, { recursive: true, force: true });
+
+	// 5.11 Wave 4 item 6 (reliability finding 7): the archive FAILURE REASON
+	// is surfaced — an archive root that cannot host the task dir (here: a
+	// FILE where the delegate-archive dir should be) yields dest null plus
+	// the fs error message the collect note renders ("archive unavailable:
+	// <why>") — never a bare silent null, never a throw.
+	{
+		rmSync(archiveRoot(), { recursive: true, force: true });
+		writeFileSync(archiveRoot(), "a file where the archive dir should be");
+		const outcome = archiveReport(join(fakeHome, "tasks", "blocked-task"), reportPath, manifest);
+		check(
+			"A.11 unreadable archive location → dest null + the REASON surfaced",
+			outcome.dest === null && typeof outcome.error === "string" && outcome.error.length > 0,
+			JSON.stringify(outcome),
+		);
+		rmSync(archiveRoot(), { force: true });
+	}
 
 	rmSync(fakeHome, { recursive: true, force: true });
 } finally {

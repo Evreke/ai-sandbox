@@ -623,7 +623,8 @@ export function makeSender(
  * Output: none
  * Guarantees:
  *   - appends one line to ~/.pi/agent/delegate-watch.log, best-effort
- *   - never throws past the caller (append failures are swallowed)
+ *   - never throws past the caller (append failures are counted; the FIRST
+ *     failure emits ONE warn-once incident line — Wave 4 item 6, not silence)
  * Raises: never
  * EXTERNAL_DEPENDENCY: ~/.pi/agent/delegate-watch.log (append-only audit
  *   file under pi's agent dir; pi's getAgentDir() honors PI_CODING_AGENT_DIR
@@ -633,8 +634,32 @@ export function appendWatcherAudit(line: string): void {
 	void appendFile(
 		join(getAgentDir(), "delegate-watch.log"),
 		`${new Date().toISOString()} ${line}\n`,
-	).catch(() => undefined); // audit is advisory — never throw past the tick
+	).catch(() => {
+		// Audit is advisory — never throw past the tick. But Wave 4 item 6
+		// (reliability finding 7): the failure is not SILENT — it is counted,
+		// and the FIRST failure emits ONE warn-once incident line (never a
+		// per-tick spam; the count is readable via
+		// watcherAuditAppendFailureCount()). Module-global on purpose: a
+		// diagnostic counter, not ownership state (Law 3 targets ownership
+		// registries, not diagnostics).
+		watcherAuditAppendFailures++;
+		if (!watcherAuditAppendFailureWarned) {
+			watcherAuditAppendFailureWarned = true;
+			console.error(
+				"[pi-delegate watch] audit-log append FAILED — delegate-watch.log is unwritable; audit lines are being dropped (this warning is emitted once)",
+			);
+		}
+	});
 }
+
+/** Diagnostics for the warn-once audit-append failure surfacing (Wave 4
+ *  item 6): how many appends have failed in this process so far. */
+export function watcherAuditAppendFailureCount(): number {
+	return watcherAuditAppendFailures;
+}
+
+let watcherAuditAppendFailures = 0;
+let watcherAuditAppendFailureWarned = false;
 
 export function makeWatcherLogSink(): (m: string) => void {
 	return (m: string): void => {

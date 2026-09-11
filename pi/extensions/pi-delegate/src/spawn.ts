@@ -1001,6 +1001,12 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				// placement ref (legacy pane id fallback) and only if it never gained a
 				// sessionPath — a pre-existing same-name
 				// worker (its own placement / a real sessionPath) is preserved.
+				// Wave 4 item 6 (reliability finding 7): a failed BEST-EFFORT rollback
+				// is not silence — the failure reason is logged INTO the start-failure
+				// text (the placement may stay manifest-tracked; the orchestrator must
+				// know the cleanup pointer is now load-bearing).
+				let rollbackNote = "";
+				let rollbackFailedReason: string | null = null;
 				try {
 					await manifestStore.update(manifestDir, (m) => ({
 						...m,
@@ -1014,9 +1020,9 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 								),
 						),
 					}));
-				} catch {
-					// Best-effort rollback — the failure text below already points at
-					// manual reconciliation via /delegate-teardown.
+				} catch (rollbackErr) {
+					rollbackFailedReason = errText(rollbackErr);
+					rollbackNote = ` Manifest rollback FAILED (${rollbackFailedReason}) — the start-failed entry may stay tracked; run /delegate-teardown to clean it up.`;
 				}
 				const code = typedCode(err, "E_START");
 				return fail(
@@ -1025,8 +1031,9 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 						"Check pane readiness; a retry is a new delegate call. " +
 						(manifestWarning
 							? `Placement NOT tracked in manifest (${manifestWarning}) — clean it up manually via /delegate-teardown or the host workspace listing.`
-							: "Placement tracked in manifest — run /delegate-teardown to clean up."),
-					{ name: params.name, placement, stderr: errText(err) },
+							: "Placement tracked in manifest — run /delegate-teardown to clean up.") +
+						rollbackNote,
+					{ name: params.name, placement, stderr: errText(err), ...(rollbackFailedReason ? { rollbackFailed: rollbackFailedReason } : {}) },
 				);
 			}
 			const canonical = start.name;
@@ -1279,16 +1286,24 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				const b = gaugeSummary();
 				// Archive on successful collect — pass OR fail verdict (DESIGN.md §19.3).
 				// Best-effort by contract: null/throw → warning line, never an error.
+				// Wave 4 item 6 (reliability finding 7): the failure REASON is
+				// surfaced in the note ("archive unavailable: <why>") instead of a
+				// bare "(archive unavailable)".
 				let archivePath: string | null = null;
+				let archiveError: string | null = null;
 				try {
 					const manifest = manifestStore.read(manifestDir);
 					if (manifest) {
-						archivePath = archiveReport(manifestDir, usedReportPath, manifest as unknown as Record<string, unknown>);
+						const archived = archiveReport(manifestDir, usedReportPath, manifest as unknown as Record<string, unknown>);
+						archivePath = archived.dest;
+						archiveError = archived.error ?? null;
 					}
-				} catch {
-					archivePath = null;
+				} catch (err) {
+					archiveError = errText(err);
 				}
-				const archiveNote = archivePath ? `\nArchived: ${archivePath}` : "\n(archive unavailable)";
+				const archiveNote = archivePath
+					? `\nArchived: ${archivePath}`
+					: `\n(archive unavailable${archiveError ? `: ${archiveError}` : ""})`;
 				// BUG_FIX_CONTEXT: symptom — every fresh orchestrator session re-waked
 				// on an already-collected report. Why the old state did not work: the
 				// watcher's `seen` dedup is session-scoped memory only. What was done:
@@ -1383,7 +1398,9 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 						report,
 						elapsedMs,
 						startedAt: startedAtDate.toISOString(),
-						...(archivePath ? { archivePath } : { archiveWarning: "archive unavailable" }),
+						...(archivePath
+						? { archivePath }
+						: { archiveWarning: archiveError ? `archive unavailable: ${archiveError}` : "archive unavailable" }),
 						...(reportDisplayTruncated ? { reportDisplayTruncated: true } : {}),
 						...(collectedNote ? { collectedAtWarning: collectedNote } : {}),
 						...(teardownNote ? { teardownAfterCollect: teardownNote } : {}),
