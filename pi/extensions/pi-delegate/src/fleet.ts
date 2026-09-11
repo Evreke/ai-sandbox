@@ -73,6 +73,7 @@ import { taskSlug } from "./expaths.ts";
 import { workerAudienceMatch } from "./watch-role.ts";
 import { contextPct, parseSessionUsage, resolveContextWindow, WATCH_DEFAULT_STALE_AFTER_MS } from "./usage.ts";
 import {
+	BUDGET_WARN_FRACTION,
 	CONTEXT_WARN_PCT,
 	type AgentStatusName,
 	type Placement,
@@ -362,8 +363,9 @@ interface FgTheme {
 }
 
 const LIVE_STATUSES = new Set(["working", "blocked"]);
-/** Budget burn at/above this percentage renders in the error color. */
-const BURN_ERROR_PCT = 80;
+/** Budget burn at/above this percentage renders in the error color — derived
+ *  from the ONE 80% spelling (host.ts BUDGET_WARN_FRACTION, Law 9). */
+const BURN_ERROR_PCT = BUDGET_WARN_FRACTION * 100;
 
 function isLive(row: FleetWidgetRow): boolean {
 	return LIVE_STATUSES.has(row.status);

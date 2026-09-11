@@ -345,8 +345,15 @@ export interface SessionUsage {
 	lastTotalTokens: number | null;
 }
 
-/** Context-gauge thresholds (DESIGN.md §20) — the operator's restart line. */
-export const CONTEXT_WARN_PCT = 80;
+/** The ONE spelling of the operator's 80% threshold (Law 9 — one artifact,
+ *  one source of truth): every 80% gauge (percent or fraction) derives from
+ *  this constant. Fraction of budget above which terminal results carry a
+ *  burn warning. */
+export const BUDGET_WARN_FRACTION = 0.8;
+
+/** Context-gauge thresholds (DESIGN.md §20) — the operator's restart line.
+ *  Derived ×100 from BUDGET_WARN_FRACTION (exact in IEEE-754: 0.8*100 === 80). */
+export const CONTEXT_WARN_PCT = BUDGET_WARN_FRACTION * 100;
 export const CONTEXT_CRITICAL_PCT = 90;
 /** Turns tripwire: assistant-message count above which a session is warned. */
 export const CONTEXT_TURNS_WARN = 40;
@@ -381,9 +388,6 @@ export const DEFAULT_BUDGET_TOKENS = 150_000;
  *     in node (production pi) the home cannot change mid-session either.
  * Raises: never */
 export const BUDGET_CONFIG_PATH = join(getAgentDir(), "pi-delegate.config.json");
-
-/** Fraction of budget above which terminal results carry a burn warning. */
-export const BUDGET_WARN_FRACTION = 0.8;
 
 // ---------------------------------------------------------------------------
 // Report contract (DESIGN.md §6) — strict, fixed schema
