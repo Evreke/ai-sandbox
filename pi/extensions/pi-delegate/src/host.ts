@@ -8,9 +8,11 @@
  * aged-finish session-JSONL proof — backend-neutral, see research note in
  * design-host-interface.md §1a).
  *
- * Dependencies: node builtins only (fs). Depends on NO other src/ module —
- * bottom of the import graph (the old src/transport.ts SECTION 1 + the
- * backend-neutral sessionHasReply/Errors blocks, byte-verbatim).
+ * Dependencies: node builtins (fs, path) + pi's getAgentDir()/CONFIG_DIR_NAME
+ * from @earendil-works/pi-coding-agent (the platform package — Law 1: import,
+ * never reimplement). Depends on NO other src/ module — bottom of the import
+ * graph (the old src/transport.ts SECTION 1 + the backend-neutral
+ * sessionHasReply/Errors blocks, byte-verbatim).
  *
  * The herdr IMPLEMENTATION lives in src/herdr/host.ts (SECTION 2 verbatim);
  * it is bound ONCE in index.ts (workerhost migration steps 5–6 — the old
@@ -18,6 +20,12 @@
  * fleet) import the seam from ./host.ts and must NEVER import
  * ./herdr/host.ts directly (pinned by static-check T1.1/T1.1c /
  * watcher-check W1.1).
+ *
+ * I/O: the seam performs no I/O of its own, with ONE documented exception —
+ * sessionHasReply() reads the caller-supplied session JSONL with readFileSync
+ * (the aged-finish proof; backend-neutral by construction since the path is
+ * an argument, see its FUNCTION_CONTRACT below). This is the audit's
+ * acknowledged deviation, stated here per Law 2.
  */
 
 import { readFileSync } from "node:fs";

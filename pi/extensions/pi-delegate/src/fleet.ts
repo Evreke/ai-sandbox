@@ -92,9 +92,11 @@ import {
  * `orchestratorSessionPath` equals THIS session's JSONL path. Legacy manifests
  * carry no such field → ownership UNKNOWN.
  *
- * DELIBERATE ASYMMETRY vs the watcher: the watcher fails OPEN (a legacy
- * manifest or a degraded self-id must never swallow a real wake-up), while
- * DISPLAY fails CLOSED — a marker is a claim, and an unknown worker must
+ * DELIBERATE ASYMMETRY vs the watcher — RETIRED: the watcher no longer fails
+ * OPEN. Watcher stage A reversed that to fail-closed; src/watch-role.ts is
+ * the canonical role/ownership table — do not re-derive the watcher's
+ * behavior from this display-side comment. DISPLAY fails CLOSED — a marker
+ * is a claim, and an unknown worker must
  * never render as "mine" (●) in either direction of missing data:
  *   - manifest edge: no `orchestratorSessionPath` → UNKNOWN (legacy).
  *   - self edge: no session file → exact comparison impossible → UNKNOWN,
