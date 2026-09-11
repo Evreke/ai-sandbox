@@ -8,7 +8,7 @@
  *     branch → name → usage; floors respected; cells trunc/padded.
  *   - fitRow: offset-safety clip (§19) — header/legend can never push
  *     past the right border.
- *   - fleet.ts text helpers: fmtK pinned cases, trunc ellipsis + wide-char
+ *   - the k-denominated token spelling (formatTokens) pinned cases, trunc ellipsis + wide-char
  *     safety, stripAnsi.
  */
 
@@ -19,7 +19,9 @@ import {
 	layoutFleetRows,
 	type FleetLayoutRow,
 } from "../src/fleet.ts";
-import { fmtK, stripAnsi, trunc, visibleWidth } from "../src/fleet.ts";
+import { stripAnsi, trunc, visibleWidth } from "../src/fleet.ts";
+// Wave 3 step 5: fmtK folded into usage.ts formatTokens (ONE spelling).
+import { formatTokens } from "../src/usage.ts";
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = "") {
@@ -154,19 +156,21 @@ function rowTotalW(l: { nameW: number; branchW: number; usageW: number }): numbe
 }
 
 // ---------------------------------------------------------------------------
-// fleet.ts text helpers — fmtK pinned cases (divergent-duplicates unified)
+// fleet.ts text helpers — the k-denominated token spelling pinned cases
+// (divergent-duplicates unified; Wave 3 step 5: the canonical spelling is
+// usage.ts formatTokens — fmtK was folded into it, guard included)
 // ---------------------------------------------------------------------------
 
 {
-	check("T1 fmtK 836", fmtK(836) === "836", fmtK(836));
-	check("T2 fmtK 9592", fmtK(9592) === "9.6k", fmtK(9592));
-	check("T3 fmtK 18517", fmtK(18_517) === "18.5k", fmtK(18_517));
-	check("T4 fmtK 150000", fmtK(150_000) === "150k", fmtK(150_000));
-	check("T5 fmtK 0", fmtK(0) === "0", fmtK(0));
-	check("T6 fmtK 999", fmtK(999) === "999", fmtK(999));
-	check("T7 fmtK 1000", fmtK(1000) === "1k", fmtK(1000));
-	check("T8 fmtK negative", fmtK(-5) === "0", fmtK(-5));
-	check("T9 fmtK non-finite", fmtK(Number.NaN) === "0", fmtK(Number.NaN));
+	check("T1 formatTokens 836", formatTokens(836) === "836", formatTokens(836));
+	check("T2 formatTokens 9592", formatTokens(9592) === "9.6k", formatTokens(9592));
+	check("T3 formatTokens 18517", formatTokens(18_517) === "18.5k", formatTokens(18_517));
+	check("T4 formatTokens 150000", formatTokens(150_000) === "150k", formatTokens(150_000));
+	check("T5 formatTokens 0", formatTokens(0) === "0", formatTokens(0));
+	check("T6 formatTokens 999", formatTokens(999) === "999", formatTokens(999));
+	check("T7 formatTokens 1000", formatTokens(1000) === "1k", formatTokens(1000));
+	check("T8 formatTokens negative", formatTokens(-5) === "0", formatTokens(-5));
+	check("T9 formatTokens non-finite", formatTokens(Number.NaN) === "0", formatTokens(Number.NaN));
 }
 
 // ---------------------------------------------------------------------------

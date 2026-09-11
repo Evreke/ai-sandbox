@@ -32,8 +32,8 @@ import { Type } from "typebox";
 import { aggregateTaskUsage, exchangeRoot, isProbeDir, progressPathFor, readLastProgress } from "./exchange.ts";
 import { archiveRoot, listArchivedTasks } from "./archive.ts";
 import { type TaskUsageSnapshot, manifestStore } from "./manifest-store.ts";
-import { answerPathFor, questionPathFor } from "./mailbox-store.ts";
-import { clampLines, fmtK, renderDelegateLines, type WorkerView } from "./fleet.ts";
+import { mailboxAnswerState } from "./mailbox-store.ts";
+import { clampLines, renderDelegateLines, type WorkerView } from "./fleet.ts";
 import {
 	contextPct,
 	formatTokens,
@@ -89,20 +89,10 @@ function formatElapsed(ms: number): string {
  *  a-file exists and is newer than the question → "A→" (answered/steered). */
 async function mailboxMarkers(dir: string, name: string): Promise<string> {
 	// EXTERNAL_DEPENDENCY: mailbox files at /tmp/exchange/<task>/q-<name>.json
-	// and a-<name>.json — existence + mtime ordering only, contents never read.
-	let qMtime = -1;
-	let aMtime = -1;
-	try {
-		qMtime = (await stat(questionPathFor(dir, name))).mtimeMs;
-	} catch {
-		// no question file
-	}
-	try {
-		aMtime = (await stat(answerPathFor(dir, name))).mtimeMs;
-	} catch {
-		// no answer file
-	}
-	return [qMtime >= 0 ? "Q?" : "", aMtime >= 0 && aMtime > qMtime ? "A→" : ""]
+	// and a-<name>.json — existence + mtime ordering only, contents never read
+	// (via the ONE shared reader, mailbox-store.mailboxAnswerState).
+	const { questionPosted, answerNewerThanQuestion } = await mailboxAnswerState(dir, name);
+	return [questionPosted ? "Q?" : "", answerNewerThanQuestion ? "A→" : ""]
 		.filter(Boolean)
 		.join(" ");
 }
@@ -252,7 +242,7 @@ export function registerStatusTool(pi: import("@earendil-works/pi-coding-agent")
 						const u = parseSessionUsage(sessionPath);
 						const window = resolveContextWindow(modelByName.get(v.name));
 						const pct = contextPct(u, window);
-						usagePart = ` ctx ${pct === null ? "?" : pct + "%"} ↑${fmtK(u.input)} ↓${fmtK(u.output)}` +
+						usagePart = ` ctx ${pct === null ? "?" : pct + "%"} ↑${formatTokens(u.input)} ↓${formatTokens(u.output)}` +
 							(u.turns > CONTEXT_TURNS_WARN ? ` (${u.turns} turns!)` : "");
 					}
 					// Probe honesty (§19.4): probes never render report✗.

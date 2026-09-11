@@ -213,3 +213,48 @@ export function writeAnswer(path: string, answer: string): Promise<void> {
 		atomicWriteFileSync(path, JSON.stringify(envelope, null, "\t") + "\n");
 	});
 }
+
+// ---------------------------------------------------------------------------
+// Mailbox mtime state (Wave 3 step 5 — audit finding 7: ONE implementation
+// of the "which side is newer" read shared by the status tool's markers and
+// the fleet overlay's mail-state cell)
+// ---------------------------------------------------------------------------
+
+import { stat } from "node:fs/promises";
+
+/** The mailbox's mtime-layer state, read-only and tolerant.
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: dir — the exchange task dir; name — the canonical worker name
+ * Output: questionPosted (a q-<name>.json exists) and answerNewerThanQuestion
+ *   (an a-<name>.json exists AND postdates the question — or exists while no
+ *   question does)
+ * Guarantees:
+ *   - read-only: existence + mtime ordering only, contents never read
+ *   - tolerant: absent/unreadable files degrade to the "not posted" sentinel,
+ *     never a throw
+ * Raises: never
+ * EXTERNAL_DEPENDENCY: mailbox files at /tmp/exchange/<task>/q-<name>.json
+ *   and a-<name>.json.
+ */
+export async function mailboxAnswerState(
+	dir: string,
+	name: string,
+): Promise<{ questionPosted: boolean; answerNewerThanQuestion: boolean }> {
+	let qMtime = -1;
+	let aMtime = -1;
+	try {
+		qMtime = (await stat(questionPathFor(dir, name))).mtimeMs;
+	} catch {
+		// no question file
+	}
+	try {
+		aMtime = (await stat(answerPathFor(dir, name))).mtimeMs;
+	} catch {
+		// no answer file
+	}
+	return {
+		questionPosted: qMtime >= 0,
+		answerNewerThanQuestion: aMtime >= 0 && aMtime > qMtime,
+	};
+}

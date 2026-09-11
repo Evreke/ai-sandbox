@@ -600,12 +600,32 @@ export function makeSender(
  *   tests must set $HOME at child-process spawn time or redirect before
  *   the first call.
  */
+/**
+ * The ONE ISO-stamped audit append into the watcher audit file (Wave 3 step
+ * 5 — audit finding 7: spawn's watchAudit was a second private
+ * implementation of the append makeWatcherLogSink owns; both now call this).
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: line — the audit text (the ISO timestamp is prepended here)
+ * Output: none
+ * Guarantees:
+ *   - appends one line to ~/.pi/agent/delegate-watch.log, best-effort
+ *   - never throws past the caller (append failures are swallowed)
+ * Raises: never
+ * EXTERNAL_DEPENDENCY: ~/.pi/agent/delegate-watch.log (append-only audit
+ *   file under pi's agent dir; pi's getAgentDir() honors PI_CODING_AGENT_DIR
+ *   — tests must set $HOME at child-process spawn time).
+ */
+export function appendWatcherAudit(line: string): void {
+	void appendFile(
+		join(getAgentDir(), "delegate-watch.log"),
+		`${new Date().toISOString()} ${line}\n`,
+	).catch(() => undefined); // audit is advisory — never throw past the tick
+}
+
 export function makeWatcherLogSink(): (m: string) => void {
 	return (m: string): void => {
-		void appendFile(
-			join(getAgentDir(), "delegate-watch.log"),
-			`${new Date().toISOString()} ${m}\n`,
-		).catch(() => undefined); // audit is advisory — never throw past the tick
+		appendWatcherAudit(m);
 		if (/\berror\b|\bfail|already gone|unavailable/i.test(m)) {
 			console.error(`[pi-delegate watch] ${m}`);
 		}

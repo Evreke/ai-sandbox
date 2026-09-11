@@ -99,11 +99,11 @@
 // archiveReport now lives in ./exchange.ts, watch/collect config in
 // ./observe.ts, ui render helpers in ./fleet.ts, the transport surface in
 // ./transport.ts (facades remain at the old paths until W5).
-import { appendFile, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { type Static, Type } from "typebox";
-import { CONFIG_DIR_NAME, getAgentDir, type Theme } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, type Theme } from "@earendil-works/pi-coding-agent";
 import {
 	aggregateTaskUsage,
 	applyFleetTaskFields,
@@ -152,6 +152,10 @@ import { runGraceLoop } from "./grace.ts";
 // 4.1) — the structural kill of the byte-identical errText/asDelegateError
 // copies (audit finding 7).
 import { asDelegateError, errText, fail, textResult, typedCode, type ToolResult } from "./tool-result.ts";
+// Wave 3 decomposition (step 5): the tolerant fs probes are ONE implementation
+// (src/fs-probe.ts) — the local reportExists copy is deleted (the grace loop's
+// injection keeps the reportExists name via the aliased import).
+import { fileExists as reportExists } from "./fs-probe.ts";
 // Wave 3 decomposition (step 4.4): the delegate_mailbox tool moved verbatim
 // to src/mailbox-tool.ts (exact tool name + registration signature).
 import { registerMailboxTool } from "./mailbox-tool.ts";
@@ -279,15 +283,6 @@ const delegateParams = Type.Object({
 	extraArgs: Type.Optional(Type.Array(Type.String(), { description: "Extra args appended after --" })),
 });
 
-async function reportExists(path: string): Promise<boolean> {
-	try {
-		await stat(path);
-		return true;
-	} catch {
-		return false;
-	}
-}
-
 /** Best-effort teardown audit line — MIRROR of the /delegate-teardown
  *  command's logTo format (index.ts, absorbed from commands.ts in W5):
  *  `[ISO] line` appended to
@@ -390,28 +385,15 @@ function liveSessionFile(ctx: {
 	}
 }
 
-/**
- * Watcher stage A (guideline §9): best-effort line into the watcher's audit
- * file — the same append-only sink the watcher log uses. Advisory by
- * contract: a write failure is swallowed, never affects the spawn outcome.
- * <p>
- * FUNCTION_CONTRACT:
- * Input: line — the audit text (ISO timestamp is prepended here)
- * Output: none
- * Guarantees:
- *   - appends one line to ~/.pi/agent/delegate-watch.log, best-effort
- *   - never throws past the caller (append failures are swallowed)
- * Raises: never
- * EXTERNAL_DEPENDENCY: ~/.pi/agent/delegate-watch.log (append-only audit
- *   file under pi's agent dir; pi's getAgentDir() (honors
- *   PI_CODING_AGENT_DIR) resolves it — see the
- *   makeWatcherLogSink contract in observe.ts for the test seam).
- */
-function watchAudit(line: string): void {
-	void appendFile(join(getAgentDir(), "delegate-watch.log"), `${new Date().toISOString()} ${line}\n`).catch(
-		() => undefined,
-	);
-}
+// Watcher stage A (guideline §9): best-effort line into the watcher's audit
+// file. Wave 3 decomposition (step 5): the spawn-side watcher-audit append is
+// the ONE shared ISO-stamped sink — watcher.ts appendWatcherAudit (spawn's
+// private implementation of the append was deleted; audit finding 7).
+// Advisory by contract: a write failure is swallowed, never affects the
+// spawn outcome. EXTERNAL_DEPENDENCY: ~/.pi/agent/delegate-watch.log (the
+// append-only audit file under pi's agent dir — see appendWatcherAudit's
+// contract in watcher.ts for the test seam).
+import { appendWatcherAudit } from "./watcher.ts";
 
 // ===========================================================================
 // Wave 3 decomposition (step 4.5, the audit's "shrink its blast radius"):
@@ -922,7 +904,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 						"could not read this session's id — the worker is registered WITHOUT an owner session path; " +
 						"the watcher will NOT wake this session for its events (fail-closed default). " +
 						"watch.legacyFailOpen:true would restore legacy delivery but is unsafe on a multi-session machine.";
-					watchAudit(
+					appendWatcherAudit(
 						`spawn worker=${params.name} — no owner session id recorded (sessionManager unavailable); ` +
 							"the watcher will not deliver wake-ups for this worker (fail-closed default)",
 					);

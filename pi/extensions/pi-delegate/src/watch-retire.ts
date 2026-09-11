@@ -30,7 +30,8 @@
 import { rmSync } from "node:fs";
 import { archiveReport } from "./archive.ts";
 import { resolveWatchConfig } from "./watch-config.ts";
-import { fileMtimeMs, type WatchSnapshot, type WatchWorker } from "./watch-detect.ts";
+import { type WatchSnapshot, type WatchWorker } from "./watch-detect.ts";
+import { fileMtimeMs } from "./fs-probe.ts";
 import { manifestStore, type ExchangeManifest } from "./manifest-store.ts";
 import { answerPathFor, questionPathFor, readQuestion, releasePathFor } from "./mailbox-store.ts";
 import { parseBriefSchema, validateReportAgainstSchema } from "./report-schema.ts";

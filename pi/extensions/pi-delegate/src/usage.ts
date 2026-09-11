@@ -364,6 +364,10 @@ export function resolveTierTable(): Record<string, SpawnTier> {
  * Raises: none
  */
 export function formatTokens(n: number): string {
+	// Wave 3 step 5 (audit finding 7): the ONE k-denominated token spelling —
+	// fleet.ts's fmtK folded into it (the guard below is fmtK's: non-finite/
+	// negative → "0"; for valid inputs the two were already identical).
+	if (!Number.isFinite(n) || n < 0) return "0";
 	if (n < 1000) return String(n);
 	const k = n / 1000;
 	return `${k >= 100 ? Math.round(k) : Math.round(k * 10) / 10}k`;

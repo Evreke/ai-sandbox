@@ -27,7 +27,7 @@
  * Exported surface: WorkerView, buildWorkerView | classifyOwnership,
  * OWNERSHIP_GLYPH, Ownership,
  * SelfIdentity, OwnershipPlacement | stripAnsi, visibleWidth, trunc,
- * clampLines, fmtK | FleetWidgetRow (widget row; historical name FleetRow is
+ * clampLines | FleetWidgetRow (widget row; historical name FleetRow is
  * kept alive by the ui/fleet-ui.ts facade, removed in W5 — importers use
  * FleetWidgetRow), FleetUIDeps, FleetFoldLine,
  * mountFleetUI, disposeFleetUI, renderLiveRows, foldLiveByOwnership,
@@ -59,7 +59,6 @@
  * taxonomy lives in transport.ts).
  */
 
-import { stat } from "node:fs/promises";
 import { basename } from "node:path";
 import type { ExtensionCommandContext, ExtensionContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import {
@@ -69,11 +68,14 @@ import {
 	readLastProgress,
 } from "./exchange.ts";
 import { manifestStore } from "./manifest-store.ts";
-import { answerPathFor, questionPathFor } from "./mailbox-store.ts";
+import { mailboxAnswerState } from "./mailbox-store.ts";
+// Wave 3 decomposition (step 5): the tolerant fs probes are ONE implementation
+// (src/fs-probe.ts) — the local mtimeOf/fileExists copies are deleted.
+import { fileExists } from "./fs-probe.ts";
 import { mergeRetireStamps, readWatchStampLayers } from "./watch-store.ts";
 import { taskSlug } from "./expaths.ts";
 import { workerAudienceMatch } from "./watch-role.ts";
-import { contextPct, parseSessionUsage, resolveContextWindow, WATCH_DEFAULT_STALE_AFTER_MS } from "./usage.ts";
+import { contextPct, formatTokens, parseSessionUsage, resolveContextWindow, WATCH_DEFAULT_STALE_AFTER_MS } from "./usage.ts";
 import {
 	BUDGET_WARN_FRACTION,
 	CONTEXT_WARN_PCT,
@@ -211,10 +213,10 @@ export const OWNERSHIP_GLYPH: Record<Ownership, string> = {
 /**
  * pi-delegate — shared text helpers for UI rendering (quality fix A7).
  *
- * ONE fmtK, ONE trunc (visibleWidth-aware, wide-char safe), ONE stripAnsi.
+ * ONE token-k spelling (usage.ts formatTokens — Wave 3 step 5 fold), ONE trunc (visibleWidth-aware, wide-char safe), ONE stripAnsi.
  * Previously these were triplicated with DIVERGENT semantics across
  * fleet.ts / observe.ts (status tool) (same names, different
- * output — e.g. fmtK(836) was "836" in fleet.ts but "1k" in fleet-ui.ts).
+ * output — e.g. formatTokens(836) was "836" in fleet.ts but "1k" in fleet-ui.ts).
  * All UI modules import from here; local duplicates were deleted.
  */
 
@@ -272,16 +274,6 @@ export function clampLines(lines: string[], width?: number): string[] {
 	if (typeof width !== "number" || !Number.isFinite(width) || width <= 0) return lines;
 	const w = Math.floor(width);
 	return lines.map((l) => (visibleWidth(l) <= w ? l : trunc(l, w)));
-}
-
-/** Compact k-denominated token count: <1000 → "n" (836 → "836"); else one
- *  decimal below 100k, integer k from 100k up (9592 → "9.6k", 18517 → "18.5k",
- *  150000 → "150k"). Non-finite/negative → "0". */
-export function fmtK(n: number): string {
-	if (!Number.isFinite(n) || n < 0) return "0";
-	if (n < 1000) return String(n);
-	const k = n / 1000;
-	return `${k >= 100 ? Math.round(k) : Math.round(k * 10) / 10}k`;
 }
 
 // ===========================================================================
@@ -370,7 +362,7 @@ export function disposeFleetUI(): void {
 }
 
 // ---------------------------------------------------------------------------
-// Shared formatting helpers live in this module (SECTION 2) (ONE fmtK/trunc/stripAnsi —
+// Shared formatting helpers live in this module (SECTION 2) (ONE token-k spelling via usage.ts formatTokens/ONE trunc/stripAnsi —
 // quality fix A7); this module imports from there.
 // ---------------------------------------------------------------------------
 
@@ -498,7 +490,7 @@ export function renderLiveRows(rows: FleetWidgetRow[], theme: Theme, width?: num
 	const lines = mine.map((r) => {
 		const pct = typeof r.budgetPct === "number" ? `${r.budgetPct}%` : "?";
 		const ping = r.lastPing ? ` [ping: ${r.lastPing.phase}]` : "";
-		const line = `▲ ${r.name} ${r.status} ↑${fmtK(r.inputTokens)} ↓${fmtK(r.outputTokens)} ${pct} of budget${ping}`;
+		const line = `▲ ${r.name} ${r.status} ↑${formatTokens(r.inputTokens)} ↓${formatTokens(r.outputTokens)} ${pct} of budget${ping}`;
 		// Budgets ≥80% burn override the status color with error.
 		const color: ThemeColor =
 			typeof r.budgetPct === "number" && r.budgetPct >= BURN_ERROR_PCT
@@ -695,7 +687,7 @@ export interface FleetDeps {
 
 // ---------------------------------------------------------------------------
 // Local key helper (pi-tui's matchesKey is not reachable from this repo's
-// node_modules layout); width/trunc/fmtK live in this module (SECTION 2).
+// node_modules layout); width/trunc live in this module (SECTION 2).
 // ---------------------------------------------------------------------------
 
 function isEscape(data: string): boolean {
@@ -841,23 +833,15 @@ export async function buildWidgetRows(views: WorkerView[], self: SelfIdentity): 
 	);
 }
 
-/** File mtime in ms, or 0 when missing/unreadable. Read-only. */
-async function mtimeOf(path: string): Promise<number> {
-	try {
-		return (await stat(path)).mtimeMs;
-	} catch {
-		return 0;
-	}
-}
-
 /** Mailbox state: "Q?" worker question awaiting answer, "A→" answer posted. */
 async function mailState(dir: string, name: string): Promise<"Q?" | "A→" | "--"> {
 	// EXTERNAL_DEPENDENCY: mailbox files on disk — q-<name>.json / a-<name>.json
-	// in the exchange dir (mtime comparison decides which side is newer).
-	const q = await mtimeOf(questionPathFor(dir, name));
-	if (q === 0) return "--";
-	const a = await mtimeOf(answerPathFor(dir, name));
-	return a > q ? "A→" : "Q?";
+	// in the exchange dir (mtime comparison decides which side is newer) —
+	// read through the ONE shared reader (mailbox-store.mailboxAnswerState,
+	// Wave 3 step 5: one implementation for the overlay AND the status tool).
+	const { questionPosted, answerNewerThanQuestion } = await mailboxAnswerState(dir, name);
+	if (!questionPosted) return "--";
+	return answerNewerThanQuestion ? "A→" : "Q?";
 }
 
 // ---------------------------------------------------------------------------
@@ -1023,9 +1007,9 @@ export interface FleetLayout {
 /** Column floors — shrink loops never go below these. */
 export const FLEET_FLOORS = { name: 8, branch: 6, usage: 12 } as const;
 
-/** Usage column string: `↑52.8k ↓34.9k (999% of 150k)` (compact fmtK form). */
+/** Usage column string: `↑52.8k ↓34.9k (999% of 150k)` (compact k form, usage.ts formatTokens). */
 export function fleetUsageOf(r: Pick<FleetLayoutRow, "input" | "output" | "percent" | "budget">): string {
-	return `↑${fmtK(r.input)} ↓${fmtK(r.output)} (${r.percent}% of ${fmtK(r.budget)})`;
+	return `↑${formatTokens(r.input)} ↓${formatTokens(r.output)} (${r.percent}% of ${formatTokens(r.budget)})`;
 }
 
 function pad(s: string, len: number): string {
@@ -1771,15 +1755,6 @@ export interface WorkerView {
 	startedAt: string;
 	/** Ms since startedAt (0 when unparseable). */
 	elapsedMs: number;
-}
-
-async function fileExists(path: string): Promise<boolean> {
-	try {
-		await stat(path);
-		return true;
-	} catch {
-		return false;
-	}
 }
 
 /**

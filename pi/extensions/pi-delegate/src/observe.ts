@@ -75,7 +75,6 @@ export {
 	detectEvents,
 	detectWorkerEvents,
 	eventKey,
-	fileMtimeMs,
 	GRILL_DECK_TOOL,
 	isWorkerSession,
 	ownsChildManifests,

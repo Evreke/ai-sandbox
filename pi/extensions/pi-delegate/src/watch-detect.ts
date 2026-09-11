@@ -32,7 +32,6 @@
  * §4.1 — the Transport instance is injected from index.ts).
  */
 
-import { statSync } from "node:fs";
 import {
 	answerPathFor,
 	nudgeFailedPathFor,
@@ -40,6 +39,7 @@ import {
 	readNudgeFailedMarker,
 	readQuestionState,
 } from "./mailbox-store.ts";
+import { fileMtimeMs } from "./fs-probe.ts";
 import { isProbeDir } from "./exchange.ts";
 import { manifestStore, type ExchangeManifest } from "./manifest-store.ts";
 import {
@@ -458,14 +458,6 @@ export function becameCollectedOnDisk(dir: string, worker: string): boolean {
 		return typeof w?.collectedAt === "string" && w.collectedAt.length > 0;
 	} catch {
 		return false;
-	}
-}
-
-export function fileMtimeMs(path: string): number | null {
-	try {
-		return statSync(path).mtimeMs;
-	} catch {
-		return null;
 	}
 }
 
