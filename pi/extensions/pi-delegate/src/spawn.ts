@@ -9,7 +9,13 @@
  * startAgent → brief/probe prompt → waitSettle → grace rechecks → strict
  * collect + archive + collectedAt stamp + advisory auto-teardown), the
  * mailbox tool actions (read/answer/steer/release) and the LLM-facing
- * promptGuidelines contract text. W4 refactor: verbatim concatenation of the
+ * promptGuidelines contract text. Migration stage 2 (audit step 7): the
+ * execute pipeline's settle→collect seam is an explicit state machine
+ * (runGraceLoop/graceTransition — each transition takes the state and
+ * returns the next) driven by the INJECTABLE clock/delay port (ClockPort,
+ * systemClock, createVirtualClock) — the grace recheck loop is testable on
+ * virtual clocks (test/grace-loop-check.ts); the execute closure keeps its
+ * shape and delegates the seam to the machine. W4 refactor: verbatim concatenation of the
  * old src/tools/mailbox.ts (leaf, first) and src/tools/delegate.ts. The
  * ~1140-line execute() closure is kept AS-IS by design (user decision): its
  * closure-scoped mutables (sessionPath, manifestWarning, reportPath,
@@ -28,7 +34,7 @@
  * of the two source files' exports).
  * Critical invariants (owned here, per report-ref-map.json hiddenInvariants):
  *   - append-before-start (EXECUTION side; exchange.ts owns the file
- *     conventions via updateManifest): the ManifestWorker entry is appended
+ *     conventions via the manifest store): the ManifestWorker entry is appended
  *     after place() and BEFORE startAgent; a refused start rolls back ONLY
  *     the entry THIS call appended (match name + this paneId + no
  *     sessionPath) — never a pre-existing same-name worker.
@@ -45,7 +51,10 @@
  *   - collectedAt-dedup (write side): after a VALID strict collect,
  *     collectedAt is stamped in the manifest — the watcher `seen` dedup is
  *     session memory only (observe.ts), so a fresh session would re-wake on
- *     old reports without the stamp.
+ *     old reports without the stamp. Migration stage 2: the stamp is a
+ *     lifecycle REDUCER transition (lifecycle.stampCollected), scoped by
+ *     embodiment placement ref — a same-name retry never re-stamps its
+ *     predecessor's entry.
  *   - no-direct-herdr-for-reportless-verdicts (probe flow): probes NEVER
  *     write a report file — pane readback "OUTPUT: OK" is the final smoke
  *     verdict; probe salvage recovers it across aborts.
@@ -102,15 +111,13 @@ import {
 	progressPathFor,
 	questionPathFor,
 	readLastProgress,
-	readManifest,
+	manifestStore,
 	readQuestion,
 	releasePathFor,
 	reportPathFor,
 	resolveReportSchema,
-	scanAllManifests,
 	TEARDOWN_LOG_NAME,
 	teardownLogLine,
-	updateManifest,
 	validateReport,
 	validateReportAgainstSchema,
 	writeAnswer,
@@ -130,6 +137,7 @@ import {
 	resolveTierTable,
 } from "./usage.ts";
 import { resolveCollectConfig, resolveWatchConfig } from "./observe.ts";
+import { nextEmbodiment, stampCollected } from "./lifecycle.ts";
 import { nudgeFailedPathFor } from "./exchange.ts";
 import { clampLines, notifyFleetIdle, renderDelegateLines } from "./fleet.ts";
 import {
@@ -145,6 +153,7 @@ import {
 	type DelegateErrorCode,
 	type Placement,
 	type PlacementMode,
+	type ProgressEvent,
 	type QuestionEnvelope,
 	type SessionUsage,
 	type SpawnTier,
@@ -229,13 +238,13 @@ function textResult(text: string, details: Record<string, unknown>): ToolResult 
 /** Exchange dirs of all known task manifests (read: q-file scan surface). */
 function knownTaskDirs(): string[] {
 	const dirs = new Set<string>();
-	for (const manifest of scanAllManifests()) dirs.add(manifest.dir);
+	for (const manifest of manifestStore.scan()) dirs.add(manifest.dir);
 	return [...dirs];
 }
 
 /** Exchange dir that owns a worker, from the manifests (answer/steer target). */
 function findWorkerDir(name: string): string | null {
-	for (const manifest of scanAllManifests()) {
+	for (const manifest of manifestStore.scan()) {
 		if (manifest.workers.some((w) => w.name === name)) return manifest.dir;
 	}
 	return null;
@@ -590,7 +599,7 @@ const SUBMIT_TIMEOUT_MS = 30_000;
 /** Default settle timeout for probe mode (short smoke gate). */
 const PROBE_TIMEOUT_MS = 120_000;
 /** Exchange dir for probe runs — no brief/task, but placements must stay
- *  teardown- and status-visible (scanAllManifests covers every manifest under
+ *  teardown- and status-visible (manifestStore.scan() covers every manifest under
  *  the exchange root). Derived from exchangeRoot() so sandboxed tests
  *  ($PI_DELEGATE_EXCHANGE_ROOT) never touch the live /tmp/exchange root. */
 function probeExchangeDir(): string {
@@ -760,6 +769,207 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 			{ once: true },
 		);
 	});
+}
+
+// ===========================================================================
+// Migration stage 2 (audit step 7) — injectable clock/delay port + the
+// settle→collect seam as an explicit state machine
+// ===========================================================================
+
+/**
+ * Clock/delay port (audit step 7): the pipeline's ONLY access to wall-clock
+ * time and sleeping. Injecting it makes time-dependent pipeline sections
+ * (the grace recheck loop first) testable on virtual clocks — no real
+ * waiting in tests, deterministic sequences.
+ * <p>
+ * MODULE_CONTRACT (port): delay() MUST resolve early when the signal fires
+ * (the abort-detaches-never-kills discipline — the wait is cancellable,
+ * never the worker); now() is a monotonic-enough millisecond read.
+ */
+export interface ClockPort {
+	now(): number;
+	delay(ms: number, signal?: AbortSignal): Promise<void>;
+}
+
+/** The production clock: real timers. */
+export const systemClock: ClockPort = {
+	now: () => Date.now(),
+	delay: (ms, signal) => sleep(ms, signal),
+};
+
+export interface VirtualClock extends ClockPort {
+	/** Resolve every pending delay whose due time falls within the next `ms`
+	 *  of virtual time, advancing now() past them. Awaits until the resolvers
+	 *  have run (microtask flush). */
+	advance(ms: number): Promise<void>;
+}
+
+/**
+ * Virtual clock for tests: delays never use real time — they resolve when
+ * advance() moves virtual time past their due point.
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: startNow — the initial virtual time (ms)
+ * Output: a VirtualClock (ClockPort + advance)
+ * Guarantees:
+ *   - delay() never resolves before an advance() covers its due time
+ *   - delay() honors the abort signal (the port contract): an aborted wait
+ *     resolves early — the abort-detaches-never-kills discipline holds on
+ *     virtual time too
+ *   - advance() resolves ALL due waiters in scheduling order and flushes a
+ *     microtask tick so chained delays observe the new time
+ * Raises: never
+ */
+export function createVirtualClock(startNow = 0): VirtualClock {
+	let now = startNow;
+	const waiters: Array<{ due: number; resolve: () => void }> = [];
+	return {
+		now: () => now,
+		delay(ms, signal) {
+			return new Promise<void>((res) => {
+				const waiter = { due: now + ms, resolve: res };
+				waiters.push(waiter);
+				if (signal) {
+					if (signal.aborted) {
+						const i = waiters.indexOf(waiter);
+						if (i >= 0) waiters.splice(i, 1);
+						res();
+						return;
+					}
+					signal.addEventListener(
+						"abort",
+						() => {
+							const i = waiters.indexOf(waiter);
+							if (i >= 0) waiters.splice(i, 1);
+							res();
+						},
+						{ once: true },
+					);
+				}
+			});
+		},
+		async advance(ms) {
+			now += ms;
+			const due = waiters.filter((w) => w.due <= now);
+			for (const w of waiters) {
+				if (w.due > now) continue;
+				w.resolve();
+			}
+			for (let i = waiters.length - 1; i >= 0; i--) {
+				if (due.includes(waiters[i])) waiters.splice(i, 1);
+			}
+			await new Promise<void>((r) => setTimeout(r, 0));
+		},
+	};
+}
+
+/** One collect attempt (the collectReport() shape — verdict + the path it
+ *  actually read + whether the requested-name fallback was used). */
+export interface CollectAttempt {
+	verdict: { ok: true; report: WorkerReport } | { ok: false; error: string };
+	usedPath: string;
+	fallbackUsed: boolean;
+}
+
+/** The grace-loop state machine's states (the settle→collect seam). */
+export type GraceState =
+	| { kind: "evaluate"; attempt: CollectAttempt; graceAttempt: number }
+	| { kind: "collected"; attempt: CollectAttempt; graceAttempt: number }
+	| { kind: "awaiting-answer"; question: QuestionEnvelope }
+	| { kind: "exhausted"; attempt: CollectAttempt; graceAttempt: number }
+	| { kind: "aborted"; graceAttempt: number };
+
+/**
+ * Dependencies of the grace transition — everything is injected, nothing is
+ * read from module state (the seam is fully explicit and testable).
+ */
+export interface GraceLoopDeps {
+	/** Re-read + re-validate the report (the collectReport closure). */
+	collect: () => CollectAttempt;
+	/** Tolerant pending-question read (q-<name>.json). */
+	pendingQuestion: () => QuestionEnvelope | null;
+	/** Advisory progress-ping read (p-<name>.jsonl tail). */
+	readProgressPing: () => ProgressEvent | null;
+	reportExists: (path: string) => Promise<boolean>;
+	isParseFailure: (path: string) => Promise<boolean>;
+	/** The injected clock — the loop's ONLY time source. */
+	clock: ClockPort;
+	/** Abort signal of the tool call (abort = detach, never kill). */
+	signal?: AbortSignal;
+	maxRechecks: number;
+	delayMs: number;
+	onRecheck?: (attempt: number, missing: boolean, usedPath: string) => void;
+	onPing?: (ping: ProgressEvent) => void;
+}
+
+/**
+ * ONE transition of the settle→collect grace state machine: takes a state,
+ * returns the next. From "evaluate" it applies the priority ladder of the
+ * unified grace loop (report → question → retryable report state) — the
+ * exact pre-extraction semantics (v1.9b review fix 2); every other state is
+ * terminal and returned unchanged.
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: state — the current grace state; deps — the injected seam
+ * Output: the next state ("evaluate" again after a delay+recollect, or a
+ *   terminal kind: collected / awaiting-answer / exhausted / aborted)
+ * Guarantees:
+ *   - priority order preserved: a valid verdict wins BEFORE the question
+ *     check; the question wins BEFORE the retryable check
+ *   - a schema rejection over a readable file is stable (never retried →
+ *     "exhausted" with graceAttempt untouched)
+ *   - abort during the injected delay → "aborted" (the CALLER salvages:
+ *     re-collect + probe salvage + detach — the loop never kills a worker)
+ *   - the delay goes through deps.clock (virtual in tests)
+ * Raises: never (advisory reads are guarded by the caller's closures)
+ */
+export async function graceTransition(state: GraceState, deps: GraceLoopDeps): Promise<GraceState> {
+	if (state.kind !== "evaluate") return state;
+	const { attempt, graceAttempt } = state;
+	// 1. A valid collect outranks everything (the loop condition of the
+	// pre-extraction code checked the verdict first).
+	if (attempt.verdict.ok) return { kind: "collected", attempt, graceAttempt };
+	// 2. A pending question outranks the retry ladder — the orchestrator's
+	// next action is answering, not waiting for a report.
+	const question = deps.pendingQuestion();
+	if (question) return { kind: "awaiting-answer", question };
+	// 3. Advisory progress ping (v1.5, §18) — streamed, never decisive.
+	const ping = deps.readProgressPing();
+	if (ping) deps.onPing?.(ping);
+	// 4. Retryable report state (missing / mid-write JSON) → wait + recheck;
+	// a stable rejection (readable, schema-invalid) is final.
+	const missing = !(await deps.reportExists(attempt.usedPath));
+	const retryable = missing || (await deps.isParseFailure(attempt.usedPath));
+	if (!retryable) return { kind: "exhausted", attempt, graceAttempt };
+	const next = graceAttempt + 1;
+	if (next > deps.maxRechecks) return { kind: "exhausted", attempt, graceAttempt };
+	deps.onRecheck?.(next, missing, attempt.usedPath);
+	await deps.clock.delay(deps.delayMs, deps.signal);
+	if (deps.signal?.aborted) return { kind: "aborted", graceAttempt };
+	return { kind: "evaluate", attempt: deps.collect(), graceAttempt: next };
+}
+
+/**
+ * Run the grace state machine to a terminal state (the extracted post-settle
+ * grace loop — the settle→collect seam).
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: deps — the injected seam (collect, question/ping readers, fs
+ *   probes, clock, signal, recheck budget)
+ * Output: the terminal GraceState — never "evaluate"
+ * Guarantees:
+ *   - behavior-identical to the pre-extraction inline loop (the three
+ *     execute drivers pin it end to end)
+ *   - termination: each delay+recheck increments graceAttempt; the recheck
+ *     budget caps the loop
+ * Raises: never (reportExists/isParseFailure/pendingQuestion are tolerant)
+ */
+export async function runGraceLoop(deps: GraceLoopDeps): Promise<Exclude<GraceState, { kind: "evaluate" }>> {
+	let state: GraceState = { kind: "evaluate", attempt: deps.collect(), graceAttempt: 0 };
+	while (state.kind === "evaluate") {
+		state = await graceTransition(state, deps);
+	}
+	return state;
 }
 
 /**
@@ -947,7 +1157,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			// formula) or output budget (secondary, when set).
 			const maxPct = params.maxContextPct ?? CONTEXT_WARN_PCT;
 			const contextWindow = resolveContextWindow(model);
-			const priorWorker = readManifest(manifestDir)?.workers.find(
+			const priorWorker = manifestStore.read(manifestDir)?.workers.find(
 				(w) => w.name === params.name && typeof w.sessionPath === "string" && w.sessionPath.length > 0,
 			);
 			if (priorWorker?.sessionPath) {
@@ -1065,6 +1275,15 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				// the filter, so assert with a comment instead of falsifying data.
 				// v1.11.x ownership: record the spawning session's path (live getter,
 				// see liveSessionFile) so the watcher wakes ONLY this session.
+				// Migration stage 2 (audit step 6): the entry carries its EMBODIMENT
+				// identity — run ordinal (prior same-name entries + 1) + this
+				// placement's ref — so two embodiments of one name in one task dir
+				// are distinguishable by construction.
+				const embodiment = nextEmbodiment(
+					params.name,
+					placement.placementRef ?? placement.paneId,
+					manifestStore.read(manifestDir)?.workers ?? [],
+				);
 				const orchestratorSessionPath = liveSessionFile(ctx);
 				const manifestEntry: ManifestWorker = {
 					name: params.name,
@@ -1076,6 +1295,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 					thinking: thinking as string,
 					startedAt: startedAtDate.toISOString(),
 					schemaProvenance,
+					embodiment: { run: embodiment.run, placementRef: embodiment.placementRef },
 					...(orchestratorSessionPath ? { orchestratorSessionPath } : {}),
 				};
 				// F1 fleet accounting: the FIRST delegate call of a task fixes the
@@ -1089,7 +1309,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				} catch {
 					fleetDescription = undefined; // unreadable brief → next spawn retries
 				}
-				await updateManifest(manifestDir, (m) =>
+				await manifestStore.update(manifestDir, (m) =>
 					applyFleetTaskFields(
 						{ ...m, workers: [...m.workers, manifestEntry] },
 						{ description: fleetDescription, masterSessionPath: orchestratorSessionPath },
@@ -1140,7 +1360,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				// sessionPath — a pre-existing same-name
 				// worker (its own placement / a real sessionPath) is preserved.
 				try {
-					await updateManifest(manifestDir, (m) => ({
+					await manifestStore.update(manifestDir, (m) => ({
 						...m,
 						workers: m.workers.filter(
 							(w) =>
@@ -1211,7 +1431,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			{
 				const canonicalReportPath = reportPathFor(manifestDir, canonical);
 				try {
-					await updateManifest(manifestDir, (m) => ({
+					await manifestStore.update(manifestDir, (m) => ({
 						...m,
 					workers: m.workers.map((w) =>
 						w.name === params.name &&
@@ -1320,7 +1540,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 					const statuses = await transport.listStatuses();
 					const live = statuses.filter((s) => s.status === "working" || s.status === "blocked");
 					if (live.length === 0) {
-						notifyFleetIdle(ctx, readManifest(manifestDir)?.workers.length ?? 1);
+						notifyFleetIdle(ctx, manifestStore.read(manifestDir)?.workers.length ?? 1);
 					}
 				} catch {
 					// advisory only — herdr unreachable → skip the nudge
@@ -1413,7 +1633,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				// Best-effort by contract: null/throw → warning line, never an error.
 				let archivePath: string | null = null;
 				try {
-					const manifest = readManifest(manifestDir);
+					const manifest = manifestStore.read(manifestDir);
 					if (manifest) {
 						archivePath = archiveReport(manifestDir, usedReportPath, manifest as unknown as Record<string, unknown>);
 					}
@@ -1435,13 +1655,27 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				// never fails the collect.
 				let collectedNote = "";
 				try {
-					await updateManifest(manifestDir, (m) => ({
+					// Migration stage 2 (audit step 6): the collectedAt stamp is now a
+					// REDUCER TRANSITION (lifecycle.stampCollected) — an illegal stamp
+					// (a closed entry) is refused instead of silently rewriting closed
+					// history. Scope: entries with an embodiment identity only stamp for
+					// THIS run's placement (a same-name retry must not re-stamp its
+					// predecessor — BUG_FIX_CONTEXT: symptom — a same-name retry's
+					// collect re-stamped the predecessor entry by name-only matching,
+					// silencing watcher events for an embodiment whose report was never
+					// delivered); legacy entries (no identity) keep the old name-only
+					// behavior (fail-open, unchanged).
+					const collectedAt = new Date().toISOString();
+					await manifestStore.update(manifestDir, (m) => ({
 						...m,
-						workers: m.workers.map((w) =>
-							w.name === canonical || w.name === params.name
-								? { ...w, collectedAt: new Date().toISOString() }
-								: w,
-						),
+						workers: m.workers.map((w) => {
+							if (w.name !== canonical && w.name !== params.name) return w;
+							if (w.embodiment && w.embodiment.placementRef !== (placement.placementRef ?? placement.paneId)) {
+								return w; // a different embodiment of the same name — not ours to stamp
+							}
+							const stamped = stampCollected(w, collectedAt);
+							return stamped.ok ? stamped.entry : w;
+						}),
 					}));
 					// F1: a collect is a manifest WRITER — stamp the recomputed usage
 					// snapshot into the task section (durability copy; the session
@@ -1603,7 +1837,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				if (guessed) {
 					sessionPath = guessed;
 					try {
-						await updateManifest(manifestDir, (m) => ({
+						await manifestStore.update(manifestDir, (m) => ({
 							...m,
 							workers: m.workers.map((w) => (w.name === canonical ? { ...w, sessionPath: guessed } : w)),
 						}));
@@ -1940,89 +2174,83 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				}
 			}
 
-			// 7. Post-settle completion — ONE unified grace loop covering both the
-			// settle-vs-report race and the settle-vs-question race (review fix 2,
-			// demo run 1: a q-file written just before idle used to lose the race and
-			// surface as E_REPORT_MISSING).
-			// BUG_FIX_CONTEXT: symptom — a report (or question file) written a moment
-			// AFTER settle surfaced as E_REPORT_MISSING even though everything was
-			// fine. Why the old single check did not work: it sampled once, exactly
-			// at the settle moment. What was done: one loop re-checks, in priority
-			// order (report → question → retryable report state) for up to
-			// GRACE_RECHECKS × GRACE_DELAY_MS (~10 s); a schema rejection over a
-			// readable file is stable and never retried.
-			//   1. collectReport() valid → success result (existing notes);
-			//   2. pending question (q-<name>.json) → structured AWAITING_ANSWER
-			//      result, NOT a failure (DESIGN.md §12) — the orchestrator answers
-			//      via delegate_mailbox and the worker gets nudged to continue;
-			//   3. retryable report state (missing/mid-write JSON) → wait and loop;
-			// after the window expires, fall through to terminal handling below.
-			// A schema rejection over a readable file is stable and is NOT retried;
-			// the question check never fires after a timed-out settle (the timedOut
-			// branch above already returned).
-			let collected = collectReport();
-			let graceAttempt = 0;
-			while (graceAttempt < GRACE_RECHECKS && !collected.verdict.ok) {
-				const pendingQuestion = readQuestion(questionPathFor(manifestDir, canonical));
-				if (pendingQuestion) {
-					const contextLine = pendingQuestion.context ? `\n(context: ${pendingQuestion.context})` : "";
-					const optionsLine = `\nOptions: ${pendingQuestion.options?.length ? pendingQuestion.options.join(" | ") : "none"}`;
-					return textResult(
-						`AWAITING_ANSWER — worker ${canonical} is blocked on a question:\n` +
-							`${pendingQuestion.question}${contextLine}${optionsLine}\n` +
-							"Answer via the delegate_mailbox tool (action 'answer'); the worker will be nudged to continue." +
-							`${uniquified ? ` ${uniquified}` : ""}`,
-						{
-							phase: "awaiting_answer",
-							canonical,
-							requestedName: params.name,
-							question: pendingQuestion,
-							placement,
-							...(manifestWarning ? { warning: manifestWarning } : {}),
-						},
+			// Migration stage 2 (audit step 7): the loop below is the settle→collect
+			// seam as an EXPLICIT state machine (runGraceLoop / graceTransition —
+			// each transition takes the state and returns the next); the clock and
+			// the recheck delay are the INJECTED port (systemClock here, virtual
+			// clocks in test/grace-loop-check.ts). The priority ladder and every
+			// note/abort semantics are preserved verbatim from the pre-extraction
+			// inline loop (v1.9b review fix 2); behavior is pinned identical by the
+			// three execute drivers (collect-teardown-driver, host-fake-check,
+			// mailbox-check).
+			const graceOutcome = await runGraceLoop({
+				collect: collectReport,
+				pendingQuestion: () => readQuestion(questionPathFor(manifestDir, canonical)),
+				readProgressPing: () => readLastProgress(progressPathFor(manifestDir, canonical)),
+				reportExists,
+				isParseFailure,
+				clock: systemClock,
+				signal,
+				maxRechecks: GRACE_RECHECKS,
+				delayMs: GRACE_DELAY_MS,
+				onRecheck: (attempt, missing, usedPath) => {
+					step(
+						`Report not readable yet (${missing ? "missing" : "mid-write"}) — recheck ${attempt}/${GRACE_RECHECKS} in ${GRACE_DELAY_MS / 1000}s…`,
+						{ phase: "grace", canonical, attempt, reportPath: usedPath },
 					);
-				}
-				// v1.5 (DESIGN.md §18): advisory progress ping — when the worker has
-				// appended to p-<name>.jsonl, stream the latest ping via onUpdate so long
-				// workers become observable without opening panes. Advisory only: read
-				// failures are swallowed and never affect outcomes.
-				try {
-					const ping = readLastProgress(progressPathFor(manifestDir, canonical));
-					if (ping) {
+				},
+				onPing: (ping) => {
+					try {
 						const pctPart = typeof ping.pct === "number" ? ` ${ping.pct}%` : "";
 						const notePart = ping.note ? ` — ${ping.note}` : "";
 						step(`ping: ${ping.phase}${pctPart}${notePart}`, { phase: "ping", ping });
+					} catch {
+						// advisory only — never affects outcomes
 					}
-				} catch {
-					// advisory only — never affects outcomes
-				}
-				const missing = !(await reportExists(collected.usedPath));
-				const retryable = missing || (await isParseFailure(collected.usedPath));
-				if (!retryable) break;
-				graceAttempt++;
-				step(
-					`Report not readable yet (${missing ? "missing" : "mid-write"}) — recheck ${graceAttempt}/${GRACE_RECHECKS} in ${GRACE_DELAY_MS / 1000}s…`,
-					{ phase: "grace", canonical, attempt: graceAttempt, reportPath: collected.usedPath },
+				},
+			});
+
+			if (graceOutcome.kind === "awaiting-answer") {
+				const pendingQuestion = graceOutcome.question;
+				const contextLine = pendingQuestion.context ? `\n(context: ${pendingQuestion.context})` : "";
+				const optionsLine = `\nOptions: ${pendingQuestion.options?.length ? pendingQuestion.options.join(" | ") : "none"}`;
+				return textResult(
+					`AWAITING_ANSWER — worker ${canonical} is blocked on a question:\n` +
+						`${pendingQuestion.question}${contextLine}${optionsLine}\n` +
+						"Answer via the delegate_mailbox tool (action 'answer'); the worker will be nudged to continue." +
+						`${uniquified ? ` ${uniquified}` : ""}`,
+					{
+						phase: "awaiting_answer",
+						canonical,
+						requestedName: params.name,
+						question: pendingQuestion,
+						placement,
+						...(manifestWarning ? { warning: manifestWarning } : {}),
+					},
 				);
-				await sleep(GRACE_DELAY_MS, signal);
-				if (signal?.aborted) {
-					// Abort between grace iterations → existing detach semantics,
-					// but do not discard a valid result if one landed.
-					const abortedCollect = collectReport();
-					if (abortedCollect.verdict.ok) {
-						return successResult(
-							abortedCollect.verdict.report,
-							abortedCollect.usedPath,
-							settle.status,
-							"(detached after settle) ",
-						);
-					}
-					const salvaged = probeSalvage();
-					if (salvaged) return salvaged;
-					return detach();
-				}
-				collected = collectReport();
 			}
+			if (graceOutcome.kind === "aborted") {
+				// Abort between grace iterations → existing detach semantics,
+				// but do not discard a valid result if one landed.
+				const abortedCollect = collectReport();
+				if (abortedCollect.verdict.ok) {
+					return successResult(
+						abortedCollect.verdict.report,
+						abortedCollect.usedPath,
+						settle.status,
+						"(detached after settle) ",
+					);
+				}
+				// v1.8 probe salvage: probes write no report file, so before v1.8 a
+				// passed smoke gate was lost to a generic Detached. If the smoke reply
+				// already happened (assistant message in the session JSONL), the probe
+				// verdict survives the abort.
+				const salvaged = probeSalvage();
+				if (salvaged) return salvaged;
+				return detach();
+			}
+			const collected = graceOutcome.attempt;
+			const graceAttempt = graceOutcome.graceAttempt;
 			if (collected.verdict.ok) {
 				const note =
 					(collected.fallbackUsed

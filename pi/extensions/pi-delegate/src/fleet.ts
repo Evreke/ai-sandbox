@@ -16,7 +16,7 @@
  * fleet<->observe import cycle (fleet imported buildWorkerView while
  * observe imported these render helpers). The graph is a DAG again:
  * observe → fleet is the only edge between the two.
- * Dependencies: exchange.ts (scanAllManifests), usage.ts (session JSONL
+ * Dependencies: exchange.ts (manifestStore), usage.ts (session JSONL
  * usage + the shared staleness constant), ./host.ts (the Transport seam +
  * gauge constants),
  * @earendil-works/pi-coding-agent TUI. The watch staleness constant
@@ -59,9 +59,9 @@
  * taxonomy lives in transport.ts).
  */
 
-import { readFile, stat } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import type { ExtensionCommandContext, ExtensionContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
-import { scanAllManifests } from "./exchange.ts";
+import { manifestStore } from "./exchange.ts";
 import { contextPct, parseSessionUsage, resolveContextWindow, WATCH_DEFAULT_STALE_AFTER_MS } from "./usage.ts";
 import {
 	CONTEXT_WARN_PCT,
@@ -675,15 +675,15 @@ interface ManifestExtras {
  */
 async function readManifestExtras(dir: string, name: string): Promise<ManifestExtras> {
 	try {
+		// Migration stage 2 (audit step 5): the raw manifest.json re-parse is
+		// GONE — the read goes through the manifest storage port (manifestStore,
+		// file-backed, tolerant). The per-field type guards stay: a manifest
+		// whose top-level shape parses can still carry wrong-typed fields.
 		// EXTERNAL_DEPENDENCY: exchange manifest on disk at <dir>/manifest.json
 		// (dir is under /tmp/exchange/<task>/); shape documented in exchange.ts.
-		const raw: unknown = JSON.parse(await readFile(`${dir}/manifest.json`, "utf8"));
-		const workers = (raw as { workers?: unknown })?.workers;
-		if (!Array.isArray(workers)) return {};
-		const w = workers.find(
-			(x): x is { name?: unknown; sessionPath?: unknown; budgetTokens?: unknown; briefPath?: unknown; model?: unknown; orchestratorSessionPath?: unknown; collectedAt?: unknown } =>
-				typeof x === "object" && x !== null && (x as { name?: unknown }).name === name,
-		);
+		const manifest = manifestStore.read(dir);
+		if (!manifest) return {};
+		const w = manifest.workers.find((x) => x.name === name);
 		if (!w) return {};
 		const extras: ManifestExtras = {};
 		if (typeof w.sessionPath === "string" && w.sessionPath.length > 0) {
@@ -1642,7 +1642,7 @@ async function fileExists(path: string): Promise<boolean> {
  * statuses degrade to "unknown" instead.
  */
 export async function buildWorkerView(transport: Transport): Promise<WorkerView[]> {
-	const manifests = scanAllManifests();
+	const manifests = manifestStore.scan();
 
 	let statuses: Awaited<ReturnType<Transport["listStatuses"]>> = [];
 	try {

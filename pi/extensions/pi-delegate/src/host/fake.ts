@@ -44,7 +44,7 @@ import {
 	type Transport,
 	type TransportCapabilities,
 } from "../host.ts";
-import { updateManifest, type ManifestWorker } from "../exchange.ts";
+import { manifestStore, type ManifestWorker } from "../exchange.ts";
 
 const SETTLED: readonly AgentStatusName[] = ["idle", "done", "blocked"];
 const STARTED: readonly AgentStatusName[] = ["working", "blocked", "done"];
@@ -156,7 +156,7 @@ export class FakeWorkerHost implements Transport {
 				thinking: req.thinking,
 				startedAt: new Date().toISOString(),
 			};
-			await updateManifest(this.opts.manifestDir, (m) => ({ ...m, workers: [...m.workers, entry] }));
+			await manifestStore.append(this.opts.manifestDir, entry);
 		}
 		return { name: req.name }; // canonical name read-back (seam contract)
 	}

@@ -14,11 +14,10 @@
  * imports the transport implementation — the transport is injected here.
  */
 
-import { readFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { isProbeDir, progressPathFor, readLastProgress, scanAllManifests } from "./src/exchange.ts";
+import { isProbeDir, manifestStore, progressPathFor, readLastProgress } from "./src/exchange.ts";
 import { buildWorkerView, classifyOwnership, type SelfIdentity } from "./src/fleet.ts";
 import {
 	isWorkerSession,
@@ -114,23 +113,15 @@ interface ManifestExtras {
 }
 
 async function readManifestExtras(dir: string, name: string): Promise<ManifestExtras> {
-	interface RawManifestWorker {
-		name?: unknown;
-		sessionPath?: unknown;
-		budgetTokens?: unknown;
-		model?: unknown;
-		orchestratorSessionPath?: unknown;
-	}
 	try {
+		// Migration stage 2 (audit step 5): the raw manifest.json re-parse is
+		// GONE — the read goes through the manifest storage port (manifestStore,
+		// file-backed, tolerant; one reader of the manifest protocol fewer).
 		// EXTERNAL_DEPENDENCY: exchange manifest at <dir>/manifest.json
 		// (dir under /tmp/exchange/<task>/) — read tolerantly per refresh tick.
-		const raw: unknown = JSON.parse(await readFile(`${dir}/manifest.json`, "utf8"));
-		const workers = (raw as { workers?: unknown })?.workers;
-		if (!Array.isArray(workers)) return {};
-		const w = workers.find(
-			(x): x is RawManifestWorker =>
-				typeof x === "object" && x !== null && (x as RawManifestWorker).name === name,
-		);
+		const manifest = manifestStore.read(dir);
+		if (!manifest) return {};
+		const w = manifest.workers.find((x) => x.name === name);
 		if (!w) return {};
 		const extras: ManifestExtras = {};
 		if (typeof w.sessionPath === "string" && w.sessionPath.length > 0) extras.sessionPath = w.sessionPath;
@@ -274,7 +265,7 @@ export default function (pi: ExtensionAPI) {
 			sessionFile = undefined; // degraded self-id — the gate decides with what is known
 		}
 		const self = { sessionFile, cwd: ctx.cwd };
-		const manifests = scanAllManifests();
+		const manifests = manifestStore.scan();
 		if (!isWorkerSession(self, manifests) || ownsChildManifests(self, manifests)) {
 			startWatcher(pi, transport, { cwd: ctx.cwd, sessionManager: ctx.sessionManager });
 		}

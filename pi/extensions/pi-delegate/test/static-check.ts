@@ -385,9 +385,12 @@ check(
 // re-fire the previous worker's marker once.
 // ---------------------------------------------------------------------------
 
+// Migration stage 2 (audit step 5): the manifest write goes through the
+// storage port — the pin targets manifestStore.update (same ordering claim:
+// the append precedes the stale-marker cleanup).
 check(
 	"T2.5 the spawn flow removes a stale nudge-failed marker for the same name right after the manifest append",
-	/updateManifest\(manifestDir,[\s\S]{0,900}?rm\(nudgeFailedPathFor\(manifestDir, params\.name\), \{ force: true \}\)/.test(delegateSrc),
+	/manifestStore\.update\(manifestDir,[\s\S]{0,900}?rm\(nudgeFailedPathFor\(manifestDir, params\.name\), \{ force: true \}\)/.test(delegateSrc),
 );
 check(
 	"T2.6 nudge-failed path convention lives in exchange.ts (module boundary — exchange-dir artifacts are exchange.ts conventions)",

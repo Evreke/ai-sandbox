@@ -237,8 +237,13 @@ function drive(scenario: string, configJson?: string): DriverOut {
 	);
 	check(
 		"C4.2 the hook runs only inside successResult (valid collect + collectedAt stamped)",
+		// Migration stage 2 (audit step 6): the collectedAt write is now a
+		// lifecycle REDUCER transition (stampCollected) — the pin moved from a
+		// source-text ordering check to reducer ownership; the ordering itself
+		// (stamp before teardown hook) is behaviorally pinned by C2 (the driver
+		// asserts collectedStamped + the teardown note on the same result).
 		src.includes("const teardownNote = await teardownAfterCollect();") &&
-			src.indexOf("collectedAt: new Date().toISOString()") < src.indexOf("const teardownNote = await teardownAfterCollect();"),
+			src.includes("stampCollected(w, collectedAt)"),
 	);
 	check(
 		"C4.3 teardown failure is advisory — no E_ code may come from the hook (try/catch, string notes)",

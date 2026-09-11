@@ -20,10 +20,23 @@
  * + line format) — migration stage 1.
  *
  * Exported surface (union of the two merged sources, verbatim, plus the F1
- * fleet-accounting section):
+ * fleet-accounting section, plus the migration-stage-2 manifest storage
+ * port):
  *   - manifest/fs: ensureExchangeDir, ExchangeDir, ExchangeManifest,
  *     ManifestWorker, readManifest, updateManifest, scanAllManifests,
  *     reportPathFor
+ *   - manifest storage port (migration stage 2, audit step 5): ManifestStore
+ *     (read/update/append/scan), createFileManifestStore,
+ *     createMemoryManifestStore, manifestStore (the process default, file-
+ *     backed). ALL manifest consumers (spawn, observe, fleet, index, the
+ *     fake host adapter) go through the port — the raw functions remain
+ *     exported as the file implementation's building blocks and for tests.
+ *
+ * Manifest format (migration stage 2, audit step 6): ManifestWorker gained
+ * the ONE optional extension field `embodiment` (run ordinal + placementRef
+ * — the embodiment identity; semantics live in src/lifecycle.ts, the single
+ * lifecycle owner). Legacy entries without it are read by the backward
+ * adapter; external consumers of the manifest are unchanged.
  *   - F1 fleet accounting: TaskUsageSnapshot, describeFleet,
  *     applyFleetTaskFields, aggregateTaskUsage
  *   - reports/schemas: validateReport, validateReportAgainstSchema,
@@ -183,6 +196,18 @@ export interface ManifestWorker {
 	 *  deleted — history stays — and a retired entry silences every watcher
 	 *  event kind (the close is the expected cause of any herdr absence). */
 	retiredAt?: string;
+	/** Migration stage 2 (audit step 6) — the ONLY manifest format extension:
+	 *  identity of THIS embodiment of the worker name (run ordinal + opaque
+	 *  placementRef; the name lives in the entry's own `name` field). Written
+	 *  by spawn at append time; a same-name retry in the same task dir gets
+	 *  the next run ordinal, so two embodiments of one name are
+	 *  distinguishable (the "invisible live worker" bug class). Absent on
+	 *  legacy entries — the lifecycle backward adapter (src/lifecycle.ts,
+	 *  stateFromManifestWorker) reads their state from the stamps:
+	 *  collectedAt → collected, retire stamps → closed/report-delivered,
+	 *  no stamps → placed-or-started. External consumers of the manifest
+	 *  (the merge result) are unchanged — the field is optional and additive. */
+	embodiment?: { run: number; placementRef: string };
 }
 
 /** F1: cached fleet usage roll-up (aggregateTaskUsage {persist:true}). The
@@ -355,6 +380,19 @@ function atomicWriteFileSync(path: string, content: string): void {
  * Mutate-and-persist the manifest. Must serialize concurrent mutations
  * (use withFileMutationQueue from @earendil-works/pi-coding-agent on the
  * manifest path) so parallel delegate calls cannot clobber each other.
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input:
+ *   - dir: the task's exchange dir
+ *   - mutate: pure fold over the current manifest (may receive a fresh empty
+ *     base when no manifest exists yet)
+ * Output: resolves with the persisted manifest
+ * Guarantees:
+ *   - serialized per path via withFileMutationQueue; atomic write (tmp+rename)
+ *   - creates the dir on demand
+ * Raises:
+ *   - propagates filesystem errors (callers treat manifest writes as
+ *     best-effort bookkeeping and degrade with a warning)
  */
 export function updateManifest(
 	dir: string,
@@ -370,6 +408,116 @@ export function updateManifest(
 		return next;
 	});
 }
+
+// ---------------------------------------------------------------------------
+// Manifest storage port (migration stage 2, audit step 5)
+// ---------------------------------------------------------------------------
+
+/**
+ * The manifest STORAGE PORT: every manifest consumer programs against this
+ * interface, never against the file protocol directly. Four operations (the
+ * audit's 4–5-method seam): read, update, append, scan.
+ * <p>
+ * MODULE_CONTRACT (port):
+ *   - read(dir) — tolerant read; null when absent/corrupt (never throws)
+ *   - update(dir, mutate) — read-modify-write; implementations MUST serialize
+ *     concurrent updates so no mutation is lost (file impl: per-path mutation
+ *     queue; memory impl: synchronous apply inside the async step)
+ *   - append(dir, entry) — add one worker entry (the append-before-start
+ *     write); implemented as an update fold on both implementations
+ *   - scan() — every readable manifest under the store's root, with foreign-
+ *     backend worker entries filtered (the ACTIVE_HOST rule — behavior
+ *     unchanged from scanAllManifests)
+ * Two implementations ship: createFileManifestStore (the production
+ * behavior, byte-identical to the pre-port read/update/scan functions) and
+ * createMemoryManifestStore (in-memory Map — makes the previously
+ * untestable competing-writers class of bugs deterministically testable).
+ * Parity between the two is pinned by test/manifest-store-check.ts.
+ */
+export interface ManifestStore {
+	read(dir: string): ExchangeManifest | null;
+	update(
+		dir: string,
+		mutate: (m: ExchangeManifest) => ExchangeManifest,
+	): Promise<ExchangeManifest>;
+	append(dir: string, entry: ManifestWorker): Promise<ExchangeManifest>;
+	scan(): ExchangeManifest[];
+}
+
+/**
+ * File-backed ManifestStore — the production implementation. Thin delegation
+ * to readManifest/updateManifest/scanAllManifests (the pre-port functions,
+ * kept verbatim so behavior cannot drift).
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: none
+ * Output: a ManifestStore backed by the on-disk manifests under exchangeRoot()
+ * Guarantees:
+ *   - behavior identical to the pre-port readManifest/updateManifest/
+ *     scanAllManifests (parity-pinned by test/manifest-store-check.ts)
+ *   - scan() honors $PI_DELEGATE_EXCHANGE_ROOT at CALL time (test sandboxing)
+ * Raises: per-operation semantics inherit from the wrapped functions (read/
+ *   scan tolerant; update propagates fs errors)
+ */
+export function createFileManifestStore(): ManifestStore {
+	return {
+		read: (dir) => readManifest(dir),
+		update: (dir, mutate) => updateManifest(dir, mutate),
+		append: (dir, entry) =>
+			updateManifest(dir, (m) => ({ ...m, workers: [...m.workers, entry] })),
+		scan: () => scanAllManifests(),
+	};
+}
+
+/**
+ * In-memory ManifestStore — manifests live in a Map keyed by the resolved
+ * task dir. The test double that turns the manifest's competing-writers bug
+ * class (previously reproducible only across processes) into a
+ * deterministic unit test: update() reads and writes within ONE synchronous
+ * step (no await between read and set), so concurrent updates compose
+ * instead of clobbering.
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: none
+ * Output: a ManifestStore keeping all state in process memory
+ * Guarantees:
+ *   - read/update/append/scan parity with the file store for well-formed
+ *     inputs (parity-pinned by test/manifest-store-check.ts)
+ *   - returned manifests are structured clones — callers cannot mutate the
+ *     store's internal state through a read result
+ *   - a fresh dir gets the same base the file impl would write
+ *     ({ task: basename, dir: resolved, workers: [] })
+ *   - scan() applies the same foreign-backend filter as the file impl
+ * Raises: never (no fs access)
+ */
+export function createMemoryManifestStore(): ManifestStore {
+	const manifests = new Map<string, ExchangeManifest>();
+	const store: ManifestStore = {
+		read(dir) {
+			const m = manifests.get(resolve(dir));
+			return m ? (structuredClone(m) as ExchangeManifest) : null;
+		},
+		async update(dir, mutate) {
+			const key = resolve(dir);
+			const current = manifests.get(key);
+			const base: ExchangeManifest = current ?? { task: basename(key), dir: key, workers: [] };
+			const next = mutate(base);
+			manifests.set(key, next);
+			return structuredClone(next) as ExchangeManifest;
+		},
+		append(dir, entry) {
+			return store.update(dir, (m) => ({ ...m, workers: [...m.workers, entry] }));
+		},
+		scan() {
+			return [...manifests.values()].map(filterForeignBackendWorkers);
+		},
+	};
+	return store;
+}
+
+/** The process-default manifest store: file-backed, production behavior.
+ *  Consumers import THIS, never the raw functions. */
+export const manifestStore: ManifestStore = createFileManifestStore();
 
 // ---------------------------------------------------------------------------
 // F1 — fleet usage accounting (task-level description, master link, roll-up)
@@ -1260,20 +1408,12 @@ export function archiveReport(
 		fs.copyFileSync(reportPath, dest);
 
 		// Manifest snapshot: atomic tmp+rename so a concurrent reader never
-		// observes a half-written manifest.json.
+		// observes a half-written manifest.json. Migration stage 2 (audit step 5):
+		// the archive path's SECOND hand-rolled atomic-write implementation is
+		// deleted — the shared atomicWriteFileSync (same file, ONE protocol) is
+		// used instead, so the write protocol has exactly one implementation.
 		const manifestPath = path.join(dir, "manifest.json");
-		const tmp = `${manifestPath}.tmp-${process.pid}-${Date.now()}`;
-		try {
-			fs.writeFileSync(tmp, `${JSON.stringify(manifest, null, "\t")}\n`);
-			fs.renameSync(tmp, manifestPath);
-		} finally {
-			// Best-effort tmp cleanup if rename failed.
-			try {
-				fs.unlinkSync(tmp);
-			} catch {
-				// tmp already gone (renamed) — nothing to do.
-			}
-		}
+		atomicWriteFileSync(manifestPath, `${JSON.stringify(manifest, null, "\t")}\n`);
 		return dest;
 	} catch {
 		// Best-effort by contract: ANY failure → null, never throw.

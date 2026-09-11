@@ -69,6 +69,11 @@
  *   fresh-session-assumption and abort-detaches-never-kills do NOT land
  *   here — their true owners are the transport waitSettle contract (W3) and
  *   the spawn flow (W4).)
+ * Migration stage 2 (audit step 6): the retire stamps (retirableSince /
+ * retiredAt) are lifecycle REDUCER transitions (lifecycle.ts stamp
+ * adapters) — an illegal stamp is refused and logged, never a silent
+ * corrupt. The observer-stamp relocation to a satellite file (audit step
+ * 6/10) is consciously DEFERRED — see the stage-2 report leftovers.
  * Error modes: none thrown to callers — observation degrades (unknown
  * statuses, empty event batches, logged-and-retried retire stamps); the E_*
  * error taxonomy lives in transport.ts.
@@ -84,7 +89,6 @@ import {
 	archiveReport,
 	archiveRoot,
 	listArchivedTasks,
-	readManifest,
 	type TaskUsageSnapshot,
 } from "./exchange.ts";
 import {
@@ -98,10 +102,9 @@ import {
 	readNudgeFailedMarker,
 	readQuestion,
 	releasePathFor,
-	scanAllManifests,
+	manifestStore,
 	TEARDOWN_LOG_NAME,
 	teardownLogLine,
-	updateManifest,
 	validateReport,
 	validateReportAgainstSchema,
 	type ExchangeManifest,
@@ -116,6 +119,7 @@ import {
 	type WorkerView,
 } from "./fleet.ts";
 import { contextPct, formatTokens, parseSessionUsage, resolveContextWindow, WATCH_DEFAULT_STALE_AFTER_MS } from "./usage.ts";
+import { stampRetireClockClear, stampRetireClockStart, stampRetired } from "./lifecycle.ts";
 import {
 	BUDGET_CONFIG_PATH,
 	CONTEXT_CRITICAL_PCT,
@@ -150,7 +154,7 @@ function usageSource(): {
 } {
 	const sessionPathByName = new Map<string, string>();
 	const modelByName = new Map<string, string>();
-	for (const manifest of scanAllManifests()) {
+	for (const manifest of manifestStore.scan()) {
 		for (const w of manifest.workers) {
 			if (w.sessionPath) sessionPathByName.set(w.name, w.sessionPath);
 			if (typeof w.model === "string") modelByName.set(w.name, w.model);
@@ -367,7 +371,7 @@ export function registerStatusTool(pi: import("@earendil-works/pi-coding-agent")
 			for (const dir of fleetDirs) {
 				const snap = aggregateTaskUsage(dir);
 				if (!snap) continue; // no readable manifest → no fleet line
-				lines.push(formatFleetUsageLine(basename(dir), snap, readManifest(dir)?.description));
+				lines.push(formatFleetUsageLine(basename(dir), snap, manifestStore.read(dir)?.description));
 			}
 
 			return {
@@ -778,7 +782,7 @@ export function isWorkerSession(self: SelfIdentity, manifests: ExchangeManifest[
  * FUNCTION_CONTRACT:
  * Input:
  *   - self: this session's identity (sessionFile is the only field consulted)
- *   - manifests: manifests from scanAllManifests() (untyped JSON — may be garbage)
+ *   - manifests: manifests from manifestStore.scan() (untyped JSON — may be garbage)
  * Output: true iff some worker entry names this session as its orchestrator
  * Guarantees:
  *   - tolerant: absent/garbage manifests and worker entries degrade to false
@@ -907,7 +911,7 @@ export async function collectSnapshot(
 	self: SelfIdentity = {},
 	nowMs: number = Date.now(),
 ): Promise<WatchSnapshot> {
-	return workersFromManifests(scanAllManifests(), await readStatusesTolerant(transport), self, nowMs);
+	return workersFromManifests(manifestStore.scan(), await readStatusesTolerant(transport), self, nowMs);
 }
 
 // ---------------------------------------------------------------------------
@@ -1427,10 +1431,46 @@ async function stampWorkerField(
 	w: WatchWorker,
 	patch: (x: ExchangeManifest["workers"][number]) => ExchangeManifest["workers"][number],
 ): Promise<void> {
-	await updateManifest(w.dir, (m) => ({
+	await manifestStore.update(w.dir, (m) => ({
 		...m,
 		workers: m.workers.map((x) => (x.name === w.name ? patch(x) : x)),
 	}));
+}
+
+/**
+ * Migration stage 2 (audit step 6): every retire stamp is now a REDUCER
+ * transition (lifecycle.ts owns the state machine) — the stamp helper
+ * validates against the entry's derived state and, on refusal, keeps the
+ * entry unchanged and logs (the pass is advisory; a refused stamp is
+ * retried/advised next tick, never a silent corrupt).
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input:
+ *   - w: the watched worker
+ *   - stamp: the lifecycle stamp adapter (pure validate-then-patch)
+ *   - what: short label for the refusal log line
+ * Output: resolves when the (possibly refused) stamp attempt settled
+ * Guarantees:
+ *   - an illegal stamp NEVER corrupts the entry (refusal → entry unchanged)
+ *   - refusals are logged, not thrown — the retire pass stays advisory
+ * Raises: never (manifest write failures propagate as before)
+ */
+async function stampWorkerViaLifecycle(
+	w: WatchWorker,
+	stamp: (x: ExchangeManifest["workers"][number]) =>
+		| { ok: true; entry: ExchangeManifest["workers"][number] }
+		| { ok: false; error: string },
+	what: string,
+	log: (m: string) => void,
+): Promise<void> {
+	await stampWorkerField(w, (x) => {
+		const r = stamp(x);
+		if (!r.ok) {
+		log(`retire stamp refused (${what}) for worker ${w.name}: ${r.error}`);
+		return x; // advisory — keep the entry, the pass re-evaluates next tick
+		}
+		return r.entry;
+	});
 }
 
 /**
@@ -1498,14 +1538,21 @@ export async function retirePass(
 			const outcome = evaluateRetire(w, { nowMs, ttlMs: opts.retireTtlMs });
 			if (outcome.retirable && !outcome.decision && w.retirableSince === undefined) {
 				// Became retirable THIS tick — start the TTL clock, persisted.
-				await stampWorkerField(w, (x) => ({ ...x, retirableSince: new Date(nowMs).toISOString() }));
+				// Migration stage 2: the stamp goes through the lifecycle reducer.
+				await stampWorkerViaLifecycle(
+					w,
+					(x) => stampRetireClockStart(x, new Date(nowMs).toISOString()),
+					"retire clock start",
+					log,
+				);
 				continue;
 			}
 			if (!outcome.retirable && w.retirableSince !== undefined) {
 				// The state broke (new question, report rewritten bad, back to
 				// working…) — clear the clock; the next retirable transition
-				// restarts the TTL from that moment.
-				await stampWorkerField(w, (x) => ({ ...x, retirableSince: undefined }));
+				// restarts the TTL from that moment. Migration stage 2: reducer-
+				// validated (a clock clear is refused when no clock runs).
+				await stampWorkerViaLifecycle(w, (x) => stampRetireClockClear(x), "retire clock clear", log);
 				continue;
 			}
 			if (outcome.decision) {
@@ -1531,7 +1578,15 @@ export async function retirePass(
 					// re-thrown (advisory retry next tick).
 					throw err;
 				}
-				await stampWorkerField(w, (x) => ({ ...x, retiredAt: new Date(nowMs).toISOString() }));
+				// Migration stage 2: the retiredAt stamp is a reducer transition
+				// (closed, explicit watcher force) — an already-closed entry can
+				// never be re-stamped into rewritten history.
+				await stampWorkerViaLifecycle(
+					w,
+					(x) => stampRetired(x, new Date(nowMs).toISOString()),
+					"retired close stamp",
+					log,
+				);
 				// Archive at retire (diag-retire-msg Q3 item 1): a TTL close of an
 				// UNCOLLECTED report must not orphan it — without this, the report
 				// survives in /tmp only as a silent artifact and every evidence path
@@ -1540,7 +1595,7 @@ export async function retirePass(
 				// rewritten in place) → idempotent by construction. Best-effort by
 				// contract: a failure never blocks the close.
 				try {
-					const manifest = readManifest(w.dir);
+					const manifest = manifestStore.read(w.dir);
 					if (manifest) archiveReport(w.dir, w.reportPath, manifest as unknown as Record<string, unknown>);
 				} catch {
 					// archive is advisory — the retiredAt stamp already guards history
@@ -1606,7 +1661,7 @@ export interface WatcherDeps {
 	self?: SelfIdentity;
 	detect?: DetectOptions;
 	/** Snapshot source override (tests drive fixtures; production uses
-	 *  collectSnapshot over scanAllManifests + the injected transport). */
+	 *  collectSnapshot over manifestStore.scan() + the injected transport). */
 	snapshot?: () => Promise<WatchSnapshot>;
 	/** Advisory log sink (console.error by default). */
 	log?: (msg: string) => void;
