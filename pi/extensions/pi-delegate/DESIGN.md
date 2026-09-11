@@ -97,6 +97,12 @@ pi-delegate/
 │   │                         #   (name + run ordinal + placementRef), validate-then-patch
 │   │                         #   manifest stamps. Every stamp write is a reducer
 │   │                         #   transition — illegal ones are structured refusals
+│   ├── compose.ts            # watcher composition (§21.1 F6): mountSessionWatcher —
+│   │                         #   the TWO-TIER mount decision in one place: a PURE
+│   │                         #   manifest worker mounts NO watcher, a worker-
+│   │                         #   orchestrator that owns child manifests mounts one
+│   │                         #   scoped to its own children (mounted = !isWorker ||
+│   │                         #   ownsChildren). index.ts only calls the composer
 │   └── expaths.ts            # portable (Windows + POSIX) path builders for the exchange
 │                             #   layer; node:path only, never imports another src/ module
 └── test/                     # QA harness (regression checks per field incident; see
@@ -171,7 +177,11 @@ Parameters (typebox):
 | `provider` | string | tier/defaults-resolved | no built-in |
 | `model` | string | tier/defaults-resolved | no built-in |
 | `thinking` | string | tier/defaults-resolved | no built-in |
-| `timeoutMs` | number | 900000 | settle timeout for prompt (`agent wait`) |
+| `timeoutMs` | number | — | DEPRECATED alias for `waitMs` — CAPPED at 120000 ms unless `waitMs` is set explicitly (a legacy large value auto-detaches at the cap through E_TIMEOUT) |
+| `waitMs` | number | `watch.settleGateMs` (15 s) | how long the call BLOCKS waiting for the worker; at the cap the call auto-detaches (end your turn — the watcher wakes you); long waits are explicit opt-in |
+| `releaseOn` | `"started" \| "settle"` | `watch.releaseOn` in config | `"settle"` blocks the full window unless the worker settles inline; `"started"` releases as soon as the worker is proven started and working; never applies to probes |
+| `budgetTokens` | number | config `defaults.budgetTokens` / code constant | output-token cap (Σ output across assistant messages); over-budget re-spawn is refused with E_BUDGET |
+| `maxContextPct` | number (10–99) | 80 | context-window % refusal line; re-spawning a worker at/over this context % is refused with E_CONTEXT |
 | `extraArgs` | string[] | `[]` | appended after `--` (e.g. `--session`) |
 
 Behavior:
@@ -223,10 +233,23 @@ audit format and the same advisory contract.
 
 ```
 /tmp/exchange/{TASK}/
-├── manifest.json        # written by extension; source of truth for teardown/audit
-├── brief-<name>.md      # written by orchestrator (model), validated by tool
-└── report-<name>.json   # written by worker; validated against fixed schema on collect
+├── manifest.json                  # written by extension; source of truth for teardown/audit
+├── brief-<name>.md                # written by orchestrator (model), validated by tool
+├── report-<name>.json             # written by worker; validated against fixed schema on collect
+├── q-<name>.json                  # worker → orchestrator question (§12)
+├── a-<name>.json                  # orchestrator → worker answer/steering (§12)
+├── q-<name>.answered-<ts>.json    # the question renamed when its posted answer consumes it (§12)
+├── release-<name>.json            # orchestrator's retire ACK; the watcher closes the pane (§23)
+├── nudge-failed-<name>.json       # marker: a mailbox answer/steer failed to reach the pane after retries (§21)
+├── p-<name>.jsonl                 # worker progress pings, one JSON event per line, append-only (§18)
+├── teardown.log                   # shared teardown audit trail — manual + auto-after-collect (§5.3, §22.1)
+├── watch-<key>.json               # per-watcher satellite layer: retire stamps; key = FNV-1a
+│                                  #   (8 hex) of the watcher session's path, or "anon" (§23.3)
+└── delivered-<key>.json           # per-audience durable delivered-facts store, one file per session (§21.1b)
 ```
+
+Probe runs exchange under the sibling `<exchangeRoot>/_probe/` directory instead (no report
+is ever expected there).
 
 **Report schema (fixed, v1 — strict contract):**
 
@@ -341,10 +364,14 @@ of re-flattening it positionally:
   when one is available; file answer is the fallback), then re-prompts via
   `delegate_mailbox`.
 - **New tool `delegate_mailbox`** (orchestrator-facing):
-  - `action: "read" | "answer" | "steer"`, `name`, `text?`.
+  - `action: "read" | "answer" | "steer" | "release"`, `name`, `text?`.
   - `read` → pending question(s), never mutates.
   - `answer` → write `a-<name>.json` + nudge prompt ("mailbox answer posted — read
     a-<name>.json and continue"); same for `steer` (mid-run guidance).
+  - `release` (v1.15) → post the §23 retire ACK: writes `release-<name>.json` —
+    no text, no nudge (release is a retirement signal, not worker mail); the watcher
+    closes the worker's pane once it is retirable. Honored only when `watch.retire`
+    is on; while disabled it is an honest no-op that deletes any stale marker.
 - `delegate_status` shows pending Q/A per worker.
 
 ## 13. v1.2 DoD
@@ -785,6 +812,7 @@ workers' session JSONL (usage gauges + a tail-window tool-call scan).
 | `report-ready` | readable report at manifest `reportPath`, passes `validateReport` | report path + verdict + "read it and verify against the brief" |
 | `report-invalid` | report file exists but fails validation (the distinct message of the same detection) | quoted validation error + "read the pane, diagnose, diagnosed retry" |
 | `mailbox-question` | `q-<name>.json` holds a valid envelope | question text + options + "answer via `delegate_mailbox` (action 'answer')" |
+| `nudge-failed` | a mailbox answer/steer whose pane nudge failed after bounded retries (the tool wrote the `nudge-failed-<name>.json` marker) | "the answer IS posted at `a-<name>.json` — re-prompt the pane manually or retry the steer" (a subsequent successful nudge clears the marker) |
 | `grill-deck` | worker's session JSONL contains a `grill_deck` toolCall | "blocked on an interactive deck in its OWN pane — only a human there can answer (or steer it to the mailbox)" |
 | `context-critical` | `contextPct ≥ CONTEXT_CRITICAL_PCT` (90) vs `resolveContextWindow(model)` | pct + "steer it to wrap up now / plan a fresh-name retry" |
 | `worker-dead` | the worker's episode ended with NO report on disk: herdr no longer knows the agent (gone from the host), or the worker settled (done/idle in herdr) without ever writing one (watcher stage C — guideline §6.2.1) | "no report — exited/finished without producing anything — read the pane, then diagnosed retry" |
@@ -925,10 +953,12 @@ none of them can corrupt a spawn or a collect result). One fix shape each:
   to "since this session started".
   **DONE in v1.11.1** (field: a worker pane received its orchestrator's wake-up
   and got confused; every session mounted its own watcher over the global
-  manifests). Two layers: `isWorkerSession` gate — a manifest worker session
-  mounts NO watcher (`index.ts` session_start); spawn records
-  `orchestratorSessionPath` (live `getSessionFile()` getter) and
-  `detectWorkerEvents` silences workers owned by another session.
+  manifests). Two layers, with the mount gate TWO-TIER since the F6 contract
+  (`mountSessionWatcher` in `src/compose.ts`): `mounted = !isWorker ||
+  ownsChildren` — a PURE manifest worker mounts NO watcher, but a worker-
+  orchestrator that owns child manifests DOES mount one, scoped to its own
+  children; spawn records `orchestratorSessionPath` (live `getSessionFile()`
+  getter) and `detectWorkerEvents` silences workers owned by another session.
   **Watcher stage A — delivery is FAIL-CLOSED** (normative source:
   WATCHER-ARCHITECTURE-GUIDELINE.md §3.5/§3.6): the old fail-open on legacy
   manifests (no owner field anywhere) and degraded self-ids is GONE. One
@@ -1307,11 +1337,28 @@ no TTL wait.
   (including the sub-orchestrator worktree authority guard). The retire pass
   reuses it; no new transport method, no duplication.
 - **Persisted clock.** The first tick all three conditions hold stamps
-  `retirableSince` (ISO) into the manifest worker entry — NEVER memory-only
-  (a watcher restart must not lose the TTL clock). When the state breaks
-  (a new question, the report rewritten invalid, back to working), the stamp
-  clears; the next retirable transition restarts the TTL.
-- **The close stamp.** On successful close the entry gains `retiredAt` — the
+  `retirableSince` (ISO) into the watcher's SATELLITE file
+  `watch-<watcherKey>.json` in the task dir — NEVER memory-only
+  (a watcher restart must not lose the TTL clock). The manifest is the
+  spawning session's single-writer artifact and is not touched by the
+  watcher; the stamps live in the satellite layer instead (see below).
+  When the state breaks (a new question, the report rewritten invalid, back
+  to working), the stamp clears; the next retirable transition restarts the
+  TTL.
+- **The watch-<key>.json satellite convention.** One satellite file per
+  WATCHER session per task dir (`watch-<watcherKey>.json`, built by
+  `watchStampsPathFor` in `src/exchange.ts`); the watcherKey is the 8-hex
+  FNV-1a hash of the watcher's own session JSONL path (`watcherKeyFor`),
+  or the literal `anon` when the session's identity is degraded. The file
+  shape is `{ watcherKey, stamps }` where `stamps` maps a worker name to
+  `{ retirableSince?, retiredAt? }` (only non-empty string stamps are
+  kept). There is exactly ONE writer per file by construction — the file
+  name carries the watcher key, so two watcher sessions never write the
+  same file. Readers merge the manifest layer with all satellite layers
+  (`readWatchStampLayers`); for each stamp the EARLIEST value wins, so one
+  watcher's stale clock can never extend another watcher's TTL.
+- **The close stamp.** On successful close the satellite gains the worker's
+  `retiredAt` (same `watch-<watcherKey>.json` layer as above) — the manifest
   entry is NEVER deleted (history stays), and a retired entry silences every
   watcher event kind (worker-dead above all: the close itself is the expected
   cause of any herdr absence). The close also CONSUMES the ACK marker

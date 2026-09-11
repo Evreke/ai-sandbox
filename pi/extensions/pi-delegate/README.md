@@ -55,7 +55,9 @@ a **validated JSON report** is on disk — never when the agent status says done
   collect discipline; parallelism never removes the per-call preparation.
 - **Event-driven watcher.** You are woken only when attention is needed: report ready or
   invalid, mailbox question, worker blocked on an interactive deck, context critical (≥90%),
-  worker died without a report, collected-but-still-mounted worker. No `sleep 1500`.
+  worker died without a report, collected-but-still-mounted worker, failed mailbox nudge
+  (`nudge-failed` — a posted answer/steer could not reach the pane after retries; delivered
+  via the `nudge-failed-<name>.json` marker instead of the socket). No `sleep 1500`.
   Delivered facts are durable: a session restart does NOT re-wake you on already-delivered
   facts (one file per session per task directory). Emergency rollback:
   `watch.durableDelivery: false`. One-time note: the first run after upgrading on a
@@ -73,7 +75,8 @@ a **validated JSON report** is on disk — never when the agent status says done
 - **Clean teardown.** Interactive `/delegate-teardown`, auto-cleanup after a collected
   report, full audit in `teardown.log`.
 - **Honest errors.** Every refusal is a structured code with a recovery hint:
-  `E_BRIEF`, `E_NAME`, `E_TIER`, `E_PLACE`, `E_START`, `E_TIMEOUT`, `E_BUDGET`, `E_CONTEXT`,
+  `E_BRIEF`, `E_NAME`, `E_TIER`, `E_PLACE`, `E_START`, `E_PROMPT_STALLED`, `E_TIMEOUT`,
+  `E_TEARDOWN`, `E_STATUS`, `E_BUDGET`, `E_CONTEXT`,
   `E_REPORT_MISSING`, `E_REPORT_INVALID`.
 
 ### How it automates the routine
@@ -171,7 +174,9 @@ done/idle.
   collect-дисциплину; параллельность не отменяет подготовку каждого вызова.
 - **Event-driven вотчер.** Будит только когда нужен ход: отчёт готов или бит, вопрос через
   почтовый ящик, воркер завис на интерактивном grill-deck, контекст критический (≥90%),
-  воркер умер без отчёта, собранный воркер всё ещё висит. Никаких `sleep 1500`.
+  воркер умер без отчёта, собранный воркер всё ещё висит, неудачный пуш письма в панель
+  (`nudge-failed` — ответ/steer не дошёл до панели после ограниченного числа повторов;
+  доставляется маркером `nudge-failed-<имя>.json` вместо сокета). Никаких `sleep 1500`.
 - **Почтовый ящик.** `q-<имя>.json` / `a-<имя>.json` — докидывайте уточнения работающему
   воркеру и отвечайте на его вопросы без пересоздания.
 - **Строгие отчёты.** Критерий завершения — **валидный JSON-отчёт** с evidence
@@ -184,7 +189,8 @@ done/idle.
 - **Чистая уборка.** Интерактивный `/delegate-teardown`, автоборка после собранного
   отчёта, полный аудит в `teardown.log`.
 - **Честные ошибки.** Каждый отказ — структурный код с подсказкой:
-  `E_BRIEF`, `E_NAME`, `E_TIER`, `E_PLACE`, `E_START`, `E_TIMEOUT`, `E_BUDGET`, `E_CONTEXT`,
+  `E_BRIEF`, `E_NAME`, `E_TIER`, `E_PLACE`, `E_START`, `E_PROMPT_STALLED`, `E_TIMEOUT`,
+  `E_TEARDOWN`, `E_STATUS`, `E_BUDGET`, `E_CONTEXT`,
   `E_REPORT_MISSING`, `E_REPORT_INVALID`.
 
 ### Как автоматизирует рутину
