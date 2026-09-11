@@ -19,16 +19,9 @@ import { basename } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isProbeDir, manifestStore, progressPathFor, readLastProgress } from "./src/exchange.ts";
 import { buildWorkerView, classifyOwnership, type SelfIdentity } from "./src/fleet.ts";
-import {
-	isWorkerSession,
-	ownsChildManifests,
-	registerCommands,
-	registerStatusTool,
-	startWatcher,
-	stopWatcher,
-} from "./src/observe.ts";
+import { registerCommands, registerStatusTool, stopWatcher } from "./src/observe.ts";
+import { mountSessionWatcher } from "./src/compose.ts";
 import { contextPct, parseSessionUsage, resolveContextWindow } from "./src/usage.ts";
-import { pruneArchive } from "./src/exchange.ts";
 import { disposeFleetUI, mountFleetUI, type FleetWidgetRow as FleetRow, type FleetUIDeps } from "./src/fleet.ts";
 import { createHerdrTransport } from "./src/herdr/host.ts";
 import { BUDGET_CONFIG_PATH, DelegateErrorImpl, type Transport } from "./src/host.ts";
@@ -153,10 +146,8 @@ async function readManifestExtras(dir: string, name: string): Promise<ManifestEx
  *   - creates ONE herdr transport and registers delegate/status/mailbox tools
  *     and the /delegate-* commands on it
  *   - session_start #1: mounts the ambient fleet UI (hasUI-guarded)
- *   - session_start #2: mounts the event watcher for every session EXCEPT
- *     PURE manifest workers (F6: a worker-orchestrator that OWNS child
- *     manifests still mounts one — scoped to its own children by the
- *     detectWorkerEvents ownership gate); prunes the archive
+ *   - session_start #2: calls the watcher composer (src/compose.ts) — the
+ *     "worker or orchestrator" mount decision lives there; prunes the archive
  *   - session_shutdown: disposes the fleet UI + stops the watcher (no timer
  *     outlives the session)
  * Guarantees:
@@ -240,23 +231,11 @@ export default function (pi: ExtensionAPI) {
 	// behind ctx.hasUI: the wake-up matters headless too (rpc/print). Start is
 	// idempotent (module registry, double-start replaces) and every failure is
 	// advisory, so a broken watcher can never affect spawn/collect outcomes.
-	// v1.11.x ownership fix (two layers): (1) a session that is itself a manifest
-	// worker mounts NO watcher — it is someone's fleet row, not an audience, and
-	// the orchestrator's "DELEGATE WATCHER — …" wake-up would just confuse it;
-	// (2) spawn records the orchestrator's session path (orchestratorSessionPath)
-	// and detectWorkerEvents silences workers owned by ANOTHER session, so N
-	// mounted watchers no longer mean N copies of every event.
-	// F6 (two-tier wake-up, 2026-09-10 field report): the worker gate is SCOPED,
-	// not absolute — a tier-1 lead is a worktree WORKER of the meta session (so
-	// isWorkerSession matches it) while ALSO the orchestrator of its own child
-	// manifests (their orchestratorSessionPath = its own session file). Such a
-	// worker-orchestrator mounts a watcher too: its OWN children fire because
-	// their orchestratorSessionPath equals its session file, while its PARENT's
-	// manifest workers are silenced for it by the existing ownership gate in
-	// detectWorkerEvents (orchestratorSessionPath !== its session file → []) —
-	// so F1 scoping stays intact (verified in observe.ts). A PEER orchestrator
-	// (nobody's worker) mounts as before; only a PURE worker (nobody's
-	// orchestrator) stays watcher-less.
+	// Migration stage 3 (audit step 10): the "worker or orchestrator" decision
+	// and the mount live in the composer (src/compose.ts, mountSessionWatcher)
+	// — index.ts only derives the (degradable) self-id and calls it. The F6
+	// two-tier contract (a worker-orchestrator that owns child manifests still
+	// mounts; a PURE worker stays watcher-less) is documented and tested there.
 	pi.on("session_start", async (_event, ctx) => {
 		let sessionFile: string | undefined;
 		try {
@@ -264,12 +243,12 @@ export default function (pi: ExtensionAPI) {
 		} catch {
 			sessionFile = undefined; // degraded self-id — the gate decides with what is known
 		}
-		const self = { sessionFile, cwd: ctx.cwd };
-		const manifests = manifestStore.scan(transport.backendName());
-		if (!isWorkerSession(self, manifests) || ownsChildManifests(self, manifests)) {
-			startWatcher(pi, transport, { cwd: ctx.cwd, sessionManager: ctx.sessionManager });
-		}
-		pruneArchive(); // §19.3 retention: once per session start, best-effort, never throws
+		mountSessionWatcher({
+			pi,
+			transport,
+			self: { sessionFile, cwd: ctx.cwd },
+			sessionManager: ctx.sessionManager,
+		});
 	});
 
 	// Session-end cleanup (quality fix A7): mountFleetUI's 2 s poll (herdr
