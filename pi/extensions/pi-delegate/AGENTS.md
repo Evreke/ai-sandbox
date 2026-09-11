@@ -1,5 +1,10 @@
 # pi-delegate — agent glossary
 
+> **Binding constitution.** `ARCHITECTURE.md` (in this directory) binds every
+> agent that touches this extension; the ten laws there are the layer above
+> DESIGN.md. Where ARCHITECTURE.md and the prose conventions in this file or in
+> DESIGN.md conflict, ARCHITECTURE.md outranks them.
+
 Vocabulary for this extension. One rule: **"worktree" names the isolation mechanism, "checkout" names the path.** They are complementary, never synonyms — code pairs them deliberately (`Placement.kind: "worktree"` carries a `checkoutPath`).
 
 ## Terms

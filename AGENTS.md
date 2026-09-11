@@ -1,5 +1,20 @@
 # ai-sandbox — repo instructions
 
+## pi-delegate — the binding constitution
+
+Every agent working on this repository — on the extension, its tests, its docs or
+the bundle around them — is bound by
+`pi/extensions/pi-delegate/ARCHITECTURE.md`. It is the layer above DESIGN.md:
+DESIGN says how the system is built, ARCHITECTURE says what we will and will not
+do to it, and why. Its ten laws (details and enforcement in the document itself,
+no restatement here): the platform is the API — import, never reimplement;
+contracts must be true; session lifetime owns everything mounted in it; the seam
+stays deep and backend-blind; modules are responsibilities, not parking lots;
+layering is enforced by machine, not by prose; on-disk formats are versioned
+contracts; errors are structured and deviations from pi conventions are
+documented; one artifact, one source of truth; every fixed bug buys a regression
+check.
+
 ## Workflow — trunk-based development (TBD)
 
 `main` is the trunk: always green, always releasable. **No direct commits to
