@@ -58,7 +58,7 @@
  * Error modes: never throws — refusals are {ok:false, error} results.
  */
 
-import type { ManifestWorker } from "./exchange.ts";
+import type { ManifestWorker } from "./manifest-store.ts";
 
 // ---------------------------------------------------------------------------
 // Report-ownership witness (migration stage 3, audit step 8)

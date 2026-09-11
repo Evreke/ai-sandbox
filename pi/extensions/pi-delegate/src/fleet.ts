@@ -63,16 +63,14 @@ import { stat } from "node:fs/promises";
 import { basename } from "node:path";
 import type { ExtensionCommandContext, ExtensionContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import {
-	answerPathFor,
 	exchangeRoot,
 	isProbeDir,
-	manifestStore,
-	mergeRetireStamps,
 	progressPathFor,
-	questionPathFor,
 	readLastProgress,
-	readWatchStampLayers,
 } from "./exchange.ts";
+import { manifestStore } from "./manifest-store.ts";
+import { answerPathFor, questionPathFor } from "./mailbox-store.ts";
+import { mergeRetireStamps, readWatchStampLayers } from "./watch-store.ts";
 import { taskSlug } from "./expaths.ts";
 import { workerAudienceMatch } from "./watch-role.ts";
 import { contextPct, parseSessionUsage, resolveContextWindow, WATCH_DEFAULT_STALE_AFTER_MS } from "./usage.ts";

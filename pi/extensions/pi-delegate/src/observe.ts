@@ -117,44 +117,42 @@ import { appendFile, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { aggregateTaskUsage, exchangeRoot } from "./exchange.ts";
+import { archiveReport, archiveRoot, listArchivedTasks } from "./archive.ts";
+import { type TaskUsageSnapshot } from "./manifest-store.ts";
 import {
-	aggregateTaskUsage,
 	appendDeliveredRecords,
-	archiveReport,
-	archiveRoot,
 	deleteWorkerDeliveryRecords,
 	deliveryRecordKey,
 	deliveredStorePathFor,
-	exchangeRoot,
-	listArchivedTasks,
 	readDeliveredStore,
-	type TaskUsageSnapshot,
-} from "./exchange.ts";
+} from "./watch-store.ts";
 import {
 	answerPathFor,
-	isProbeDir,
 	nudgeFailedPathFor,
-	parseBriefSchema,
-	progressPathFor,
 	questionPathFor,
-	readLastProgress,
 	readNudgeFailedMarker,
 	readQuestion,
 	readQuestionState,
-	readWatchStampLayers,
 	releasePathFor,
-	manifestStore,
-	mergeRetireStamps,
-	TEARDOWN_LOG_NAME,
+} from "./mailbox-store.ts";
+import { TEARDOWN_LOG_NAME } from "./expaths.ts";
+import { parseBriefSchema, validateReport, validateReportAgainstSchema } from "./report-schema.ts";
+import {
+	isProbeDir,
+	progressPathFor,
+	readLastProgress,
 	teardownLogLine,
+} from "./exchange.ts";
+import { manifestStore, type ExchangeManifest } from "./manifest-store.ts";
+import {
+	mergeRetireStamps,
+	readWatchStampLayers,
 	updateWatchStamps,
-	validateReport,
-	validateReportAgainstSchema,
 	watcherKeyFor,
 	type DeliveryRecord,
-	type ExchangeManifest,
 	type RetireStamps,
-} from "./exchange.ts";
+} from "./watch-store.ts";
 import {
 	buildWorkerView,
 	clampLines,

@@ -42,7 +42,8 @@
  * throw (production collaborators never do).
  */
 
-import { manifestStore, pruneArchive } from "./exchange.ts";
+import { pruneArchive } from "./archive.ts";
+import { manifestStore } from "./manifest-store.ts";
 import { isWorkerSession, ownsChildManifests, startWatcher } from "./observe.ts";
 import type { SelfIdentity } from "./observe.ts";
 import type { Transport } from "./host.ts";

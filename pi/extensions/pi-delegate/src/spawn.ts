@@ -105,30 +105,28 @@ import { type Static, Type } from "typebox";
 import { CONFIG_DIR_NAME, getAgentDir, type Theme } from "@earendil-works/pi-coding-agent";
 import {
 	aggregateTaskUsage,
-	answerPathFor,
 	applyFleetTaskFields,
-	archiveReport,
 	describeFleet,
 	ensureExchangeDir,
 	exchangeRoot,
 	isProbeDir,
 	persistTaskUsageSnapshot,
 	progressPathFor,
-	questionPathFor,
 	readLastProgress,
-	manifestStore,
+	reportPathFor,
+	teardownLogLine,
+} from "./exchange.ts";
+import { archiveReport } from "./archive.ts";
+import { manifestStore, type ManifestWorker } from "./manifest-store.ts";
+import { parseBriefSchema, resolveReportSchema, validateReport, validateReportAgainstSchema } from "./report-schema.ts";
+import {
+	answerPathFor,
+	questionPathFor,
 	readQuestion,
 	releasePathFor,
-	reportPathFor,
-	resolveReportSchema,
-	TEARDOWN_LOG_NAME,
-	teardownLogLine,
-	validateReport,
-	validateReportAgainstSchema,
 	writeAnswer,
 	writeRelease,
-	type ManifestWorker,
-} from "./exchange.ts";
+} from "./mailbox-store.ts";
 import {
 	contextPct,
 	formatBudgetLine,
@@ -149,8 +147,8 @@ import {
 	reportWitnessProvesRun,
 	stampCollected,
 } from "./lifecycle.ts";
-import { nudgeFailedPathFor } from "./exchange.ts";
-import { probeDirPathFor, questionArchivePathFor } from "./expaths.ts";
+import { nudgeFailedPathFor } from "./mailbox-store.ts";
+import { probeDirPathFor, questionArchivePathFor, TEARDOWN_LOG_NAME } from "./expaths.ts";
 import { clampLines, notifyFleetIdle, renderDelegateLines } from "./fleet.ts";
 import {
 	CONTEXT_CRITICAL_PCT,

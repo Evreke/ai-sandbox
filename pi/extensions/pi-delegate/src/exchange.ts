@@ -1,94 +1,90 @@
 /**
- * pi-delegate — src/exchange.ts (W3 refactor: merged module).
+ * pi-delegate — src/exchange.ts (Wave 3a: exchange-root conventions module
+ * + the transition facade).
  *
- * MODULE_CONTRACT — the exchange dir: report/schema/mailbox-file lifecycle
- * + the durable report archive.
+ * MODULE_CONTRACT — the exchange dir conventions and the F1 fleet
+ * accounting; facade for the extracted exchange-layer modules.
  *
- * Purpose: /tmp/exchange/<task>/ conventions — brief/manifest/report path
- * rules, the manifest read/update protocol, strict report validation (v1
- * base schema + brief-declared reportSchema fragments incl. $extends
- * resolution), the mailbox file lifecycle (q-/a- envelopes, §23 release
- * marker) and progress-ping reads — plus the report archive under
- * ~/.pi/agent/delegate-archive (§19.3).
+ * Purpose: /tmp/exchange/<task>/ conventions — the exchange root rule
+ * (exchangeRoot, incl. the $PI_DELEGATE_EXCHANGE_ROOT test override and the
+ * win32 default), brief validation + dir opening (ensureExchangeDir,
+ * ExchangeDir), the conventional report path (reportPathFor), the shared
+ * dir/file classifiers (isProbeDir, teardownLogLine), the F1 fleet
+ * accounting section (describeFleet, applyFleetTaskFields,
+ * aggregateTaskUsage, persistTaskUsageSnapshot + TaskUsageSnapshot types)
+ * and the progress-ping reads (progressPathFor, readLastProgress).
  *
- * Dependencies: @earendil-works/pi-coding-agent (parseFrontmatter,
- * withFileMutationQueue), typebox/value entry (deep specifiers are BLOCKED
- * by typebox 1.3.7's exports map — see the note in the import block),
- * node builtins, and ./host.ts (types + envelope guards ONLY — never
- * the herdr implementation). Also owns the shared exchange-dir conventions
- * as single-source constants (probe dir suffix, teardown audit trail name
- * + line format) — migration stage 1.
+ * Wave 3a decomposition (bodies byte-verbatim, one module per
+ * responsibility; ARCHITECTURE.md Law 5):
+ *   - src/archive.ts — the durable report archive + TTL prune
+ *     (archiveRoot, archiveReport, ARCHIVE_TTL_MS, pruneArchive,
+ *     listArchivedTasks).
+ *   - src/manifest-store.ts — manifest types + read/update protocol + the
+ *     ManifestStore port and its two implementations + scanAllManifests.
+ *   - src/report-schema.ts — strict report validation + the brief-declared
+ *     schema library ($extends resolution).
+ *   - src/mailbox-store.ts — the q-/a-/release-/nudge-failed- envelope
+ *     lifecycle (wire format FROZEN).
+ *   - src/watch-store.ts — the watcher satellite persistence (retire-stamp
+ *     layers + the durable delivered-facts store).
  *
- * Exported surface (union of the two merged sources, verbatim, plus the F1
- * fleet-accounting section, plus the migration-stage-2 manifest storage
- * port):
- *   - manifest/fs: ensureExchangeDir, ExchangeDir, ExchangeManifest,
- *     ManifestWorker, readManifest, updateManifest, scanAllManifests,
- *     reportPathFor
- *   - manifest storage port (migration stage 2, audit step 5): ManifestStore
- *     (read/update/append/scan), createFileManifestStore,
- *     createMemoryManifestStore, manifestStore (the process default, file-
- *     backed). ALL manifest consumers (spawn, observe, fleet, index, the
- *     fake host adapter) go through the port — the raw functions remain
- *     exported as the file implementation's building blocks and for tests.
+ * TEMPORARY TRANSITION FACADE: every symbol moved by Wave 3a is re-exported
+ * from here (see the facade block below the imports), so existing import
+ * sites keep resolving unchanged. All src/ sites are already flipped to the
+ * new modules; the facade remains for the test suite and any external
+ * consumers and goes away one release after the flip (the plan's
+ * no-big-bang rule). New code must import from the owning module.
  *
- * Manifest format (migration stage 2, audit step 6): ManifestWorker gained
- * the ONE optional extension field `embodiment` (run ordinal + placementRef
- * — the embodiment identity; semantics live in src/lifecycle.ts, the single
+ * Dependencies: @earendil-works/pi-coding-agent (withFileMutationQueue via
+ * updateManifest — through the manifest-store module), node builtins,
+ * ./host.ts (types + guards ONLY — never the herdr implementation),
+ * ./usage.ts (parseSessionUsage for the F1 roll-up), ./expaths.ts (the ONE
+ * path builder), and the extracted modules.
+ *
+ * Manifest format (migration stage 2): ManifestWorker carries the ONE
+ * optional extension field `embodiment` (run ordinal + placementRef — the
+ * embodiment identity; semantics live in src/lifecycle.ts, the single
  * lifecycle owner). Legacy entries without it are read by the backward
  * adapter; external consumers of the manifest are unchanged.
- *   - F1 fleet accounting: TaskUsageSnapshot, describeFleet,
- *     applyFleetTaskFields, aggregateTaskUsage
- *   - reports/schemas: validateReport, validateReportAgainstSchema,
- *     parseBriefSchema, resolveReportSchema, resolveReportSchemaInDir,
- *     loadLibrarySchema
- *   - mailbox: questionPathFor, answerPathFor, releasePathFor,
- *     ReleaseEnvelope, readQuestion, readQuestionState (watcher stage C:
- *     read-with-reason for the corrupt-q audit, guideline §6.2.5),
- *     writeAnswer, writeRelease, progressPathFor, readLastProgress
- *   - archive: ARCHIVE_TTL_MS, archiveRoot, archiveReport,
- *     pruneArchive, listArchivedTasks
  *
- * Critical invariants OWNED here (report-ref-map.json hiddenInvariants):
- *   - append-before-start (manifest side): worker entries are appended by
- *     the spawn flow THROUGH updateManifest (after place(), before
- *     startAgent()); on a refused start the caller rolls back exactly the
- *     entry its own call appended (name + this paneId + no sessionPath) —
- *     updateManifest's withFileMutationQueue serialization is what makes
- *     that claim/rollback protocol safe against parallel spawns.
+ * Critical invariants (report-ref-map.json hiddenInvariants; ownership with
+ * the module that implements each):
+ *   - append-before-start (manifest side, src/manifest-store.ts): worker
+ *     entries are appended by the spawn flow THROUGH updateManifest (after
+ *     place(), before startAgent()); on a refused start the caller rolls
+ *     back exactly the entry its own call appended (name + this paneId + no
+ *     sessionPath) — updateManifest's withFileMutationQueue serialization
+ *     is what makes that claim/rollback protocol safe against parallel
+ *     spawns.
  *   - collectedAt-dedup (write side): only COLLECT stamps collectedAt, on
  *     successful report delivery; the watcher is a reader, never a writer
  *     (its `seen` dedup lives only in session memory — the stamp is what
  *     keeps a fresh session's watcher from re-waking on old reports).
  *   - answer-consumed-mtime: no worker-side ack exists — an answer counts
  *     as consumed iff the worker's report mtime POSTDATES the a-<name>.json
- *     answer file written by writeAnswer.
+ *     answer file written by writeAnswer (src/mailbox-store.ts).
  *   - mailbox path conventions: q-/a-/release-/p- files live NEXT TO THE
- *     BRIEF in /tmp/exchange/<task>/, named by canonical worker name.
- *   - manifest writes are atomic (tmp+rename) and serialized via
+ *     BRIEF in /tmp/exchange/<task>/, named by canonical worker name
+ *     (src/mailbox-store.ts; wire format frozen).
+ *   - manifest writes are atomic (tmp+rename via the ONE shared
+ *     atomicWriteFileSync in src/manifest-store.ts) and serialized via
  *     withFileMutationQueue on the target path.
- *   - F1 fleet-accounting set-once: `description` and `masterSessionPath`
- *     are written ONLY when absent (applyFleetTaskFields) — the first
- *     delegate call of a task fixes them, later spawns never overwrite.
- *   - F1 usage cache is a CACHE, not authority: the worker session JSONL
- *     files are the source of truth; aggregateTaskUsage recomputes from
- *     them on every read; only WRITERS (collect, via
+ *   - F1 fleet-accounting set-once (OWNED here): `description` and
+ *     `masterSessionPath` are written ONLY when absent
+ *     (applyFleetTaskFields) — the first delegate call of a task fixes
+ *     them, later spawns never overwrite.
+ *   - F1 usage cache is a CACHE, not authority (OWNED here): the worker
+ *     session JSONL files are the source of truth; aggregateTaskUsage
+ *     recomputes from them on every read; only WRITERS (collect, via
  *     persistTaskUsageSnapshot) stamp the snapshot into the manifest —
  *     read paths (delegate_status) never write, so the read-only tool
  *     contract holds.
- *   - archive is best-effort by contract: any failure → null/0/[] — never
- *     throws past its callers.
+ *   - archive is best-effort by contract (src/archive.ts): any failure →
+ *     null/0/[] — never throws past its callers.
  *
  * Error modes: ensureExchangeDir throws a typed E_BRIEF DelegateError;
- * every validator returns {ok:false, error} instead of throwing.
- *
- * Sections (banner-delimited, bodies byte-verbatim from the pre-merge
- * files; exchange's three ./transport/types.ts import blocks were hoisted
- * into the single top block below, retargeted at ./transport.ts):
- *   1. src/exchange.ts — conventions, manifest, reports, schemas, mailbox
- *      (versioned banner headers preserved verbatim).
- *   2. src/archive.ts — durable report archive + TTL prune (header
- *      preserved verbatim, incl. its namespace-style imports).
+ * every validator (src/report-schema.ts) returns {ok:false, error} instead
+ * of throwing.
  */
 
 import {
