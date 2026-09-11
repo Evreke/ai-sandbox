@@ -1646,7 +1646,7 @@ async function fileExists(path: string): Promise<boolean> {
  * statuses degrade to "unknown" instead.
  */
 export async function buildWorkerView(transport: Transport): Promise<WorkerView[]> {
-	const manifests = manifestStore.scan();
+	const manifests = manifestStore.scan(transport.backendName());
 
 	let statuses: Awaited<ReturnType<Transport["listStatuses"]>> = [];
 	try {

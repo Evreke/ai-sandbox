@@ -131,6 +131,7 @@ async function drive(
 		listStatuses: async () => [],
 		teardown: async () => ({ alreadyGone: false }),
 		capabilities: () => ({ worktrees: true, authority: "root" }),
+		backendName: () => "herdr",
 	} as unknown as Transport;
 
 	let captured: MailboxTool | undefined;

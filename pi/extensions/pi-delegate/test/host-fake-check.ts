@@ -305,7 +305,7 @@ if (toolEntry) {
 		placement: { kind: "tab", workspaceId: "ws-f", paneId: "pane-f", checkoutPath: repoDir, backend: "fake", placementRef: "fake:1" },
 	};
 	await updateManifest(droot, (m) => ({ ...m, workers: [legacyEntry, fakeEntry] }));
-	const scanned = scanAllManifests().find((m) => m.dir === droot);
+	const scanned = scanAllManifests("herdr").find((m) => m.dir === droot);
 	const names = scanned?.workers.map((w) => w.name) ?? [];
 	check(
 		"D1 scan backend gate: backend:\"fake\" entries are skipped, legacy (no backend) fail open",

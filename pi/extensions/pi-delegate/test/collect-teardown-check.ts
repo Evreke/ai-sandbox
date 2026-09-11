@@ -104,7 +104,7 @@ function drive(scenario: string, configJson?: string): DriverOut {
 		mkdirSync(configDir, { recursive: true });
 		writeFileSync(join(configDir, "pi-delegate.config.json"), configJson);
 		const src = `import {resolveCollectConfig} from ${JSON.stringify(new URL("../src/observe.ts", import.meta.url).pathname)}; console.log(JSON.stringify(resolveCollectConfig()))`;
-		const res = spawnSync("bun", ["-e", src], { env: { ...process.env, HOME: home }, encoding: "utf8" });
+		const res = spawnSync("bun", ["-e", src], { env: { ...process.env, HOME: home }, encoding: "utf8", timeout: 20_000 });
 		try {
 			return (JSON.parse(res.stdout.toString().trim()) as { teardownAfterCollect: boolean }).teardownAfterCollect;
 		} catch {

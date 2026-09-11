@@ -247,16 +247,18 @@ function textResult(text: string, details: Record<string, unknown>): ToolResult 
 	return { content: [{ type: "text", text }], details: { ok: true, ...details } };
 }
 
-/** Exchange dirs of all known task manifests (read: q-file scan surface). */
-function knownTaskDirs(): string[] {
+/** Exchange dirs of all known task manifests (read: q-file scan surface).
+ *  Migration stage 3 (audit step 9): the scan takes the active backend name
+ *  from the bound transport (composition root) — no implicit global. */
+function knownTaskDirs(backendName: string): string[] {
 	const dirs = new Set<string>();
-	for (const manifest of manifestStore.scan()) dirs.add(manifest.dir);
+	for (const manifest of manifestStore.scan(backendName)) dirs.add(manifest.dir);
 	return [...dirs];
 }
 
 /** Exchange dir that owns a worker, from the manifests (answer/steer target). */
-function findWorkerDir(name: string): string | null {
-	for (const manifest of manifestStore.scan()) {
+function findWorkerDir(backendName: string, name: string): string | null {
+	for (const manifest of manifestStore.scan(backendName)) {
 		if (manifest.workers.some((w) => w.name === name)) return manifest.dir;
 	}
 	return null;
@@ -346,7 +348,7 @@ export function registerMailboxTool(pi: import("@earendil-works/pi-coding-agent"
 			// --- read: side-effect-free scan of every known task dir -----------------
 			if (params.action === "read") {
 				const questions: QuestionEnvelope[] = [];
-				for (const dir of knownTaskDirs()) {
+				for (const dir of knownTaskDirs(transport.backendName())) {
 					const q = readQuestion(questionPathFor(dir, params.name));
 					if (q) questions.push(q);
 				}
@@ -373,7 +375,7 @@ export function registerMailboxTool(pi: import("@earendil-works/pi-coding-agent"
 			}
 
 			// --- answer | steer: locate the worker's task dir from the manifests -----
-			const dir = findWorkerDir(params.name);
+			const dir = findWorkerDir(transport.backendName(), params.name);
 			if (!dir) {
 				return fail(
 					"E_NAME",

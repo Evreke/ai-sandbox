@@ -748,6 +748,13 @@ export class HerdrTransport implements Transport {
 		return { worktrees: authority === "root", authority };
 	}
 
+	/** Migration stage 3 (audit step 9): the adapter is the single source of
+	 *  the active-backend name — must match the `backend:` spelling place()
+	 *  writes into placements (lines below, both placement builders). */
+	backendName(): string {
+		return "herdr";
+	}
+
 	place(req: PlacementReq): Promise<Placement> {
 		return this.enqueue(() => this.placeInner(req));
 	}

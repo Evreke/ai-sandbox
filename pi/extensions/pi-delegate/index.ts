@@ -265,7 +265,7 @@ export default function (pi: ExtensionAPI) {
 			sessionFile = undefined; // degraded self-id — the gate decides with what is known
 		}
 		const self = { sessionFile, cwd: ctx.cwd };
-		const manifests = manifestStore.scan();
+		const manifests = manifestStore.scan(transport.backendName());
 		if (!isWorkerSession(self, manifests) || ownsChildManifests(self, manifests)) {
 			startWatcher(pi, transport, { cwd: ctx.cwd, sessionManager: ctx.sessionManager });
 		}

@@ -18,6 +18,10 @@
  *   M4  Single write protocol — the archive path no longer carries a second
  *       hand-rolled atomic-write implementation (audit step 5): the archive
  *       section of src/exchange.ts reuses the shared atomicWriteFileSync.
+ *   M5  Foreign-backend scan filter with a non-herdr ACTIVE backend name
+ *       (migration stage 3, audit step 9): the active backend is a scan
+ *       parameter — scanning as the foreign name yields the mirror image
+ *       (its own entries + legacy fail-open, herdr hidden), on both stores.
  * Exit 0 only if all checks pass.
  */
 
@@ -100,7 +104,8 @@ try {
 		await store.append(dir, makeWorker("gamma", "pane-3", "fake"));
 		await store.append(dir, makeWorker("delta", "pane-4", "herdr"));
 		await store.append(dir, makeWorker("omega", "pane-5"));
-		trace.push(store.scan().find((m) => m.workers.some((w) => w.name === "alpha")) ?? null);
+		// Migration stage 3 (audit step 9): the active backend is a scan PARAMETER.
+		trace.push(store.scan("herdr").find((m) => m.workers.some((w) => w.name === "alpha")) ?? null);
 		return trace;
 	};
 
@@ -197,6 +202,47 @@ try {
 	}
 
 	// ---------------------------------------------------------------------------
+	// M5. Foreign-backend scan filter with a NON-herdr active backend name
+	//     (migration stage 3, audit step 9): the active backend is a scan
+	//     PARAMETER — scanning as the foreign backend itself must see exactly
+	//     the mirror image: its own entries + legacy fail-open, herdr hidden.
+	// ---------------------------------------------------------------------------
+	{
+		// NOTE: the file store's scan reads only the TOP level of the exchange
+		// root — the M5 dirs sit next to the M1 dirs, never nested inside them.
+		const m5FileDir = join(SANDBOX, "task-m5-file");
+		const m5MemDir = join(SANDBOX, "task-m5-mem");
+		const m5 = async (store: typeof fileStore, dir: string): Promise<void> => {
+			await store.append(dir, makeWorker("her1", "pane-h1", "herdr"));
+			await store.append(dir, makeWorker("forg", "pane-f1", "fake"));
+			await store.append(dir, makeWorker("legacy", "pane-l1"));
+			// Anchor: the legacy worker survives EVERY active-backend filter —
+			// it locates the task's manifest under all three scans.
+			const findOwn = (ms: ExchangeManifest[]) => ms.find((m) => m.workers.some((w) => w.name === "legacy")) ?? null;
+			const asHerdr = findOwn(store.scan("herdr"));
+			const asFake = findOwn(store.scan("fake"));
+			const asOther = findOwn(store.scan("weird-backend"));
+			check(
+				`M5.1 ${store === fileStore ? "file" : "memory"} store, scan("herdr"): own + legacy kept, foreign "fake" dropped`,
+				JSON.stringify(workerNames(asHerdr)) === JSON.stringify(["her1", "legacy"]),
+				JSON.stringify(workerNames(asHerdr)),
+			);
+			check(
+				`M5.2 ${store === fileStore ? "file" : "memory"} store, scan("fake") — the FOREIGN name as active: mirror image, "herdr" hidden`,
+				JSON.stringify(workerNames(asFake)) === JSON.stringify(["forg", "legacy"]),
+				JSON.stringify(workerNames(asFake)),
+			);
+			check(
+				`M5.3 ${store === fileStore ? "file" : "memory"} store, scan("weird-backend"): only legacy fail-open entries survive`,
+				JSON.stringify(workerNames(asOther)) === JSON.stringify(["legacy"]),
+				JSON.stringify(workerNames(asOther)),
+			);
+		};
+		await m5(fileStore, m5FileDir);
+		await m5(memStore, m5MemDir);
+	}
+
+	// ---------------------------------------------------------------------------
 	// M3. Tolerant reads.
 	// ---------------------------------------------------------------------------
 	{
@@ -229,6 +275,8 @@ try {
 } finally {
 	rmSync(FILE_DIR, { recursive: true, force: true });
 	rmSync(MEMORY_DIR, { recursive: true, force: true });
+	rmSync(join(SANDBOX, "task-m5-file"), { recursive: true, force: true });
+	rmSync(join(SANDBOX, "task-m5-mem"), { recursive: true, force: true });
 }
 
 if (failures > 0) {
