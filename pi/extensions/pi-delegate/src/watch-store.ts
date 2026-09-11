@@ -33,7 +33,7 @@
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { atomicWriteFileSync } from "./manifest-store.ts";
+import { atomicWriteFileSync, EXCHANGE_SCHEMA_VERSION, isSupportedSchemaVersion } from "./manifest-store.ts";
 
 // ---------------------------------------------------------------------------
 // Observer stamps — the watcher's satellite file (migration stage 3, audit
@@ -110,6 +110,13 @@ export function readWatchStampLayers(dir: string): WatchStampLayer[] {
 		try {
 			const parsed: unknown = JSON.parse(readFileSync(join(dir, f), "utf8"));
 			if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) continue;
+			// Law 7 (Wave 4 item 3): a wrong/future schemaVersion skips the whole
+			// layer (tolerant-empty), never a misparse; absent = legacy v1. The
+			// version field lives TOP-LEVEL alongside the worker entries; a worker
+			// literally named "schemaVersion" cannot be read as a stamp entry (its
+			// numeric value is skipped by the object check below) — and the writer
+			// side re-stamps the version on every write.
+			if (!isSupportedSchemaVersion((parsed as Record<string, unknown>).schemaVersion)) continue;
 			const stamps: Record<string, RetireStamps> = {};
 			for (const [name, v] of Object.entries(parsed as Record<string, unknown>)) {
 				if (typeof v !== "object" || v === null) continue;
@@ -198,7 +205,9 @@ export async function updateWatchStamps(
 		if (stamps.retirableSince === undefined && stamps.retiredAt === undefined) delete next[workerName];
 		else next[workerName] = stamps;
 		if (JSON.stringify(current) === JSON.stringify(next)) return; // idempotent — no write
-		atomicWriteFileSync(path, JSON.stringify(next, null, "\t") + "\n");
+		// Law 7: every writer stamps the current schema version (additive field
+		// alongside the worker entries — see the reader gate above).
+		atomicWriteFileSync(path, JSON.stringify({ schemaVersion: EXCHANGE_SCHEMA_VERSION, ...next }, null, "\t") + "\n");
 	});
 }
 

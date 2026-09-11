@@ -469,6 +469,9 @@ export interface QuestionEnvelope {
 
 /** Orchestrator → worker answer/steering (a-<name>.json). */
 export interface AnswerEnvelope {
+	/** Law 7 (Wave 4 item 3): format version, stamped by the writer; absent
+	 *  = legacy v1 on read. */
+	schemaVersion?: number;
 	from: "orchestrator";
 	ts: string;
 	/** The answer text, or mid-run steering instruction. */

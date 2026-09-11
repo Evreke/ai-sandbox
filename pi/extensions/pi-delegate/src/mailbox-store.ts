@@ -18,7 +18,9 @@
  *   - mailbox path conventions: q-/a-/release-/nudge-failed- files live
  *     NEXT TO THE BRIEF in /tmp/exchange/<task>/, named by canonical worker
  *     name (wire format FROZEN — file names and envelope shapes are
- *     byte-identical to the pre-extraction module).
+ *     byte-identical to the pre-extraction module, with ONE additive
+ *     exception since Wave 4 item 3 (Law 7): writers stamp an optional
+ *     `schemaVersion: 1`; readers tolerate absent and reject wrong).
  *   - every write is atomic (tmp+rename via atomicWriteFileSync) and
  *     serialized via withFileMutationQueue on the target path.
  *
@@ -39,7 +41,7 @@ import {
 	type AnswerEnvelope,
 	type QuestionEnvelope,
 } from "./host.ts";
-import { atomicWriteFileSync } from "./manifest-store.ts";
+import { atomicWriteFileSync, EXCHANGE_SCHEMA_VERSION, isSupportedSchemaVersion } from "./manifest-store.ts";
 
 
 /** Mailbox paths, next to the brief (built by src/expaths.ts). */
@@ -95,6 +97,9 @@ export function readNudgeFailedMarker(path: string): NudgeFailedEnvelope | null 
 		const parsed: unknown = JSON.parse(raw);
 		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
 		const o = parsed as Record<string, unknown>;
+		// Law 7 (Wave 4 item 3): a wrong/future schemaVersion reads as no marker
+		// (tolerant-empty), never a misparse; absent = legacy v1.
+		if (!isSupportedSchemaVersion(o.schemaVersion)) return null;
 		if (typeof o.ts !== "string" || o.ts.length === 0) return null;
 		return {
 			name: typeof o.name === "string" ? o.name : "",
@@ -117,8 +122,14 @@ export function releasePathFor(dir: string, name: string): string {
 }
 
 /** Orchestrator → watcher release marker (release-<name>.json). The watcher
- *  closes the pane when the worker is retirable; probes retire immediately. */
+ *  closes the pane when the worker is retirable. Law 7: writers stamp
+ *  schemaVersion 1; the ONLY consumer (watch-retire) gates on file EXISTENCE
+ *  (mtime), never on content — so there is no content reader to version-gate;
+ *  an unknown future version degrades to "marker present" which is the safe
+ *  ACK direction (a close is the expected outcome for a retirable worker). */
 export interface ReleaseEnvelope {
+	/** Law 7 (Wave 4 item 3): format version, stamped by the writer. */
+	schemaVersion?: number;
 	from: "orchestrator";
 	ts: string;
 }
@@ -126,6 +137,7 @@ export interface ReleaseEnvelope {
 /** Write a release marker atomically (tmp+rename; withFileMutationQueue on the path). */
 export function writeRelease(path: string): Promise<void> {
 	const envelope: ReleaseEnvelope = {
+		schemaVersion: EXCHANGE_SCHEMA_VERSION,
 		from: "orchestrator",
 		ts: new Date().toISOString(),
 	};
@@ -170,6 +182,17 @@ export function readQuestionState(path: string): QuestionRead {
 	} catch (err) {
 		return { state: "invalid", error: `not valid JSON (${err instanceof Error ? err.message : String(err)})` };
 	}
+	// Law 7 (Wave 4 item 3): a wrong/future schemaVersion is an INVALID read
+	// (tolerant-empty — the question is never misparsed); absent = legacy v1.
+	if (
+		typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) &&
+		!isSupportedSchemaVersion((parsed as Record<string, unknown>).schemaVersion)
+	) {
+		return {
+			state: "invalid",
+			error: `unsupported question envelope schemaVersion (${String((parsed as Record<string, unknown>).schemaVersion)} — this build reads version ${EXCHANGE_SCHEMA_VERSION})`,
+		};
+	}
 	if (!isQuestionEnvelope(parsed)) {
 		return {
 			state: "invalid",
@@ -204,6 +227,7 @@ export function readQuestion(path: string): QuestionEnvelope | null {
  */
 export function writeAnswer(path: string, answer: string): Promise<void> {
 	const envelope: AnswerEnvelope = {
+		schemaVersion: EXCHANGE_SCHEMA_VERSION,
 		from: "orchestrator",
 		ts: new Date().toISOString(),
 		answer,

@@ -37,6 +37,31 @@ import { basename, resolve } from "node:path";
 import type { Placement } from "./host.ts";
 import { exchangeRoot } from "./exchange.ts";
 
+// ---------------------------------------------------------------------------
+// Law 7 — on-disk formats are versioned contracts (shared version gate)
+// ---------------------------------------------------------------------------
+
+/** Schema version stamped by the WRITERS of the exchange-layer on-disk
+ *  contracts (manifest, mailbox answer/release/nudge-failed envelopes, the
+ *  watcher retire-stamp layers). Convention (the delivered-store pattern):
+ *  absent means version 1 (pre-versioning files read as v1); a reader
+ *  accepts absent/1 and treats any OTHER value — a future version it cannot
+ *  parse — as tolerant-empty (never a crash, never a misparse). */
+export const EXCHANGE_SCHEMA_VERSION = 1;
+
+/** The shared version gate for the exchange-layer contracts (Law 7).
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: v — the raw `schemaVersion` value read from a file (may be absent)
+ * Output: true when the reader may parse the file (absent = legacy v1, or
+ *   exactly the current version); false when the version is wrong/future
+ * Guarantees: pure; never throws
+ * Raises: never
+ */
+export function isSupportedSchemaVersion(v: unknown): boolean {
+	return v === undefined || v === EXCHANGE_SCHEMA_VERSION;
+}
+
 /**
  * Atomic file write (tmp + rename) — the ONE shared writer protocol of the
  * exchange layer (moved here from src/archive.ts, which now imports it from
@@ -148,6 +173,10 @@ export interface TaskUsageSnapshot {
 }
 
 export interface ExchangeManifest {
+	/** Law 7 (Wave 4 item 3): format version. Written as 1 by every writer;
+	 *  the reader accepts absent (legacy = v1) or 1 and returns null for any
+	 *  other value (a future version must never misparse). */
+	schemaVersion?: number;
 	task: string;
 	dir: string;
 	/** F1: human fleet description (3–10 words), derived ONCE by the FIRST
@@ -202,6 +231,9 @@ export function readManifest(dir: string): ExchangeManifest | null {
 		) {
 			return null; // corrupt → tolerant read, no throw
 		}
+		// Law 7 (Wave 4 item 3): a wrong/future schemaVersion is a tolerant-empty
+		// read (null — same plane as corrupt), never a misparse.
+		if (!isSupportedSchemaVersion(parsed.schemaVersion)) return null;
 		return parsed as ExchangeManifest;
 	} catch {
 		return null;
@@ -235,7 +267,8 @@ export function updateManifest(
 		mkdirSync(dir, { recursive: true });
 		const current = readManifest(dir);
 		const base: ExchangeManifest = current ?? { task: basename(dir), dir: resolve(dir), workers: [] };
-		const next = mutate(base);
+		// Law 7: every writer stamps the current schema version (additive field).
+		const next: ExchangeManifest = { ...mutate(base), schemaVersion: EXCHANGE_SCHEMA_VERSION };
 		atomicWriteFileSync(path, JSON.stringify(next, null, "\t") + "\n");
 		return next;
 	});
@@ -336,7 +369,8 @@ export function createMemoryManifestStore(): ManifestStore {
 			const key = resolve(dir);
 			const current = manifests.get(key);
 			const base: ExchangeManifest = current ?? { task: basename(key), dir: key, workers: [] };
-			const next = mutate(base);
+			// Law 7: stamp parity with the file writer (every writer stamps v1).
+			const next: ExchangeManifest = { ...mutate(base), schemaVersion: EXCHANGE_SCHEMA_VERSION };
 			manifests.set(key, next);
 			return structuredClone(next) as ExchangeManifest;
 		},

@@ -38,7 +38,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { exchangeRoot } from "./exchange.ts";
 import { questionArchivePathFor } from "./expaths.ts";
-import { manifestStore } from "./manifest-store.ts";
+import { EXCHANGE_SCHEMA_VERSION, manifestStore } from "./manifest-store.ts";
 import {
 	answerPathFor,
 	nudgeFailedPathFor,
@@ -385,7 +385,7 @@ export function registerMailboxTool(pi: import("@earendil-works/pi-coding-agent"
 							// this handler re-writes it on the next failed answer/steer.
 							await writeFile(
 								markerPath,
-								`${JSON.stringify({ name: params.name, ts, error: errText(lastErr) }, null, "\t")}\n`,
+								`${JSON.stringify({ schemaVersion: EXCHANGE_SCHEMA_VERSION, name: params.name, ts, error: errText(lastErr) }, null, "\t")}\n`,
 							);
 							nudgeNote =
 								` Nudge prompt failed after ${NUDGE_ATTEMPTS} attempts (${errText(lastErr)}) — the answer IS posted at a-${params.name}.json ` +
