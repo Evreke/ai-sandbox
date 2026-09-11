@@ -6,7 +6,9 @@
  *
  * herdr is stubbed via a PATH shim (fix2 pattern, cf. test/reverify-fixes.ts):
  * a bash script whose `agent wait` pops scripted statuses from a text file.
- * Archive checks run against a temp HOME so the real archive is never touched.
+ * Archive checks run against a temp agent dir (redirected via pi's
+ * PI_CODING_AGENT_DIR — the seam getAgentDir() honors, read live per call)
+ * so the real archive is never touched.
  * No real herdr ops, no network, no mutation outside /tmp.
  */
 
@@ -74,6 +76,7 @@ writeFileSync(join(STUB_DIR, "herdr"), SHIM, { mode: 0o755 });
 
 const savedPath = process.env.PATH;
 const savedHome = process.env.HOME;
+const savedAgentDir = process.env.PI_CODING_AGENT_DIR;
 process.env.PATH = `${STUB_DIR}:${savedPath}`;
 
 function scriptWait(statuses: string[]) {
@@ -448,7 +451,9 @@ try {
 	// §19.3 — archive round-trip + failure tolerance
 	// -------------------------------------------------------------------------
 	const fakeHome = mkdtempSync(join(tmpdir(), "qa-archive-home-"));
-	process.env.HOME = fakeHome;
+	// pi docs: the archive resolves via getAgentDir(), which honors
+	// PI_CODING_AGENT_DIR (read live per call — unlike bun's cached homedir()).
+	process.env.PI_CODING_AGENT_DIR = join(fakeHome, ".pi", "agent");
 
 	// 5.1 missing archive root → [].
 	check("A.1 missing archiveRoot → []", JSON.stringify(listArchivedTasks()) === "[]");
@@ -557,9 +562,9 @@ try {
 		pruneArchive(Number.NaN) === 0 && pruneArchive(-1) === 0,
 	);
 	const missingHome = mkdtempSync(join(tmpdir(), "qa-archive-missing-"));
-	process.env.HOME = missingHome;
+	process.env.PI_CODING_AGENT_DIR = join(missingHome, ".pi", "agent");
 	check("A.10 missing archiveRoot → 0 pruned, never throws", pruneArchive() === 0);
-	process.env.HOME = fakeHome;
+	process.env.PI_CODING_AGENT_DIR = join(fakeHome, ".pi", "agent");
 	rmSync(missingHome, { recursive: true, force: true });
 
 	rmSync(fakeHome, { recursive: true, force: true });
@@ -567,6 +572,8 @@ try {
 	process.env.PATH = savedPath;
 	if (savedHome === undefined) delete process.env.HOME;
 	else process.env.HOME = savedHome;
+	if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+	else process.env.PI_CODING_AGENT_DIR = savedAgentDir;
 	rmSync(STUB_DIR, { recursive: true, force: true });
 }
 
