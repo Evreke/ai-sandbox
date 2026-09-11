@@ -916,9 +916,15 @@ export class HerdrTransport implements Transport {
 	 *   - proofSettled: caller-owned out-of-band completion proof (report mtime
 	 *     ≥ spawn / session reply) polled in the START-UP phase
 	 *   - releaseOnStarted: v1.14 early release once the agent is observed working
-	 * Output: SettleResult — normal settle {status, timedOut:false}; never-started
-	 *   timeout {status:"unknown", timedOut:true, neverStarted:true}; aged-finish
-	 *   {status:"idle", finishedBeforeWatch:true}; early release {startedConfirmed:true}
+	 * Output: SettleResult — the discriminated settle union (migration stage 3,
+	 *   audit step 8 — the settle semantics live in the SEAM, the adapter only
+	 *   classifies observations):
+	 *   normal settle              → {kind:"settled", status};
+	 *   never-started timeout      → {kind:"never-started", status:"unknown"};
+	 *   aged finish / proof settle → {kind:"finished-before-watch", status:"idle"};
+	 *   early release (v1.14)      → {kind:"started-confirmed", status:"working"};
+	 *   abort                      → {kind:"detached", status:<last known>};
+	 *   budget elapsed after start → {kind:"timeout", status:<last observed>}.
 	 * Guarantees:
 	 *   - two-phase state machine (START-UP → SETTLED) against the
 	 *     settle-before-start race (BUG_FIX_CONTEXT below)
@@ -984,7 +990,7 @@ export class HerdrTransport implements Transport {
 			if (req.signal?.aborted) {
 				// Abort detaches the wait, never the worker (DESIGN.md §5.1).
 				const s = await this.getStatus(req.name).catch(() => null);
-				return { status: s?.status ?? last, timedOut: false };
+				return { kind: "detached", status: s?.status ?? last };
 			}
 			let status: AgentStatusName | undefined;
 			try {
@@ -1027,7 +1033,7 @@ export class HerdrTransport implements Transport {
 					}
 					if (proven) {
 						req.onPoll?.({ status: status ?? "idle", started: true, elapsedMs: Date.now() - startedAt });
-						return { status: "idle", timedOut: false, finishedBeforeWatch: true };
+						return { kind: "finished-before-watch", status: "idle" };
 					}
 				}
 				if (sessionLookupDone === false) {
@@ -1038,11 +1044,11 @@ export class HerdrTransport implements Transport {
 				}
 				if (sessionPath && sessionHasReply(sessionPath)) {
 					req.onPoll?.({ status: status ?? "idle", started: true, elapsedMs: Date.now() - startedAt });
-					return { status: "idle", timedOut: false, finishedBeforeWatch: true };
+					return { kind: "finished-before-watch", status: "idle" };
 				}
 			}
 			req.onPoll?.({ status: status ?? "unknown", started, elapsedMs: Date.now() - startedAt });
-			if (started && status && SETTLED.includes(status)) return { status, timedOut: false };
+			if (started && status && SETTLED.includes(status)) return { kind: "settled", status };
 			// v1.14 (watch.releaseOn=started): the worker is proven started and
 			// actively working — a spawn failure (E_PLACE/E_START/E_NAME) is ruled
 			// out, so blocking the rest of the settle gate buys nothing (§21: the
@@ -1051,7 +1057,7 @@ export class HerdrTransport implements Transport {
 			// a worker that settles before the first working observation (within
 			// one wait slice) returns its report inline as before.
 			if (req.releaseOnStarted && started && status === "working") {
-				return { status: "working", timedOut: false, startedConfirmed: true };
+				return { kind: "started-confirmed", status };
 			}
 			await sleep(WAIT_SLEEP_MS);
 		}
@@ -1059,10 +1065,10 @@ export class HerdrTransport implements Transport {
 			// Never observed working/blocked/done since submission — the prompt was
 			// likely never consumed; a settle here would be the false-settle bug.
 			// (v1.8: an already-finished worker was ruled out above by the session
-			// reply proof, so neverStarted here is honest.)
-			return { status: "unknown", timedOut: true, neverStarted: true };
+			// reply proof, so never-started here is honest.)
+			return { kind: "never-started", status: "unknown" };
 		}
-		return { status: last, timedOut: true };
+		return { kind: "timeout", status: last };
 	}
 
 	/** v1.8: resolve the agent's session JSONL path from `herdr agent get`

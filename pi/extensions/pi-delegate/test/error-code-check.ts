@@ -201,7 +201,7 @@ try {
 		}),
 		startAgent: (req) => herdrAdapter.startAgent(req), // REAL adapter → stub → E_NAME
 		submitPrompt: async () => {},
-		waitSettle: async () => ({ status: "idle", timedOut: false }),
+		waitSettle: async () => ({ kind: "settled", status: "idle" }),
 		getStatus: async () => null,
 		listStatuses: async () => [],
 		teardown: async () => ({ alreadyGone: false }),

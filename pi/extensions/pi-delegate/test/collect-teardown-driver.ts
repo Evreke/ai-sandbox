@@ -94,7 +94,7 @@ const transport = (opts: { teardownShouldThrow: boolean; startShouldThrow: boole
 			return { name: req.name };
 		},
 		submitPrompt: async () => {},
-		waitSettle: async () => ({ status: "idle", timedOut: false }),
+		waitSettle: async () => ({ kind: "settled", status: "idle" }),
 		getStatus: async () => ({ name: NAME, status: "idle" }),
 		listStatuses: async () => [],
 		teardown: async () => {

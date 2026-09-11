@@ -145,7 +145,7 @@ const settle = await fake.waitSettle({
 	onPoll: () => {},
 	proofSettled: async () => false,
 });
-check("A9 scripted waitSettle settles done, no timeout, started (two-phase D3 shape)", settle.status === "done" && settle.timedOut === false && !settle.neverStarted, JSON.stringify(settle));
+check("A9 scripted waitSettle settles done (seam settle union, migration stage 3)", settle.kind === "settled" && settle.status === "done", JSON.stringify(settle));
 
 const status = await fake.getStatus(NAME);
 check("A10 getStatus: not-found → null contract + scripted head", status !== null && status.status === "done" && status.placementRef === placement.placementRef, JSON.stringify(status));
@@ -241,7 +241,7 @@ let captured!: { execute: (...a: unknown[]) => Promise<{ content: Array<{ text: 
 registerDelegateTool({ registerTool: (t: never) => (captured = t as never) } as never, toolFake as unknown as Transport);
 const result = await captured.execute(
 	"t1",
-	{ name: NAME, briefPath: brief2, provider: "p", model: "m", thinking: "low", waitMs: 1000, repoPath: repoDir, mode: "tab" },
+	{ name: NAME, briefPath: brief2, provider: "p", model: "m", thinking: "low", waitMs: 1000, repoPath: repoDir, mode: "tab", releaseOn: "settle" },
 	undefined,
 	() => {},
 	{ cwd: repoDir, hasUI: false },

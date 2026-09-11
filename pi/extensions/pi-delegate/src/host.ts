@@ -143,28 +143,52 @@ export interface PromptReq {
 	timeoutMs: number;
 }
 
-/** Outcome of a settle observation. NOT a completion criterion — report files are. */
-export interface SettleResult {
-	status: AgentStatusName;
-	/** True when timeoutMs elapsed without the agent settling. */
-	timedOut: boolean;
-	/** D3 (DESIGN.md §19.1): true when timeoutMs elapsed WITHOUT the agent ever
-	 *  being observed working/blocked since submission — the prompt was likely
-	 *  never consumed. Never set when the agent settled normally. */
-	neverStarted?: boolean;
-	/** v1.8 (DESIGN.md §19.1b): true when the agent was ALREADY finished when the
-	 *  watcher attached (herdr ages done→idle within minutes, so a late watcher
-	 *  can never observe working/done — and current builds never report working
-	 *  for pi workers at all, §19.1c). Proven by the caller's completion proof
-	 *  (proofSettled: report file newer than spawn) or by an assistant reply in
-	 *  the session JSONL — the opposite of neverStarted, not a failure. */
-	finishedBeforeWatch?: boolean;
-	/** v1.14 (watch.releaseOn=started): the worker was observed working and the
-	 *  wait released EARLY — the orchestrator is handed to the background watcher
-	 *  instead of blocking the rest of the settle gate. Not a timeout, not a
-	 *  failure: the spawn is proven healthy. */
-	startedConfirmed?: boolean;
-}
+/**
+ * Outcome of a settle observation. NOT a completion criterion — report files
+ * are (migration stage 3, audit step 8).
+ * <p>
+ * The settle result is a DISCRIMINATED UNION — one variant per outcome —
+ * instead of the old set of boolean flags (timedOut / neverStarted /
+ * finishedBeforeWatch / startedConfirmed). Before this the flags encoded a
+ * hidden state machine: impossible combinations were representable
+ * (timedOut+startedConfirmed, neverStarted+finishedBeforeWatch) and every
+ * consumer re-derived the outcome by reading flags in the right order. The
+ * variants (audit §3.2, the settle semantics lifted OUT of the adapters into
+ * the seam):
+ *   - "settled"               — осел: the agent was observed starting and then
+ *                               reached idle/done/blocked within the budget;
+ *   - "timeout"               — the budget elapsed after a proven start; the
+ *                               carried status is the LAST OBSERVED state and
+ *                               is an advisory reading only;
+ *   - "never-started"         — не стартовал: the budget elapsed WITHOUT any
+ *                               working/blocked/done observation — the prompt
+ *                               was likely never consumed (D3);
+ *   - "finished-before-watch" — завершился до наблюдения: the watcher attached
+ *                               late (herdr ages done→idle within minutes and
+ *                               current builds never report working for pi
+ *                               workers, §19.1b/§19.1c); life was proven
+ *                               OUT-OF-BAND (the caller's completion proof or
+ *                               an assistant reply in the session JSONL) —
+ *                               a success, not a failure;
+ *   - "started-confirmed"     — освобождён по подтверждённому старту (v1.14,
+ *                               watch.releaseOn=started): the worker was
+ *                               observed working and the wait released EARLY —
+ *                               the orchestrator hands off to the background
+ *                               watcher; not a timeout, not a failure;
+ *   - "detached"              — отсоединён: the abort signal fired (abort
+ *                               detaches the WAIT, never the worker); the
+ *                               carried status is the last known one.
+ * Every variant carries `status` — the last observed backend state, present in
+ * ALL variants so consumers can render it; per audit step 8 the backend status
+ * is an ADVISORY sensor, never the completion criterion.
+ */
+export type SettleResult =
+	| { kind: "settled"; status: AgentStatusName }
+	| { kind: "timeout"; status: AgentStatusName }
+	| { kind: "never-started"; status: AgentStatusName }
+	| { kind: "finished-before-watch"; status: AgentStatusName }
+	| { kind: "started-confirmed"; status: AgentStatusName }
+	| { kind: "detached"; status: AgentStatusName };
 
 export interface AgentStatus {
 	name: string;
@@ -230,11 +254,10 @@ export interface Transport {
 		 *  start-up phase on every slice whose observation cannot prove life
 		 *  (idle/unknown/unresolved — herdr builds that never report working for
 		 *  pi workers would otherwise spin the full budget against a finished
-		 *  worker). True → settle {status:"idle", finishedBeforeWatch:true}.
+		 *  worker). True → settle kind "finished-before-watch" (status "idle").
 		 *  Must be cheap, side-effect-free, and answer from evidence written
-		 *  AFTER this spawn (report mtime ≥ spawn time / session reply), so a
-		 *  stale artifact can never false-settle a fresh worker. Throws are
-		 *  treated as false. */
+		 *  AFTER this spawn, so a stale artifact can never false-settle a fresh
+		 *  worker. Throws are treated as false. */
 		proofSettled?: () => Promise<boolean>;
 		/** v1.14 (watch.releaseOn=started): release the wait as soon as the agent
 		 *  is observed working — the orchestrator hands off to the background

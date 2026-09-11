@@ -101,8 +101,8 @@ const t = createHerdrTransport(); // cwd is a herdr worktree → sub authority (
 		const elapsed = Date.now() - t0;
 		check(
 			"D1c waitSettle on live IDLE agent settles <5s (not timeout-burned)",
-			!settle.timedOut && settle.status === "idle" && elapsed < 5_000,
-			`status=${settle.status} timedOut=${settle.timedOut} elapsed=${elapsed}ms agent=${idle.name}`,
+			(settle.kind === "settled" || settle.kind === "finished-before-watch") && settle.status === "idle" && elapsed < 5_000,
+			`kind=${settle.kind} status=${settle.status} elapsed=${elapsed}ms agent=${idle.name}`,
 		);
 	} else {
 		check("D1c waitSettle on live IDLE agent settles <5s", false, "no live idle agent found to test against");

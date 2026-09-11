@@ -192,7 +192,15 @@ try {
 
 	logOp(`herdr agent wait ${s1.name} --until idle --until done --until blocked --timeout 3000  (waitSettle loop, ≤240s)`);
 	const settle = await t.waitSettle({ name: s1.name, timeoutMs: 240_000 });
-	check("T2.2e waitSettle settled without timeout", !settle.timedOut && ["idle", "done", "blocked"].includes(settle.status), JSON.stringify(settle));
+	// Migration stage 3 (audit step 8): the settle outcome is the seam's
+	// discriminated union — a live smoke run settles either through the
+	// ordinary observation path ("settled") or through the out-of-band proof
+	// ("finished-before-watch" — herdr ages done→idle; both are completions).
+	check(
+		"T2.2e waitSettle settled without timeout",
+		(settle.kind === "settled" || settle.kind === "finished-before-watch") && ["idle", "done", "blocked"].includes(settle.status),
+		JSON.stringify(settle),
+	);
 
 	const st = await t.getStatus(s1.name);
 	// REAL herdr reports status under `agent.agent_status`; if the transport only

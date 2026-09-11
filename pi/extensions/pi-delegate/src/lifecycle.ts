@@ -51,6 +51,79 @@
 import type { ManifestWorker } from "./exchange.ts";
 
 // ---------------------------------------------------------------------------
+// Report-ownership witness (migration stage 3, audit step 8)
+// ---------------------------------------------------------------------------
+
+/**
+ * The completion-criterion witness of ONE embodiment: the state of the
+ * canonical report file at the moment this embodiment launched. The spawn
+ * flow snapshots the report path BEFORE the agent starts; the settle wait
+ * then proves completion by OBSERVING THE FILE against this witness —
+ * ownership of the report by THIS run is decided by the embodiment's
+ * witness, never by comparing file timestamps against the wall clock.
+ * (Before this the proof was `(mtime ≥ spawn time)` — a timestamp race:
+ * a report written a millisecond BEFORE the recorded spawn time was
+ * invisible to its own run, and clock skew between writer and reader could
+ * both false-settle and false-miss. The witness answers "did the file
+ * CHANGE since THIS run started" — content-addressed, clock-free.)
+ */
+export interface ReportWitness {
+	/** True when the report file already existed when this embodiment launched
+	 *  (a stale report of an earlier same-name run in the same task dir). */
+	existed: boolean;
+	/** Digest of the pre-existing content (null when the file was absent). */
+	digest: string | null;
+}
+
+/** FNV-1a 32-bit content digest — deterministic, dependency-free, enough to
+ *  distinguish "the file was rewritten" from "the same stale bytes". */
+function contentDigest(raw: string): string {
+	let h = 0x811c9dc5;
+	for (let i = 0; i < raw.length; i++) {
+		h ^= raw.charCodeAt(i);
+		h = Math.imul(h, 0x01000193);
+	}
+	return (h >>> 0).toString(16);
+}
+
+/**
+ * Snapshot the pre-run state of a report file for the embodiment witness.
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: raw — the file's current content, or null when absent/unreadable
+ * Output: the ReportWitness for this embodiment
+ * Guarantees: pure; never throws
+ * Raises: never
+ */
+export function witnessEmbodimentReport(raw: string | null): ReportWitness {
+	return raw === null ? { existed: false, digest: null } : { existed: true, digest: contentDigest(raw) };
+}
+
+/**
+ * Does the CURRENT content of the canonical report file prove THIS run's
+ * completion? The file proves the run when it APPEARED since the witness
+ * (no file at launch → any file is this run's) or was REWRITTEN since it
+ * (a stale report existed → only different content counts). This is the
+ * audit's "принадлежность запуска определяется идентичностью воплощения, а
+ * не сравнением временных меток файлов": the witness IS the embodiment's
+ * claim on the path, checked by content, not by clocks.
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input:
+ *   - witness — the embodiment's launch-time snapshot (witnessEmbodimentReport)
+ *   - raw — the file's current content, or null when absent/unreadable
+ * Output: true when the file's current state is evidence of THIS run
+ * Guarantees:
+ *   - pure; never throws; absent file → false (never a false settle)
+ * Raises: never
+ */
+export function reportWitnessProvesRun(w: ReportWitness, raw: string | null): boolean {
+	if (raw === null) return false;
+	if (!w.existed) return true;
+	return contentDigest(raw) !== w.digest;
+}
+
+// ---------------------------------------------------------------------------
 // Embodiment identity (audit step 6)
 // ---------------------------------------------------------------------------
 

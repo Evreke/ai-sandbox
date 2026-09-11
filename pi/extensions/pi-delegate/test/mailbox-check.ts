@@ -126,7 +126,7 @@ async function drive(
 			capture.prompts.push({ name: req.name, text: req.text });
 			capture.answerAtNudge = existsSync(join(dir, `a-${NAME}.json`));
 		},
-		waitSettle: async () => ({ status: "idle", timedOut: false }),
+		waitSettle: async () => ({ kind: "settled", status: "idle" }),
 		getStatus: async () => ({ name: NAME, status }),
 		listStatuses: async () => [],
 		teardown: async () => ({ alreadyGone: false }),

@@ -167,22 +167,53 @@ export class FakeWorkerHost implements Transport {
 
 	async waitSettle(req: Parameters<Transport["waitSettle"]>[0]): Promise<SettleResult> {
 		// Scripted settle: one status per poll slice, until a settled one. A
-		// slice that exhausts the script classifies as neverStarted unless a
+		// slice that exhausts the script classifies as never-started unless a
 		// started-status was observed (two-phase D3 shape, seam-level).
+		// Migration stage 3 (audit step 8): the fake now honors the FULL seam
+		// settle contract — the caller-owned completion proof (proofSettled),
+		// the early release (releaseOnStarted) and the abort-detaches-never-
+		// kills discipline — and returns the seam's DISCRIMINATED settle union.
+		// Before this the fake only produced legacy flag-sets, so the
+		// "backend never reports working" / "done aged into idle" scenarios
+		// (§19.1b/§19.1c) were reproducible only against live herdr.
 		const agent = this.agents.get(req.name);
 		if (!agent) {
 			throw new DelegateErrorImpl("E_TIMEOUT", `fake host: no agent ${req.name}`, "Poll delegate_status.");
 		}
 		let started = false;
+		let last: AgentStatusName = "unknown";
 		const t0 = Date.now();
 		for (;;) {
+			if (req.signal?.aborted) {
+				// Abort detaches the wait, never the worker (seam contract).
+				return { kind: "detached", status: last };
+			}
 			const status = this.script.shift() ?? "unknown";
 			this.lastObserved = status;
+			if (status !== "unknown") last = status;
 			if (!started && STARTED.includes(status)) started = true;
 			req.onPoll?.({ status, started, elapsedMs: Date.now() - t0 });
-			if (SETTLED.includes(status)) return { status, timedOut: false };
+			if (started && SETTLED.includes(status)) return { kind: "settled", status };
+			// Caller-owned completion proof (§19.1c), consulted only while life is
+			// unproven — same discipline as the herdr adapter: a throwing proof
+			// counts as "not proven", never blocks the wait.
+			if (!started && !STARTED.includes(status) && req.proofSettled) {
+				let proven = false;
+				try {
+					proven = await req.proofSettled();
+				} catch {
+					proven = false;
+				}
+				if (proven) return { kind: "finished-before-watch", status: "idle" };
+			}
+			// v1.14 early release (watch.releaseOn=started), seam-level parity.
+			if (req.releaseOnStarted && started && status === "working") {
+				return { kind: "started-confirmed", status };
+			}
 			if (this.script.length === 0) {
-				return { status: "unknown", timedOut: true, neverStarted: !started };
+				return started
+					? { kind: "timeout", status: last }
+					: { kind: "never-started", status: "unknown" };
 			}
 		}
 	}
