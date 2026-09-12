@@ -36,6 +36,7 @@ The healing release: the four-way 2026-09-11 audit of the 1.16.1 line turned int
 - **Lying contracts corrected** (seam module header, fleet stale fail-open paragraph); six production TypeScript errors resolved; `tsc --noEmit` is now a gate; both commands guard dialog/notify calls with `ctx.hasUI`.
 - **Silent-catch residue surfaced:** archive failures carry a reason, start-failure manifest-rollback failures are logged, audit-append failures are counted. Regression: `test/silent-catch-check.ts`.
 - **False worker-dead for worker-orchestrators:** a worker that ended its turn while its own fleet was still running was classified "settled with no report", causing retries and E_NAME collisions; now the parent watcher sees the in-flight fleet and gets an honest `fleet-in-flight` state instead. Regression: `test/watcher-check.ts` (new block).
+- **Schema-violating reports self-heal:** a report rejected at collect (e.g. `status: "done"`) no longer forces a full re-spawn — the watcher automatically posts a fix steer (the exact validator error) to a live worker, which rewrites the report in place; the report-invalid guidance is cheapest-first (steer first, re-spawn only if the worker is gone) and the spawn prompt carries a status anti-example. Regression: `test/watcher-check.ts` (+ auto-nudge block), `test/report-contract-check.ts` (prompt pin).
 
 ### Windows path support
 

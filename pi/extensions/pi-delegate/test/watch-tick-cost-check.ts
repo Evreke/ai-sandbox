@@ -123,6 +123,18 @@ const ROOT = mkdtempSync(join(tmpdir(), `tick-cost-`));
 	// The layer file is rewritten (watcher stamps retiredAt) → one more read,
 	// and the new stamp is visible (no semantics change).
 	await updateWatchStamps(dir, "cafebabe", "w1", { retirableSince: "2026-09-11T00:00:00.000Z", retiredAt: "2026-09-11T01:00:00.000Z" });
+	// BUG_FIX_CONTEXT (TC6 flake, two independent sightings on this host):
+	// symptom — the rewritten layer sometimes read as UNCHANGED (readCount
+	// stayed 1, the new stamp invisible): the cache compares per-file mtimeMs,
+	// and on this host the mtime quantization is coarse — a rewrite landing in
+	// the same quant as the initial write produces the SAME statSync mtimeMs,
+	// so the change is invisible. Why the rewrite alone did not work: natural
+	// write timestamps are not guaranteed to cross a quant boundary. What was
+	// done: force the rewritten layer's mtime to a fixed timestamp far above
+	// the natural one (same deterministic-utimes trick the session-file block
+	// above already uses) — the changed-cache-detected path becomes clock-
+	// controlled, the test measures the cache logic, not the host clock.
+	utimesSync(watchStampsPathFor(dir, "cafebabe"), new Date(2_000_000_000_000), new Date(2_000_000_000_000));
 	const l3 = readLayers(dir, cache);
 	const afterRead3 = cache.get(dir)?.readCount ?? 0;
 	check(
