@@ -13,6 +13,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history: the changelog gate below computes git merge-base
+          # against the base branch — impossible in a shallow clone (depth 1
+          # kills the gate with a bare exit 1 before any error line prints).
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
