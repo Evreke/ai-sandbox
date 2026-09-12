@@ -59,7 +59,7 @@ Also FIXED from the former open-candidates list:
   batch does not re-fire; rollback survives only for genuine pre-delivery
   failures (regression: `test/watcher-check.ts` W19).
 
-## Epic: WorkerHost inversion (in flight, 2026-09-10)
+## Epic: WorkerHost inversion — DONE (2026-09-10, release 1.16.0)
 
 Hide herdr behind a backend-agnostic `WorkerHost` interface so the backend is
 swappable (tmux / other). Approved design: interface + herdr adapter +
@@ -91,9 +91,27 @@ committed with the epic). Pipeline: research → PoC → impl → e2e ∥ QA →
 - **Constraints:** tier table shape is config-frozen surface; herdr-host
   refactor (above) must not gate this — model selection is transport-neutral.
 
-## Milestone: Windows path support + pluggable mailbox store
+## Milestone: Windows path support + pluggable mailbox store — Windows path support DONE (2026-09-12, release 1.17.0)
 
-**Status: research/design done (docs/design-windows-mailbox.md); implementation open.**
+**Status: Windows path support — DONE in 1.17.0** (research/design:
+docs/design-windows-mailbox.md; all 14 acceptance criteria of the original TZ
+closed; run-checks 37/37). **Pluggable mailbox store (the ExchangeStore /
+SqliteStore seam) — still open:** it is out of the 1.17.0 scope, only the path
+layer landed; the agent-facing wire format stays the q-/a- files.
+
+- **Windows path support (landed in 1.17.0).** Platform-aware default exchange
+  root (`%LOCALAPPDATA%\pi\exchange` on win32, `/tmp/exchange` unchanged on
+  POSIX) with the `PI_DELEGATE_EXCHANGE_ROOT` override; every exchange-layer
+  path assembled through the single portable builder `src/expaths.ts` (static
+  no-concat pin T1.9); brief validation and all session-path ownership
+  compares case/separator-stable on Windows (`sameSessionPath` in
+  `src/watch-role.ts`, POSIX byte-identical `===`); herdr adapter Windows
+  launch policy (`cmd.exe /d /s /c` with per-argument quoting,
+  `windowsHide`, `taskkill /pid … /T /F` tree-kill escalation). Evidence:
+  CHANGELOG 1.17.0 "### Windows path support" subsection; `test/expaths-check.ts`,
+  `test/transport-win-check.ts`, the static pin T1.9 in `test/static-check.ts`;
+  manual QA gate on a real Windows host: STABILIZATION.md "Manual QA gate —
+  Windows host". A real-Windows E2E run is not part of CI.
 
 - **Problem:** pi-delegate is POSIX-bound — the mailbox/delegation does not work on
   Windows (~40 coupling points: hard-coded /tmp/exchange, 13 template-literal path
