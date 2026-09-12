@@ -277,6 +277,66 @@ function fixtureRows(): FleetRow[] {
 }
 
 // ---------------------------------------------------------------------------
+// Windows session-path policy (TZ 1.17.0 §3.4) — sameSessionPath helper,
+// routed through the canonical verdicts with an injected platform.
+// ---------------------------------------------------------------------------
+
+import { sameSessionPath, sessionRole, workerAudienceMatch } from "../src/watch-role.ts";
+
+{
+	// W1 win32 unit: casing drift folds → same file.
+	check(
+		"W1a win32: drive/component casing folds to true",
+		sameSessionPath("C:\\Users\\u\\s.jsonl", "c:\\users\\u\\s.jsonl", "win32"),
+	);
+	check(
+		"W1b win32: mixed separators fold to true",
+		sameSessionPath("C:\\Users/u/s.jsonl", "C:\\Users\\u\\s.jsonl", "win32"),
+	);
+	check(
+		"W1c win32: different files stay distinct",
+		!sameSessionPath("C:\\Users\\u\\s.jsonl", "C:\\Users\\u\\t.jsonl", "win32"),
+	);
+	// W2 POSIX exactness regression barrier (TZ acceptance criterion 8):
+	// a case-sensitive FS may legitimately host two paths differing only
+	// by case — no casefolding "just in case" on posix.
+	check(
+		"W2a posix: case-different paths stay distinct",
+		!sameSessionPath("/root/A.json", "/root/a.json", "linux"),
+	);
+	check("W2b posix: identical paths match", sameSessionPath("/root/a.json", "/root/a.json", "linux"));
+	// W3 through the canonical delivery verdict with an injected platform.
+	check(
+		"W3a win32 owner casing drift → mine (TZ criterion 7)",
+		workerAudienceMatch(
+			{ orchestratorSessionPath: "C:\\Users\\u\\s.jsonl" },
+			{ sessionFile: "c:\\users\\u\\s.jsonl" },
+			{ legacyFailOpen: false, platform: "win32" },
+		) === "mine",
+	);
+	check(
+		"W3b posix case-different owner → foreign",
+		workerAudienceMatch(
+			{ orchestratorSessionPath: "/root/A.json" },
+			{ sessionFile: "/root/a.json" },
+			{ legacyFailOpen: false, platform: "linux" },
+		) === "foreign",
+	);
+	// W4 through the mount-side role table (win32 injected).
+	const winManifests = [
+		{ workers: [{ sessionPath: "c:\\users\\u\\s.jsonl", orchestratorSessionPath: "c:\\users\\u\\s.jsonl" }] },
+	];
+	const winRole = sessionRole({ sessionFile: "C:\\Users\\u\\s.jsonl" }, winManifests, { platform: "win32" });
+	check("W4a win32: casing-variant sessionPath → isWorker", winRole.isWorker);
+	check("W4b win32: casing-variant orchestratorSessionPath → ownsChildren", winRole.ownsChildren);
+	// W5 default platform = process.platform (this host is POSIX → exact).
+	check(
+		"W5 default platform on a posix host keeps exactness",
+		!sameSessionPath("/root/A.json", "/root/a.json") && sameSessionPath("/root/a.json", "/root/a.json"),
+	);
+}
+
+// ---------------------------------------------------------------------------
 
 console.log(failures === 0 ? "\nALL OWNERSHIP CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

@@ -60,7 +60,7 @@ import {
 	WATCH_DEFAULT_STALE_AFTER_MS,
 } from "./usage.ts";
 import { WATCH_DEAD_GRACE_MS, WATCH_LOOKBACK_MS } from "./watch-config.ts";
-import { sessionRole, workerAudienceMatch } from "./watch-role.ts";
+import { sameSessionPath, sessionRole, workerAudienceMatch } from "./watch-role.ts";
 import {
 	CONTEXT_CRITICAL_PCT,
 	type AgentStatus,
@@ -298,10 +298,13 @@ export function workersFromManifests(
 			// muted (and leaf-suppressed) any new session that merely started
 			// in a checkout where a worker once ran — identity by cwd is
 			// ambiguous (tab workers share the orchestrator's checkout too).
+			// TZ 1.17.0 §3.4: the compare itself is sameSessionPath (posix:
+			// exact `===`, byte-identical to the former raw compare; win32:
+			// casefold + separator fold) — default platform, no plumbing here.
 			const isSelf =
 				self.sessionFile !== undefined &&
 				typeof w.sessionPath === "string" &&
-				w.sessionPath === self.sessionFile;
+				sameSessionPath(w.sessionPath, self.sessionFile);
 			workers.push({
 				name: w.name,
 				dir: manifest.dir,

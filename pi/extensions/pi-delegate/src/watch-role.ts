@@ -24,8 +24,17 @@
  *     fallback (the B1 narrowing lives inside the "foreign" verdict);
  *   - this module never WRITES owner fields — ownership is recorded by the
  *     spawn path only (guideline §3.3).
+ * Windows session-path policy (TZ 1.17.0 §3.4): every session-path identity
+ * compare in this module goes through the ONE helper sameSessionPath —
+ * byte-identical `===` on POSIX (Linux FS is case-sensitive; casefolding
+ * "just in case" would be a POSIX regression), and on win32 a casefold +
+ * separator fold (`/` and `\` to one shape) so drive-letter/component casing
+ * drift between the owner writer and the live reader cannot make an
+ * orchestrator foreign to its own workers. No ad-hoc toLowerCase at a
+ * single call site, ever.
  * Exported surface: AudienceVerdict, OwnerFields, SessionIdentity,
- * AudienceOptions, workerAudienceMatch, SessionRole, sessionRole.
+ * AudienceOptions, workerAudienceMatch, SessionRole, sessionRole,
+ * sameSessionPath.
  * Error modes: none — every read degrades (non-string/garbage owner fields
  * read as absent), never throws.
  */
@@ -76,6 +85,53 @@ export interface AudienceOptions {
 	 *  every mounted watcher when true — unsafe on a machine with several
 	 *  sessions. NEVER extends to the "no-self-id" edge. */
 	legacyFailOpen: boolean;
+	/** Optional path-comparison platform for the owner compare (TZ §3.4):
+	 *  "win32" enables the casefold + separator-fold session-path policy,
+	 *  anything else keeps the POSIX-exact `===`. Default process.platform.
+	 *  Additive, optional — existing callers are unchanged. */
+	platform?: NodeJS.Platform;
+}
+
+/**
+ * Session-path identity compare (TZ 1.17.0 §3.4): THE one helper for every
+ * "is this manifest session path the same file as this session's path?"
+ * question. On POSIX it is a byte-identical `===` — exactly what the raw
+ * compares did before, so nothing changes on Linux/macOS (a case-sensitive
+ * FS may legitimately host two paths differing only by case; folding them
+ * would be a POSIX regression). On win32 it casefolds and folds BOTH
+ * separators (`/` and `\`) to `\` before comparing, because a Windows
+ * session file path may drift in drive-letter/component casing between the
+ * writer (spawn recording orchestratorSessionPath) and the reader (the
+ * live session identity) without being a different file.
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input:
+ *   - a, b: session JSONL file paths as recorded/read (may be any strings;
+ *     callers gate on non-empty before calling)
+ *   - platform: NodeJS.Platform, default process.platform — injected in
+ *     tests; production call sites pass the ambient platform
+ * Output: true iff the two paths denote the same session file under the
+ *   platform's comparison policy
+ * Guarantees:
+ *   - POSIX (platform !== "win32"): byte-identical to the former raw `===`
+ *     compare — no casefolding, no separator folding, no normalization
+ *     (TZ §4.2 regression barrier, acceptance criterion 8)
+ *   - win32: ASCII/lowercase casefold via toLowerCase plus folding of `/`
+ *     and `\` runs to a single `\`; NOTHING else folds — no
+ *     trailing-separator stripping (these are FILE paths, not dirs), no
+ *     drive-relative or UNC or short-name (8.3) normalization, no `..`
+ *     resolution
+ *   - leaf-safe: plain string ops only — no node:path, no src/ imports
+ *   - pure: no I/O, never throws
+ * Raises: never
+ */
+export function sameSessionPath(
+	a: string,
+	b: string,
+	platform: NodeJS.Platform = process.platform,
+): boolean {
+	if (platform !== "win32") return a === b;
+	return a.toLowerCase().replace(/[\\/]+/g, "\\") === b.toLowerCase().replace(/[\\/]+/g, "\\");
 }
 
 function nonEmptyString(v: unknown): string | undefined {
@@ -125,7 +181,21 @@ export function workerAudienceMatch(
 	const workerOwner = nonEmptyString(ownerFields.orchestratorSessionPath);
 	const masterOwner = nonEmptyString(ownerFields.masterSessionPath);
 	if (workerOwner === undefined && masterOwner === undefined) return "no-owner";
-	return (workerOwner ?? masterOwner) === selfId ? "mine" : "foreign";
+	const owner = workerOwner ?? masterOwner;
+	if (owner === undefined) return "no-owner";
+	// BUG_FIX_CONTEXT (TZ 1.17.0 §3.4, acceptance criterion 7): symptom — on
+	// Windows the owner path could drift in drive-letter/component casing
+	// (`C:\Users\…` recorded by spawn vs `c:\users\…` read live), and the raw
+	// `===` classified the orchestrator as "foreign" for its OWN workers, so
+	// wakes silently never delivered (delivery is fail-closed on "foreign").
+	// Why the raw `===` was wrong: it is correct on POSIX (case-sensitive FS,
+	// byte-identical intent) but wrong on win32 where casing drift does not
+	// make a different file. What was done: ONE helper, sameSessionPath,
+	// with an explicit platform policy (posix: exact `===`; win32: casefold
+	// + separator fold) — the platform is injectable via AudienceOptions
+	// for tests, defaulting to process.platform. No ad-hoc toLowerCase at
+	// a single call site.
+	return sameSessionPath(owner, selfId, opts.platform) ? "mine" : "foreign";
 }
 
 /** The two mount-side roles of the guideline §3.4 table. */
@@ -190,7 +260,15 @@ export interface ManifestLike {
  *     outlive the 24 h fleet), never throws
  * Raises: never
  */
-export function sessionRole(self: SessionIdentity, manifests: ReadonlyArray<ManifestLike | null | undefined>): SessionRole {
+export function sessionRole(
+	self: SessionIdentity,
+	manifests: ReadonlyArray<ManifestLike | null | undefined>,
+	opts: { platform?: NodeJS.Platform } = {},
+): SessionRole {
+	// TZ §3.4: the platform is injectable for tests; default = ambient
+	// process.platform via sameSessionPath's own default. Optional and
+	// additive — existing callers are unchanged.
+	const platform = opts.platform;
 	const selfId = nonEmptyString(self.sessionFile);
 	let isWorker = false;
 	let ownsChildren = false;
@@ -207,14 +285,20 @@ export function sessionRole(self: SessionIdentity, manifests: ReadonlyArray<Mani
 			// commit message). A degraded self-id (selfId undefined) can match
 			// nothing → "not a worker" → the session mounts (fail-open toward
 			// MOUNTING; delivery stays fail-closed, guideline §3.6).
-			if (!isWorker && selfId !== undefined && e.sessionPath === selfId) {
+			if (
+				!isWorker &&
+				selfId !== undefined &&
+				typeof e.sessionPath === "string" &&
+				sameSessionPath(e.sessionPath, selfId, platform)
+			) {
 				isWorker = true;
 			}
 			if (
 				!ownsChildren &&
 				selfId !== undefined &&
-				e.orchestratorSessionPath === selfId &&
-				nonEmptyString(e.orchestratorSessionPath) !== undefined
+				typeof e.orchestratorSessionPath === "string" &&
+				nonEmptyString(e.orchestratorSessionPath) !== undefined &&
+				sameSessionPath(e.orchestratorSessionPath, selfId, platform)
 			) {
 				ownsChildren = true;
 			}
