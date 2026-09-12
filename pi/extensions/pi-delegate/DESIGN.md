@@ -158,7 +158,11 @@ Each module is the single owner of the invariants named in its MODULE_CONTRACT h
 must not reach into a neighbor's: `spawn.ts` never observes, the observation family never
 spawns or mutates a worker outside the retire/teardown contracts, only `index.ts` imports
 an adapter, only `usage.ts` parses session JSONL, only the exchange layer
-(`exchange.ts`/`expaths.ts` and the extracted stores) builds exchange paths.
+(`exchange.ts`/`expaths.ts` and the extracted stores) builds exchange paths. Exchange-layer
+paths are assembled ONLY through the `expaths.ts` builders (`node:path`, platform-aware):
+raw `/` template-literal assembly, separator-shaped `split`, `endsWith("/_probe")` and
+`startsWith(x + "/")` are banned in production `src/` and statically pinned
+(`test/static-check.ts`).
 
 Dependency rules (enforced by test/static-check.ts): no src/ module imports a backend
 adapter (`src/herdr/host.ts`, `src/host/fake.ts`) — the adapter is bound and injected once
@@ -300,6 +304,11 @@ available on disk and/or in the tool result's details.
 ├── brief-<name>.md      # written by orchestrator (model), validated by tool
 └── report-<name>.json   # written by worker; validated against fixed schema on collect
 ```
+
+The tree above is shown in the POSIX form. The exchange root is platform-dependent:
+`/tmp/exchange` on Linux/macOS, `%LOCALAPPDATA%\pi\exchange` on Windows (env override
+`PI_DELEGATE_EXCHANGE_ROOT`). Every path in the tree is assembled only through the
+`expaths.ts` builders — never by raw `/` string concatenation.
 
 **Report schema (fixed, v1 — strict contract):**
 

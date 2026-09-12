@@ -28,6 +28,10 @@ agent start, prompting, settle observation, strict report collection.
    Names: `[a-z][a-z0-9_-]{0,31}`. Briefs are name-agnostic: the tool's fixed prompt
    tells the worker its canonical name and report path — never hard-code worker names
    or report filenames in briefs.
+   The exchange root is platform-dependent: `/tmp/exchange` on Linux/macOS,
+   `%LOCALAPPDATA%\pi\exchange` on Windows; the `PI_DELEGATE_EXCHANGE_ROOT` environment
+   variable overrides it. Paths in commands must use the native form of the running
+   platform.
 3. **Spawn** — call `delegate` per worker (parallel tool calls for fan-out).
    - Smoke gate when fanning out ≥3 workers: `mode: "probe"` — optional (enterprise
      cost); the first real worker's structured spawn failures (`E_PLACE`/`E_START`/

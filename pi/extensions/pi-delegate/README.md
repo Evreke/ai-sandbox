@@ -27,6 +27,11 @@ spawn-and-baby-sit ritual.
 - **herdr on PATH — a hard requirement.** The extension drives a backend host through the
   `WorkerHost` seam; today the only production backend is herdr. Without the `herdr` CLI
   the tools do not work.
+- **On Windows: herdr for Windows.** The extension's exchange/path layer is
+  Windows-portable in 1.17.0 (platform-aware default exchange root, portable path
+  builders, case/separator-stable brief validation); running the host backend on Windows
+  requires herdr for Windows. Beyond that layer a Windows host backend is not certified —
+  do not read this as "Windows fully supported".
 - **A resolvable tier/provider/model/thinking** — a named tier in
   `~/.pi/agent/pi-delegate.config.json` or explicit per-call params. There is no built-in
   tier; unresolved → `E_TIER`.
@@ -104,10 +109,14 @@ Judgment stays with the model (decomposition, verification, merge); mechanics be
 
 ### Operational notes
 
-- **The exchange root is not a durable store.** The default location is `/tmp/exchange`:
-  it is cleared on reboot, and on a multi-user host it is a shared path (other users can
-  read the manifests; task-slug collisions are possible). The `PI_DELEGATE_EXCHANGE_ROOT`
-  environment variable overrides it.
+- **Exchange root — not a durable store.** The default location is `/tmp/exchange` on
+  Linux/macOS (cleared on reboot) and `%LOCALAPPDATA%\pi\exchange` on Windows (fallback
+  `homedir()\AppData\Local\pi\exchange`); the `PI_DELEGATE_EXCHANGE_ROOT` environment
+  variable overrides it (absolute path). On a multi-user host it is a shared path (other
+  users can read the manifests; task-slug collisions are possible). Brief paths use the
+  native form of the running platform: `/tmp/exchange/<task>/brief-<name>.md` on
+  Linux/macOS,
+  `C:\Users\<you>\AppData\Local\pi\exchange\<task>\brief-<name>.md` on Windows.
 - Collected reports are copied to `~/.pi/agent/delegate-archive/<task>/` (best-effort,
   30-day TTL) — that archive is the durable copy.
 - Watcher wake-ups are scoped to the owning session via ownership metadata and are
@@ -151,6 +160,11 @@ Full mechanics: [DESIGN.md](./DESIGN.md).
 - **herdr на PATH — жёсткое требование.** Расширение управляет backend-хостом через шов
   `WorkerHost`; единственный production-бэкенд сегодня — herdr. Без CLI `herdr`
   инструменты не работают.
+- **На Windows: herdr for Windows.** Exchange/path-слой расширения в 1.17.0 переносим на
+  Windows (платформенный exchange-корень по умолчанию, переносимые сборщики путей,
+  устойчивая к регистру и разделителям валидация брифа); запуск host-бэкенда на Windows
+  требует herdr for Windows. За пределами этого слоя Windows-хост не сертифицирован — не
+  читайте это как «Windows полностью поддерживается».
 - **Разрешимый tier/provider/model/thinking** — именованный тир в
   `~/.pi/agent/pi-delegate.config.json` или явные параметры вызова. Встроенного тира нет;
   не разрешилось → `E_TIER`.
@@ -225,10 +239,14 @@ done/idle.
 
 ### Эксплуатационные заметки
 
-- **Exchange-корень — не durable store.** Путь по умолчанию — `/tmp/exchange`: он
-  очищается при ребуте, а на multi-user хосте это общий путь (другие пользователи могут
-  читать манифесты; возможны коллизии task slug). Переменная окружения
-  `PI_DELEGATE_EXCHANGE_ROOT` переопределяет его.
+- **Exchange-корень — не durable store.** Путь по умолчанию — `/tmp/exchange` на
+  Linux/macOS (очищается при ребуте) и `%LOCALAPPDATA%\pi\exchange` на Windows (fallback
+  `homedir()\AppData\Local\pi\exchange`); переменная окружения
+  `PI_DELEGATE_EXCHANGE_ROOT` переопределяет его (абсолютный путь). На multi-user хосте
+  это общий путь (другие пользователи могут читать манифесты; возможны коллизии task
+  slug). Пути брифов используют нативную форму платформы:
+  `/tmp/exchange/<task>/brief-<имя>.md` на Linux/macOS,
+  `C:\Users\<вы>\AppData\Local\pi\exchange\<task>\brief-<имя>.md` на Windows.
 - Собранные отчёты копируются в `~/.pi/agent/delegate-archive/<task>/` (best-effort,
   TTL 30 дней) — архив и есть долговременная копия.
 - Пробуждения вотчера ограничены сессией-владельцем через метки владения и по умолчанию
