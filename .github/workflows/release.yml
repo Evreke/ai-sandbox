@@ -13,6 +13,12 @@ on:
 permissions:
   contents: write
 
+# Serialize release runs: two near-simultaneous squash-merges to main each
+# trigger this workflow; queue them instead of racing over the tag.
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
 jobs:
   tag-and-release:
     runs-on: ubuntu-latest
@@ -27,24 +33,30 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          # Pinned: an unrelated bun release must not flip the gate; bumps
+          # are deliberate (change this line explicitly).
+          bun-version: 1.4.2
 
-      # Same as ci.yml: typebox is a peerDependency, the checkout has no
-      # node_modules — without the install every check that spawns a bun
-      # subprocess fails with a package-resolution error.
+      # Same as ci.yml: typebox is a peerDependency (optional, range *), the
+      # checkout has no node_modules — without the install every check that
+      # spawns a bun subprocess fails with a package-resolution error.
       - name: Install dependencies (frozen lockfile)
         working-directory: pi/extensions/pi-delegate
         run: bun install --frozen-lockfile
 
       # The tag must only ever point at green code: a squash-merge is a NEW
       # commit, so re-run the suite here even though the PR already passed CI.
+      # Canonical runner (same protocol as ci.yml — see test/run-checks.sh):
+      # per-file timeout, one env-flake retry, explicit ENV-FAIL verdict,
+      # non-zero exit on any FAIL.
+      # Typecheck gate on main before tagging (same as the PR gate in ci.yml).
+      - name: Typecheck (tsc --noEmit, QA config)
+        working-directory: pi/extensions/pi-delegate
+        run: bunx tsc --noEmit -p test/tsconfig.qa.json
+
       - name: Run check suite on main before tagging
         working-directory: pi/extensions/pi-delegate
-        run: |
-          set -e
-          for f in test/*.ts; do
-            bun run "$f" || bun test "./$f"
-          done
+        run: ./test/run-checks.sh
 
       - name: Version sync (both package.json ship together)
         id: sync
@@ -98,8 +110,31 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "v${{ steps.sync.outputs.version }}" -m "Release v${{ steps.sync.outputs.version }}"
-          git push origin "v${{ steps.sync.outputs.version }}"
+          tag="v${{ steps.sync.outputs.version }}"
+          # Race hygiene: two near-simultaneous merges queue via the
+          # concurrency group, but a tag can still pre-exist (re-run of the
+          # workflow, manual tag, replay). "Tag already exists" must be a
+          # no-op success, not a red main.
+          if git ls-remote --tags origin "refs/tags/$tag" | grep -q "refs/tags/$tag$"; then
+            echo "::notice::$tag already exists on the remote — treating as a no-op success"
+            exit 0
+          fi
+          git tag -a "$tag" -m "Release $tag"
+          if ! git push origin "refs/tags/$tag"; then
+            # Push rejected: another run may have created the very same tag
+            # between our check and our push. If the remote tag object is
+            # byte-identical to ours (same commit, same annotated object —
+            # deterministic from this merge commit), the other run won and
+            # this is success. Anything else is a real failure.
+            remote_obj=$(git ls-remote origin "refs/tags/$tag" | cut -f1)
+            local_obj=$(git rev-parse "$tag")
+            if [ -n "$remote_obj" ] && [ "$remote_obj" = "$local_obj" ]; then
+              echo "::notice::$tag was created by a concurrent release run with an identical object — treating as a no-op success"
+              exit 0
+            fi
+            echo "::error::tag push failed and the remote tag differs from ours (remote: ${remote_obj:-absent}, local: $local_obj)"
+            exit 1
+          fi
 
       - name: Create GitHub Release
         if: steps.need.outputs.need == 'true'

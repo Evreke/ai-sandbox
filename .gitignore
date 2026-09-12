@@ -3,3 +3,12 @@
 orchestration/
 pi-delegate-vs-subagents.pdf
 pi/extensions/pi-delegate/node_modules
+
+# OS / editor artifacts — never publish (found during demo-readiness hygiene sweep)
+*:Zone.Identifier
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*~
+.#*

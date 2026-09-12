@@ -1,5 +1,5 @@
 /**
- * T2 — Transport contract tests against REAL herdr (DESIGN.md §8).
+ * T2 — Transport contract tests against REAL herdr.
  *
  * Run with: bun test/transport-contract.ts   (from repo root; NOT inside a herdr worktree cwd)
  *
@@ -27,10 +27,21 @@ import {
 	createHerdrTransport,
 	parseHerdrResult,
 } from "../src/herdr/host.ts";
+import { installSignalCleanup, sweepStaleHerdrFixtures } from "./herdr-hygiene-fixture.ts";
 import type { Placement } from "../src/host.ts";
 
 const execFileP = promisify(execFile);
 const OPS_LOG = "/tmp/exchange/pi-delegate-ext/qa-herdr-ops.log";
+
+// --- stale-fixture sweep + SIGTERM-safe cleanup (herdr-hygiene-fixture) -----
+// Sweep LEFTOVER state from previous killed/crashed runs BEFORE creating any
+// new fixture, and arm the bounded signal handler so THIS run's cleanup also
+// fires on the runner's `timeout 30` SIGTERM (finally never runs on signal death).
+{
+	const swept = await sweepStaleHerdrFixtures(["qa-t2-repo-"]);
+	console.log(`swept stale qa-t2-repo-* fixtures: closed ${swept.closed.length} / failed ${swept.failed.length}`);
+}
+installSignalCleanup(cleanupAll);
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = "") {
@@ -80,14 +91,14 @@ async function liveWorkspaceIds(): Promise<Set<string>> {
 async function forceCleanup(p: Placement) {
 	logOp(`herdr worktree remove --workspace ${p.workspaceId} --force  (cleanup fallback)`);
 	try {
-		await execFileP("herdr", ["worktree", "remove", "--workspace", p.workspaceId, "--force"], { encoding: "utf8", timeout: 30_000 });
+		await execFileP("herdr", ["worktree", "remove", "--workspace", p.workspaceId!, "--force"], { encoding: "utf8", timeout: 30_000 });
 	} catch {
 		/* fall through — the workspace-close fallback below handles shells (O2). */
 	}
 	// herdr may keep a non-linked workspace shell after worktree remove — always close.
 	logOp(`herdr workspace close ${p.workspaceId}  (cleanup fallback)`);
 	try {
-		await execFileP("herdr", ["workspace", "close", p.workspaceId], { encoding: "utf8", timeout: 30_000 });
+		await execFileP("herdr", ["workspace", "close", p.workspaceId!], { encoding: "utf8", timeout: 30_000 });
 	} catch {
 		// Only a failure of BOTH paths leaves state behind — verify before alarming.
 		const still = await execFileP("herdr", ["workspace", "list"], { encoding: "utf8", timeout: 30_000 }).then((r) => String(r)).catch(() => "");
@@ -121,6 +132,38 @@ const created: Placement[] = [];
 let subDir: string | undefined;
 const MODEL = { provider: "llm-platform-alpha", model: "glm-5.3-flash", thinking: "high" };
 
+// Idempotent module-scope cleanup (extracted from the old `finally` body —
+// behavior on the normal path is unchanged). SIGTERM death is NOT an
+// exception path, so `finally` alone cannot clean up under run-checks.sh's
+// `timeout 30`: the signal handler (installSignalCleanup, registered above)
+// calls this same function, and the guard makes double invocation harmless.
+let transportCleaned = false;
+async function cleanupAll() {
+	if (transportCleaned) return;
+	transportCleaned = true;
+	// Each step is individually guarded: a signal may arrive before some of
+	// the module-scope fixture vars below are initialized (TDZ) — partial
+	// cleanup beats none.
+	try { process.chdir(originalCwd); } catch { /* cwd already gone */ }
+	// The prefix must stay inside the worktrees dir (that is what makes the cwd
+	// sub-authority) — but it is removed here, so runs no longer accumulate.
+	if (subDir !== undefined) {
+		try { rmSync(subDir, { recursive: true, force: true }); } catch { /* already gone */ }
+		subDir = undefined;
+	}
+	for (const p of [...created]) await forceCleanup(p);
+	created.length = 0;
+	// Repo-shell sweep (BEFORE rmSync(repoDir)): every `herdr worktree create`
+	// against the fixture repo ALSO creates a repo-level shell workspace whose
+	// checkout_path IS the /tmp fixture repo itself (is_linked_worktree: false).
+	// The branch workspaces' teardown never touches that shell — once repoDir
+	// is rm'd below, the shell becomes a "(deleted)" ghost tab (the 2026-09
+	// incident shape). The sweep closes it best-effort on BOTH the normal and
+	// the signal path.
+	await sweepStaleHerdrFixtures(["qa-t2-repo-"]);
+	try { rmSync(repoDir, { recursive: true, force: true }); } catch { /* already gone */ }
+}
+
 try {
 	// -----------------------------------------------------------------------
 	// T2.1 + T2.2 — root-mode round-trip
@@ -145,7 +188,7 @@ try {
 			typeof p1.isLinkedWorktree === "boolean",
 		JSON.stringify(p1),
 	);
-	check("T2.2b placement created a NEW herdr workspace", !before.has(p1.workspaceId), p1.workspaceId);
+	check("T2.2b placement created a NEW herdr workspace", !before.has(p1.workspaceId!), p1.workspaceId);
 
 	// T2.2c — TAB placement round-trip (herdr drift pin, 2026-09-10): the tab
 	// id MUST come from the herdr result's tab.tab_id — never the paneId
@@ -153,7 +196,11 @@ try {
 	// the agent stayed alive; see placementFromTabResult BUG_FIX_CONTEXT).
 	{
 		logOp("transport.place(tab) [drift pin]");
-		const tabP = await t.place({ mode: "tab", label: "qa-probe-tab-shape" });
+		const tabP = await t.place({ mode: "tab", repoPath: repoDir, branch: "", label: "qa-probe-tab-shape" });
+		// tabId is adapter-internal (herdr records it ALONGSIDE the legacy fields,
+		// but the seam Placement does not carry it) — same cast the adapter's own
+		// teardown path uses (src/herdr/host.ts).
+		const tabId = (tabP as Placement & { tabId?: string }).tabId ?? tabP.paneId;
 		// NOT pushed into `created`: it lives in THIS session's workspace — the
 		// finally-cleanup force-removes workspaces, which must never touch ours.
 		check(
@@ -164,17 +211,17 @@ try {
 			// renamed tab.id → tab.tab_id once, and a stricter-than-reality test
 			// would break on the next legitimate herdr change (it did: tA = tab 10).
 			"T2.2c tab placement: tabId is a REAL tab id (not the pane id)",
-			tabP.kind === "tab" && typeof tabP.tabId === "string" && tabP.tabId.length > 0 && tabP.tabId !== tabP.paneId,
+			tabP.kind === "tab" && typeof tabId === "string" && tabId.length > 0 && tabId !== tabP.paneId,
 			JSON.stringify(tabP),
 		);
-		logOp(`transport.teardown(tab ${tabP.tabId}) [drift pin]`);
+		logOp(`transport.teardown(tab ${tabId}) [drift pin]`);
 		await t.teardown({ name: "qa-probe-tab-shape", placement: tabP, force: true }).catch(
 			// forceCleanup would remove the WORKSPACE — for a tab the fallback is
 			// a direct tab close (and if that fails too, a leftover empty tab is
 			// harmless: no agent was ever started in it).
 			async () => {
-				logOp(`herdr tab close ${tabP.tabId}  (cleanup fallback)`);
-				await execFileP("herdr", ["tab", "close", tabP.tabId], { encoding: "utf8", timeout: 30_000 });
+				logOp(`herdr tab close ${tabId}  (cleanup fallback)`);
+				await execFileP("herdr", ["tab", "close", tabId!], { encoding: "utf8", timeout: 30_000 });
 			},
 		);
 		check("T2.2d tab teardown with the parsed tabId succeeds", true);
@@ -183,7 +230,7 @@ try {
 	logOp(`herdr agent start qa-probe --kind pi --pane ${p1.paneId} --timeout 120000 -- --provider ${MODEL.provider} --model ${MODEL.model} --thinking ${MODEL.thinking}`);
 	const probeName = `qa-probe-${Date.now().toString(36)}`;
 	logOp(`herdr agent start ${probeName} (unique suffix avoids collision with live agents)`);
-	const s1 = await t.startAgent({ name: probeName, placementRef: p1.placementRef ?? p1.paneId, timeoutMs: 120_000, ...MODEL });
+	const s1 = await t.startAgent({ name: probeName, placementRef: p1.placementRef!, timeoutMs: 120_000, ...MODEL });
 	check("T2.2c startAgent returns canonical name", !!s1.name, JSON.stringify(s1));
 
 	logOp(`herdr agent prompt ${s1.name} "Reply with exactly: OK"  (submit, no --wait)`);
@@ -214,7 +261,7 @@ try {
 	logOp(`herdr worktree remove --workspace ${p1.workspaceId} --force  (teardown)`);
 	await t.teardown({ name: s1.name, placement: p1, force: true });
 	const after = await liveWorkspaceIds();
-	check("T2.2g placement gone from herdr workspace list after teardown", !after.has(p1.workspaceId), p1.workspaceId);
+	check("T2.2g placement gone from herdr workspace list after teardown", !after.has(p1.workspaceId!), p1.workspaceId);
 	created.splice(created.indexOf(p1), 1);
 
 	// -----------------------------------------------------------------------
@@ -238,11 +285,11 @@ try {
 	// CONTRACT (types.ts StartReq): "herdr auto-uniquifies on collision" → canonical
 	// name must differ. OBSERVED herdr behavior: rejects with agent_name_taken.
 	logOp(`herdr agent start qa-probe (workspace A) ... -- --provider ${MODEL.provider} --model ${MODEL.model} --thinking ${MODEL.thinking}`);
-	const sA = await t.startAgent({ name: "qa-probe", placementRef: pA.placementRef ?? pA.paneId, timeoutMs: 120_000, ...MODEL });
+	const sA = await t.startAgent({ name: "qa-probe", placementRef: pA.placementRef!, timeoutMs: 120_000, ...MODEL });
 	logOp(`herdr agent start qa-probe (workspace B, colliding with live ${sA.name}) ...`);
 	let collErr: unknown;
 	try {
-		await t.startAgent({ name: "qa-probe", placementRef: pB.placementRef ?? pB.paneId, timeoutMs: 120_000, ...MODEL });
+		await t.startAgent({ name: "qa-probe", placementRef: pB.placementRef!, timeoutMs: 120_000, ...MODEL });
 	} catch (e) {
 		collErr = e;
 	}
@@ -266,11 +313,11 @@ try {
 	await new Promise((r) => setTimeout(r, 1500));
 	for (const p of [pA, pB]) {
 		const ids = await liveWorkspaceIds();
-		if (ids.has(p.workspaceId)) await forceCleanup(p);
+		if (ids.has(p.workspaceId!)) await forceCleanup(p);
 	}
 	created.length = 0;
 	const afterConc = await liveWorkspaceIds();
-	check("T2.5b both concurrent workspaces gone after teardown", !afterConc.has(pA.workspaceId) && !afterConc.has(pB.workspaceId));
+	check("T2.5b both concurrent workspaces gone after teardown", !afterConc.has(pA.workspaceId!) && !afterConc.has(pB.workspaceId!));
 
 	// -----------------------------------------------------------------------
 	// T2.3 — sub-mode rejection (LAST: leaves cwd changed). A real sub-orchestrator
@@ -300,14 +347,21 @@ try {
 		JSON.stringify(subErr, Object.getOwnPropertyNames(subErr ?? {})),
 	);
 } finally {
-	process.chdir(originalCwd);
-	// The prefix must stay inside the worktrees dir (that is what makes the cwd
-	// sub-authority) — but it is removed here, so runs no longer accumulate.
-	if (subDir !== undefined) {
-		try { rmSync(subDir, { recursive: true, force: true }); } catch { /* already gone */ }
-	}
-	for (const p of created) await forceCleanup(p);
-	rmSync(repoDir, { recursive: true, force: true });
+	await cleanupAll();
+}
+
+// T2.H — herdr state self-clean (regression pin for the run-checks `timeout`
+// leak, 2026-09 incident: 32 ghost workspaces + 332 orphan dirs). Re-runs the
+// sweep's list step after the run: if THIS run left any 'qa-t2-repo-'
+// workspace behind (or a previous run's leftover could not be cleaned), the
+// sweep reports it via closed/failed and this check FAILS the test.
+{
+	const selfClean = await sweepStaleHerdrFixtures(["qa-t2-repo-"]);
+	check(
+		"T2.H herdr state self-clean: no 'qa-t2-repo-' workspaces remain after the run",
+		selfClean.closed.length === 0 && selfClean.failed.length === 0,
+		JSON.stringify(selfClean),
+	);
 }
 
 console.log(failures === 0 ? "\nALL TRANSPORT CONTRACT TESTS PASSED" : `\n${failures} CHECK(S) FAILED`);

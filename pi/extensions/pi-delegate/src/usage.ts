@@ -1,5 +1,5 @@
 /**
- * pi-delegate — gauges (DESIGN.md §20).
+ * pi-delegate — gauges (budget + context).
  * <p>
  * MODULE_CONTRACT: gauge layer — the ONLY place that parses worker session
  * JSONL files and turns them into budget/context numbers (§20 dual gauge),
@@ -50,8 +50,8 @@
  */
 
 import { closeSync, openSync, readFileSync, readdirSync, readSync, statSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { SessionUsage, SpawnTier } from "./host.ts";
 
 /** Canonical worker-stale default (§22): a collected worker still mounted
@@ -208,7 +208,7 @@ export function resolveContextWindow(modelId?: string): number {
 }
 
 /**
- * v1.9 (DESIGN.md §19.1c): resolve candidate pi session JSONL paths for a
+ * v1.9: resolve candidate pi session JSONL paths for a
  * worker that was spawned at startedAtMs with working directory workerCwd.
  *
  * pi stores sessions at
@@ -231,7 +231,7 @@ export function resolvePiSessionCandidates(
 	startedAtMs: number,
 	opts?: { sessionsRoot?: string; windowMs?: number },
 ): string[] {
-	const sessionsRoot = opts?.sessionsRoot ?? join(homedir(), ".pi", "agent", "sessions");
+	const sessionsRoot = opts?.sessionsRoot ?? join(getAgentDir(), "sessions");
 	const windowMs = opts?.windowMs ?? 10 * 60_000;
 	const munged = workerCwd.replace(/^\//, "").replace(/\//g, "-");
 	let entries: string[];
@@ -275,8 +275,8 @@ export function formatGaugeLine(usage: SessionUsage, contextWindow: number): str
 /**
  * Human budget-progress line for the settle heartbeat (v1.9b), e.g.
  * "budget 45% ↓67.5k/150k". Output tokens are the budgeted quantity
- * (DESIGN.md §14/§20). Empty when no cap is set (nothing to progress
- * against) — callers resolve the §14 default themselves for display.
+ * (budgeted quantity: output tokens). Empty when no cap is set (nothing to progress
+ * against) — callers resolve the default budget themselves for display.
  */
 export function formatBudgetLine(usage: SessionUsage, budgetTokens?: number): string {
 	if (budgetTokens === undefined || !Number.isFinite(budgetTokens) || budgetTokens <= 0) return "";
@@ -364,6 +364,10 @@ export function resolveTierTable(): Record<string, SpawnTier> {
  * Raises: none
  */
 export function formatTokens(n: number): string {
+	// Wave 3 step 5 (audit finding 7): the ONE k-denominated token spelling —
+	// fleet.ts's fmtK folded into it (the guard below is fmtK's: non-finite/
+	// negative → "0"; for valid inputs the two were already identical).
+	if (!Number.isFinite(n) || n < 0) return "0";
 	if (n < 1000) return String(n);
 	const k = n / 1000;
 	return `${k >= 100 ? Math.round(k) : Math.round(k * 10) / 10}k`;
@@ -471,4 +475,71 @@ export function sessionToolCallNames(sessionPath?: string): string[] {
  */
 export function countSessionToolCall(sessionPath: string | undefined, toolName: string): number {
 	return sessionToolCallNames(sessionPath).filter((n) => n === toolName).length;
+}
+
+// ---------------------------------------------------------------------------
+// Wave 4 item 5 (reliability finding 10) — the watcher tick's session-tail
+// scan, gated behind the session file's fingerprint (mtime + size): skip the
+// up-to-1 MB tail PARSE when the file has not changed since the last tick
+// that parsed it. The cache is a CALLER-HELD closure (watcher.ts, per-mount
+// session state — Law 3: no module-global registries); this module only
+// defines the entry shape and the cached read. Semantics unchanged: an
+// unchanged file yields the same names, hence the same events/fingerprints.
+// ---------------------------------------------------------------------------
+
+/** Cache entry for the session-tail tool-call scan. */
+export interface SessionToolCallCacheEntry {
+	mtimeMs: number;
+	size: number;
+	names: string[];
+	/** How many tail PARSES this entry performed (diagnostic — the Wave 4
+	 *  regression asserts one parse across ticks with an unchanged
+	 *  fingerprint; a changed file costs a new parse). */
+	parseCount: number;
+}
+
+/** Cached variant of sessionToolCallNames: re-parses the session tail only
+ *  when the file's fingerprint (mtime + size) moved since the last parse.
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: sessionPath (may be undefined); cache — caller-held Map (watcher.ts
+ *   closure); WITHOUT a cache the uncached sessionToolCallNames runs
+ * Output: toolCall names in the session tail (same contract as
+ *   sessionToolCallNames)
+ * Guarantees:
+ *   - an unchanged fingerprint → the cached names are returned and NO parse
+ *     happens (entry.parseCount stays);
+ *   - a moved/absent fingerprint → exactly one new parse, recorded;
+ *   - unreadable file → [] (cached too — same fingerprint semantics)
+ * Raises: never
+ */
+export function sessionToolCallNamesCached(
+	sessionPath: string | undefined,
+	cache?: Map<string, SessionToolCallCacheEntry>,
+): string[] {
+	if (!sessionPath) return [];
+	if (!cache) return sessionToolCallNames(sessionPath);
+	let mtimeMs = -1;
+	let size = -1;
+	try {
+		const st = statSync(sessionPath);
+		mtimeMs = st.mtimeMs;
+		size = st.size;
+	} catch {
+		// absent/unreadable — fingerprint (−1, −1), parsed once as empty
+	}
+	const cached = cache.get(sessionPath);
+	if (cached && cached.mtimeMs === mtimeMs && cached.size === size) return cached.names;
+	const names = sessionToolCallNames(sessionPath);
+	cache.set(sessionPath, { mtimeMs, size, names, parseCount: (cached?.parseCount ?? 0) + 1 });
+	return names;
+}
+
+/** Cached variant of countSessionToolCall (see sessionToolCallNamesCached). */
+export function countSessionToolCallCached(
+	sessionPath: string | undefined,
+	toolName: string,
+	cache?: Map<string, SessionToolCallCacheEntry>,
+): number {
+	return sessionToolCallNamesCached(sessionPath, cache).filter((n) => n === toolName).length;
 }

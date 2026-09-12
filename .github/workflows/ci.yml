@@ -13,6 +13,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history: the changelog gate below computes git merge-base
+          # against the base branch — impossible in a shallow clone (depth 1
+          # kills the gate with a bare exit 1 before any error line prints).
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -20,11 +25,13 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          # Pinned: an unrelated bun release must not flip the gate; bumps
+          # are deliberate (change this line explicitly).
+          bun-version: 1.4.2
 
-      # typebox is a peerDependency — the repo carries bun.lock but no
-      # node_modules, and the check scripts spawn bun subprocesses that must
-      # resolve it (bare runner → E_RESOLVE without this step).
+      # typebox is an optional peerDependency — the repo carries bun.lock but
+      # no node_modules, and the check scripts spawn bun subprocesses that
+      # must resolve it (bare runner → E_RESOLVE without this step).
       - name: Install dependencies (frozen lockfile)
         working-directory: pi/extensions/pi-delegate
         run: bun install --frozen-lockfile
@@ -39,15 +46,54 @@ jobs:
             exit 1
           fi
 
-      # The check suite is plain check() scripts (no .test.ts suffix), so
-      # `bun test ./test/<file>` is the fallback runner; `bun run <file>` is
-      # the primary. First failure fails the job.
+      # Changelog gate: if the PR bumps a version in either package.json
+      # (relative to the merge base), a matching '## [x.y.z]' section must
+      # already exist in pi/extensions/pi-delegate/CHANGELOG.md. Extraction
+      # logic mirrors the release workflow's notes step — the same section
+      # the release job will later publish. A bump without a section fails
+      # the PR instead of failing the post-merge release job.
+      - name: Changelog gate (a version bump requires a CHANGELOG section)
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "+refs/heads/${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+          mb=$(git merge-base HEAD "origin/${{ github.base_ref }}")
+          git show "$mb:package.json" > /tmp/old-root-package.json
+          git show "$mb:pi/extensions/pi-delegate/package.json" > /tmp/old-ext-package.json
+          old_root=$(node -p "require('/tmp/old-root-package.json').version")
+          old_ext=$(node -p "require('/tmp/old-ext-package.json').version")
+          new_root=$(node -p "require('./package.json').version")
+          new_ext=$(node -p "require('./pi/extensions/pi-delegate/package.json').version")
+          echo "merge-base: root=$old_root ext=$old_ext | HEAD: root=$new_root ext=$new_ext"
+          check_bump() {
+            local label="$1" old="$2" new="$3" section
+            [ "$old" = "$new" ] && return 0
+            section=$(awk -v ver="[$new]" '
+              /^## \[/ { if (found) exit; if (index($0, ver) != 0) { found=1; print; next } }
+              found { print }
+            ' pi/extensions/pi-delegate/CHANGELOG.md)
+            if [ -z "$section" ]; then
+              echo "::error::$label version changed $old → $new, but pi/extensions/pi-delegate/CHANGELOG.md has no '## [$new]' section — a version bump without a changelog section fails the PR (Keep a Changelog format)"
+              exit 1
+            fi
+            echo "$label version bumped $old → $new — CHANGELOG section found"
+          }
+          check_bump "root package.json" "$old_root" "$new_root"
+          check_bump "extension package.json" "$old_ext" "$new_ext"
+
+      # Typecheck gate (Definition of Stable #1): bun typechecks nothing at
+      # runtime, so strict-mode holes ship invisibly without this. typescript
+      # is a pinned devDependency (7.x native compiler); the QA config is the
+      # repo's own test/tsconfig.qa.json.
+      - name: Typecheck (tsc --noEmit, QA config)
+        working-directory: pi/extensions/pi-delegate
+        run: bunx tsc --noEmit -p test/tsconfig.qa.json
+
+      # Canonical runner: per-file timeout, at most one environment-flake
+      # retry, an explicit ENV-FAIL verdict, and a non-zero exit on any FAIL
+      # (protocol in test/run-checks.sh; it self-installs on a fresh
+      # worktree). No `|| bun test` fallback — the old loop silently retried
+      # failing files and eroded the FAIL/ENV-FAIL distinction. First FAIL
+      # fails the job.
       - name: Run check suite (pi/extensions/pi-delegate)
         working-directory: pi/extensions/pi-delegate
-        run: |
-          set -e
-          for f in test/*.ts; do
-            echo "::group::$f"
-            bun run "$f" || bun test "./$f"
-            echo "::endgroup::"
-          done
+        run: ./test/run-checks.sh

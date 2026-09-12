@@ -98,6 +98,16 @@ const root = mkdtempSync(join(tmpdir(), "report-contract-check-"));
 	check("briefPrompt: evidence rule names claim+file", prompt.includes('"evidence" an array of objects, each with non-empty string "claim" and "file"'));
 	check("briefPrompt: verbatim 'Extra fields allowed'", prompt.includes("Extra fields allowed"));
 	check("briefPrompt: canonical example embedded, worker substituted", prompt.includes(example), `expected ${example}`);
+	// fix-report-heal (2026-09-12, the dice-two incident): flash-class models
+	// drift to the conversational "done" despite the enum rule — the prompt
+	// names the anti-examples explicitly and states the consequence.
+	check(
+		"briefPrompt: status anti-example pins done/ok/success as rejected at collect",
+		prompt.includes(
+			'(never "done"/"ok"/"success" — a report with any other status is rejected at collect and wakes your orchestrator)',
+		),
+		prompt.slice(prompt.indexOf('"status"'), prompt.indexOf('"status"') + 220),
+	);
 }
 
 // ---------------------------------------------------------------------------

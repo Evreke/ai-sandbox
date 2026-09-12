@@ -1,7 +1,7 @@
 /**
  * host-fake-check — PoC end-to-end drive of the WorkerHost seam on the fake
- * (workerhost inversion, design-host-interface.md §7 charter + brief items 3,
- * 4, 6). Run with: bun run test/host-fake-check.ts
+ * (the backend-neutral seam shipped in 1.16.0). Run with:
+ * bun run test/host-fake-check.ts
  *
  * Proves (the brief's «Must prove» items 2 and 4):
  *   1. The seam works with an OPAQUE placementRef end-to-end — place →
@@ -26,7 +26,7 @@ import { join } from "node:path";
 import { readManifest, scanAllManifests, updateManifest, type ManifestWorker } from "../src/exchange.ts";
 import { registerDelegateTool } from "../src/spawn.ts";
 import { FakeWorkerHost } from "../src/host/fake.ts";
-import type { Transport } from "../src/host.ts";
+import type { Transport, Placement } from "../src/host.ts";
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = "") {
@@ -105,7 +105,7 @@ check("A4 place() rejects worktree requests when capabilities().worktrees is fal
 
 const start = await fake.startAgent({
 	name: NAME,
-	placementRef: placement.placementRef ?? placement.paneId,
+	placementRef: placement.placementRef!,
 	provider: "p",
 	model: "m",
 	thinking: "low",
@@ -116,7 +116,7 @@ check("A5 startAgent reads back the canonical name (seam contract)", start.name 
 // Name-taken → E_NAME (D4 seam contract the fake must reproduce).
 let nameTaken = false;
 try {
-	await fake.startAgent({ name: NAME, placementRef: placement.placementRef ?? placement.paneId, provider: "p", model: "m", thinking: "low", timeoutMs: 1000 });
+	await fake.startAgent({ name: NAME, placementRef: placement.placementRef!, provider: "p", model: "m", thinking: "low", timeoutMs: 1000 });
 } catch (err) {
 	nameTaken = (err as { code?: string }).code === "E_NAME";
 }
@@ -312,6 +312,56 @@ if (toolEntry) {
 		!!scanned && names.includes("legacy-worker") && !names.includes("fake-worker"),
 		JSON.stringify(names),
 	);
+}
+
+// ---------------------------------------------------------------------------
+// Part E — placementRef-only end state (Law 4, Wave 4): a Placement WITHOUT
+// the legacy herdr fields (workspaceId/paneId — the shape a tmux adapter would
+// return) flows through manifest write → tolerant read → teardown without
+// breakage. The fake's own place() still populates the legacy fields (compat),
+// so the ref-only record is written the way a second backend would write it.
+// ---------------------------------------------------------------------------
+
+{
+	const EROOT = join(EXCHANGE_SANDBOX, `ref-only-${process.pid}`);
+	mkdirSync(EROOT, { recursive: true });
+	// workspaceId/paneId intentionally ABSENT (optional since Wave 4) —
+	// placementRef is the only handle (Law 4).
+	const refOnlyPlacement: Placement = {
+		kind: "tab",
+		checkoutPath: repoDir,
+		backend: "tmux-shaped",
+		placementRef: `tmux:session-${process.pid}`,
+	};
+	await updateManifest(EROOT, (m) => ({
+		...m,
+		workers: [
+			{
+				name: "ref-only-worker",
+				placement: refOnlyPlacement,
+				briefPath: "",
+				reportPath: "",
+				provider: "p",
+				model: "m",
+				thinking: "low",
+				startedAt: new Date().toISOString(),
+			} satisfies (typeof m.workers)[number],
+		],
+	}));
+	const eEntry = readManifest(EROOT)?.workers.find((w) => w.name === "ref-only-worker");
+	check(
+		"E1 ref-only placement round-trips the tolerant reader: placementRef kept, legacy fields stay absent (not fabricated)",
+		!!eEntry &&
+			eEntry.placement.placementRef === refOnlyPlacement.placementRef &&
+			eEntry.placement.paneId === undefined &&
+			eEntry.placement.workspaceId === undefined,
+		JSON.stringify(eEntry?.placement),
+	);
+	// Teardown of a ref-only placement resolves through the seam (idempotent
+	// alreadyGone on the fake — no match, no crash on the absent paneId).
+	const tRefOnly = await fake.teardown({ name: "ref-only-worker", placement: refOnlyPlacement, force: true });
+	check("E2 teardown of a ref-only placement resolves (structured alreadyGone, no breakage)", tRefOnly?.alreadyGone === true, JSON.stringify(tRefOnly));
+	rmSync(EROOT, { recursive: true, force: true });
 }
 
 // --- self cleanup -----------------------------------------------------------

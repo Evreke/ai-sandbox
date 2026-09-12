@@ -6,6 +6,69 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Version numbers align with the iteration numbering in DESIGN.md (v1.x sections).
 
+## [1.17.0] — 2026-09-12
+
+The healing release: the four-way 2026-09-11 audit of the 1.16.1 line turned into law and executed across waves 0–4 (see STABILIZATION.md and the new ARCHITECTURE.md).
+
+### Added
+
+- **Session-keyed watcher lifecycle (Law 3).** Every `session_start` builds a per-session context; the watcher mount is keyed by session file and a SECOND mount for the same session is refused instead of silently running two watchers with independent dedup. Regression: `test/double-mount-check.ts`.
+- **Output truncation caps (Law 1).** Every tool return path that carries worker-written content is bounded by pi's own truncation helpers: `delegate_status` rows capped at 100 with an "N more omitted" note (full list in the result details), report summaries/artifacts and mailbox question bodies truncated with an explicit pointer to the full copy. Regression: `test/status-cap-check.ts`, `test/text-cap-check.ts`.
+- **Versioned on-disk formats (Law 7).** `schemaVersion` stamped on the manifest, mailbox/release envelopes and the nudge-failed marker; readers tolerate absent (v1) and reject wrong versions. Regression: `test/schema-version-check.ts`.
+- **fsync before rename** in the one atomic file writer (open/write/fsync/close/rename) — crash-consistent durable writes.
+- **`prepareArguments` shim** on the delegate tool folding legacy `timeoutMs` calls into `waitMs` (schema stays strict).
+- **ARCHITECTURE.md** — the ten-law constitution binding all future developer agents; both AGENTS.md levels point at it.
+
+### Changed
+
+- **placementRef-only seam (Law 4).** `workspaceId`/`paneId` are now optional compatibility fields on `Placement`; `placementRef` is the only required handle — a second backend (tmux) no longer must fake herdr-shaped ids. Parity pinned by `test/host-parity-check.ts`.
+- **Decomposition to layout v3 (Law 5).** The exchange/observe/spawn god-modules split into single-responsibility modules (archive, manifest-store, report-schema, mailbox-store, watch-store; watch-config, watch-detect, watcher, watch-retire, status-tool, commands; tool-result, clock, grace, mailbox-tool) with the duplicate helper clusters deduplicated (fs-probe, text-cap, one mailbox-state reader, one audit sink). Verbatim moves; the user-visible surface (tool names, params, commands, E_* codes) is unchanged.
+- **Cheaper watcher tick.** Satellite stamp layers are mtime-cached per mount and the session-JSONL tail parse is fingerprint-gated — no more up-to-1MB re-reads per worker per tick. Regression: `test/watch-tick-cost-check.ts`.
+- **Release machinery.** Both CI workflows run the deterministic `test/run-checks.sh` (no silent `|| bun test` fallback), a changelog-section PR gate, a release-run concurrency group, and a pinned bun version.
+- **typebox moved to peerDependencies** per pi's packaging contract.
+- **Single-sourced skill (Law 9).** The stale repo-root `pi/skills/delegate` copy is deleted; both install layouts load the extension's copy.
+
+### Fixed
+
+- **Google-model-breaking enum parameter shape:** tool enums use `StringEnum` instead of `Type.Union` of literals.
+- **Hardcoded `~/.pi/agent` paths** (7 sites) replaced by pi's `getAgentDir()`/`CONFIG_DIR_NAME` exports, with a static pin banning literal joins.
+- **Double-delivery bug class closed:** accept-then-log delivery classification ("accepted by pi" counts as delivered; rollback only for genuine pre-delivery failures — `test/watcher-check.ts` W19) and the watcher-vs-collect `collectedAt` race (report wake dropped when the stamp lands between snapshot and send — W20).
+- **Lying contracts corrected** (seam module header, fleet stale fail-open paragraph); six production TypeScript errors resolved; `tsc --noEmit` is now a gate; both commands guard dialog/notify calls with `ctx.hasUI`.
+- **Silent-catch residue surfaced:** archive failures carry a reason, start-failure manifest-rollback failures are logged, audit-append failures are counted. Regression: `test/silent-catch-check.ts`.
+- **False worker-dead for worker-orchestrators:** a worker that ended its turn while its own fleet was still running was classified "settled with no report", causing retries and E_NAME collisions; now the parent watcher sees the in-flight fleet and gets an honest `fleet-in-flight` state instead. Regression: `test/watcher-check.ts` (new block).
+- **Schema-violating reports self-heal:** a report rejected at collect (e.g. `status: "done"`) no longer forces a full re-spawn — the watcher automatically posts a fix steer (the exact validator error) to a live worker, which rewrites the report in place; the report-invalid guidance is cheapest-first (steer first, re-spawn only if the worker is gone) and the spawn prompt carries a status anti-example. Regression: `test/watcher-check.ts` (+ auto-nudge block), `test/report-contract-check.ts` (prompt pin).
+
+### Windows path support
+
+- **Windows default exchange root.** On Windows the default exchange root is now
+  `%LOCALAPPDATA%\pi\exchange` (fallback `homedir()\AppData\Local\pi\exchange`); the
+  `PI_DELEGATE_EXCHANGE_ROOT` environment variable overrides it (absolute path). The
+  POSIX default `/tmp/exchange` is unchanged in this release.
+- **Single portable path builder.** Every exchange-layer path (manifest, brief, report,
+  mailbox, probe dir, teardown log) is assembled through the platform-aware builder
+  `src/expaths.ts` (`node:path`, injectable in tests) — no more mixed-separator paths
+  from raw `/` template literals. POSIX output stays byte-identical to previous
+  releases.
+- **No spurious `E_BRIEF` on Windows.** Brief validation (`ensureExchangeDir`) compares
+  directories case- and separator-stable on Windows (`c:\…` vs `C:\…`, `/` vs `\`);
+  POSIX comparison remains exact.
+- **Windows-correct classification and ownership.** Fleet grouping slugs and probe-dir
+  classification are separator-agnostic; the session-owner compare
+  (`sameSessionPath`, `src/watch-role.ts`) folds case and separators on Windows only —
+  a case-differing POSIX path still reads as foreign.
+- **herdr adapter on Windows.** Worktree containment uses a segment-aware compare;
+  the Windows CLI launch policy is `cmd.exe /d /s /c` with per-argument quoting and
+  `windowsHide`; kill escalation on Windows is `taskkill /pid … /T /F`. The POSIX
+  SIGTERM→SIGKILL escalation is unchanged.
+- **Scope note.** Windows-shaped tests (path.win32 fixtures) run on the POSIX CI; a
+  real-Windows E2E run is not part of CI — it stays an explicit manual QA gate. The
+  exchange/path layer is Windows-portable in 1.17.0; running the host backend on Windows
+  requires herdr for Windows.
+
+### Removed
+
+- **DESIGN.md** — the frozen historical design log (v1 → v1.17.0) — removed from the repo and the npm package; decision history lives in git.
+
 ## [Unreleased]
 
 ### Changed

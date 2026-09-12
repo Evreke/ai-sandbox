@@ -7,7 +7,7 @@
 		"module": "esnext",
 		"moduleResolution": "bundler",
 		"skipLibCheck": true,
-		"types": ["node"]
+		"types": ["node", "bun"]
 	},
 	"include": ["../index.ts", "../src/**/*.ts", "./*.ts"],
 	"exclude": ["../node_modules"]

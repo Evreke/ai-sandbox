@@ -1,7 +1,7 @@
 /**
  * pi-delegate — watcher composition module (migration stage 3, audit step 10).
  * <p>
- * MODULE_CONTRACT: mounts the event-driven background watcher (DESIGN.md §21)
+ * MODULE_CONTRACT: mounts the event-driven background watcher
  * for one session start. The "worker or orchestrator" decision — which
  * sessions get a watcher — lives HERE and nowhere else: a PURE manifest
  * worker mounts NO watcher (it is someone's fleet row, not an audience), a
@@ -35,16 +35,17 @@
  *     a DEGRADED tier-1 lead (getSessionFile() throws) is no longer
  *     classified a pure worker — it proves nothing, reads as "not a
  *     worker" and MOUNTS a watcher (fail-open toward MOUNTING). Its child
- *     wakes are still lost, but now on the DELIVERY side, where guideline
- *     §3.6 requires the fail-closed edge: a session without a proven
+ *     wakes are still lost, but now on the DELIVERY side, where the
+ *     fail-closed law (ARCHITECTURE.md Law 8) applies: a session without a proven
  *     session id delivers nothing (documented known behavior).
  * Error modes: none of its own — rethrows only what injected collaborators
  * throw (production collaborators never do).
  */
 
-import { manifestStore, pruneArchive } from "./exchange.ts";
-import { isWorkerSession, ownsChildManifests, startWatcher } from "./observe.ts";
-import type { SelfIdentity } from "./observe.ts";
+import { pruneArchive } from "./archive.ts";
+import { manifestStore } from "./manifest-store.ts";
+import { isWorkerSession, ownsChildManifests, type SelfIdentity } from "./watch-detect.ts";
+import { startWatcher } from "./watcher.ts";
 import type { Transport } from "./host.ts";
 
 /** The slice of the pi extension API the watcher needs (delivery + registry). */
@@ -74,6 +75,10 @@ export interface SessionWatcherDeps {
 export interface SessionWatcherResult {
 	/** True when the watcher was mounted for this session. */
 	mounted: boolean;
+	/** Wave 2 (Law 3): the mounted watcher's stop handle — the session
+	 *  context stores it and session_shutdown tears THIS session's watcher
+	 *  down with it. Undefined when not mounted (pure worker session). */
+	stop?: () => void;
 }
 
 /**
@@ -89,16 +94,20 @@ export interface SessionWatcherResult {
  *     MOUNTS (stage C: worker identity is the entry's own sessionPath only;
  *     a degraded tier-1 lead therefore mounts a watcher, but delivery is
  *     fail-closed so it still wakes for nothing — the child-wake loss moved
- *     from the mount side to the delivery side, where §3.6 requires it)
+ *     from the mount side to the delivery side, where the fail-closed law
+ *     (ARCHITECTURE.md Law 8) requires it)
  *   - injected collaborators default to the production ones (scan via
  *     manifestStore + the Transport's backend name)
- * Output: { mounted } — whether startWatcher ran
+ * Output: { mounted, stop } — whether startWatcher ran, plus the mounted
+ *   watcher's stop handle (Wave 2, Law 3: mounts return handles; the session
+ *   context in index.ts owns this handle and session_shutdown uses it) —
+ *   undefined when not mounted
  * Guarantees:
  *   - PURE worker (isWorkerSession true, ownsChildManifests false) → NOT
  *     mounted; worker-orchestrator or peer orchestrator or bystander →
  *     mounted (the F6 two-tier contract, in ONE place). Both gates are thin
  *     wrappers over the canonical role table (src/watch-role.ts sessionRole)
- *     — mount and delivery cannot disagree (guideline §3.4: a "UI says
+ *     — mount and delivery cannot disagree (watch-role.ts role table: a "UI says
  *     foreign but the wake left" mismatch is a defect)
  *   - the prune runs exactly once per call, mounted or not
  * Raises:
@@ -112,12 +121,13 @@ export function mountSessionWatcher(deps: SessionWatcherDeps): SessionWatcherRes
 	const isWorker = (deps.workerGate ?? isWorkerSession)(deps.self, manifests);
 	const ownsChildren = (deps.childOwnerGate ?? ownsChildManifests)(deps.self, manifests);
 	const mounted = !isWorker || ownsChildren;
+	let stop: (() => void) | undefined;
 	if (mounted) {
-		(deps.mount ?? startWatcher)(deps.pi, deps.transport, {
+		stop = (deps.mount ?? startWatcher)(deps.pi, deps.transport, {
 			cwd: deps.self.cwd,
 			sessionManager: deps.sessionManager,
 		});
 	}
 	(deps.prune ?? pruneArchive)(); // §19.3 retention: once per session start
-	return { mounted };
+	return { mounted, stop };
 }

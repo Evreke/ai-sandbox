@@ -1,6 +1,7 @@
 /**
- * Windows-path contract checks for the exchange layer (design-windows-mailbox.md
- * §3.2 — the single path-builder rule). No Windows host needed: every check
+ * Windows-path contract checks for the exchange layer (the single
+ * path-builder rule — src/expaths.ts; Windows path support shipped in
+ * 1.17.0). No Windows host needed: every check
  * feeds synthetic Windows-shaped strings through the builders with the
  * INJECTED platform (node:path.win32) — pure string asserts, valid on any OS.
  *
@@ -26,6 +27,12 @@
  *   W6  exchangeRoot precedence: env override beats the per-OS default; the
  *       win32 default is %LOCALAPPDATA%\pi\exchange (HOME-independent); the
  *       posix default stays byte-for-byte /tmp/exchange.
+ *   W1.7 (TZ §3.7 "mixed input separators") builders fed MIXED `/`+`\`
+ *       inputs on win32 emit fully normalized backslash paths; W1.8 posix
+ *       byte-compat for the remaining builders (probe, question-archive);
+ *       W2.5 taskSlug and W3.4 isProbeDir on mixed separators; W4.5
+ *       ensureExchangeDir SUCCEEDS end-to-end when the brief parent differs
+ *       from the root by drive-letter CASE (`c:\…` vs `C:\…`).
  *
  * Exit 0 only if all checks pass.
  */
@@ -112,6 +119,23 @@ check(
 		buildManifestPath("/tmp/exchange/task") === path.join("/tmp/exchange/task", "manifest.json"),
 	buildManifestPath("/tmp/exchange/task"),
 );
+check(
+	"W1.7 win32 builders normalize MIXED `/`+`\\` input separators (TZ §3.7) — no mixed-separator artifacts in the output",
+	buildReportPath("C:/tmp/exchange/task", NAME, win32) === "C:\\tmp\\exchange\\task\\report-winfix.json" &&
+		buildQuestionPath("C:\\tmp/exchange\\task", NAME, win32) === "C:\\tmp\\exchange\\task\\q-winfix.json" &&
+		buildManifestPath("C:/tmp/exchange/task", win32) === "C:\\tmp\\exchange\\task\\manifest.json" &&
+		buildProbeDirPath("C:/tmp/exchange", win32) === "C:\\tmp\\exchange\\_probe" &&
+		buildQuestionArchivePath("C:/tmp/exchange/task", NAME, 12345, win32) ===
+			"C:\\tmp\\exchange\\task\\q-winfix.answered-12345.json",
+	buildReportPath("C:/tmp/exchange/task", NAME, win32),
+);
+check(
+	"W1.8 default platform (posix): probe + question-archive builders stay byte-identical to the old template literals",
+	buildProbeDirPath("/tmp/exchange") === "/tmp/exchange/_probe" &&
+		buildQuestionArchivePath("/tmp/exchange/task", NAME, 12345) ===
+			"/tmp/exchange/task/q-winfix.answered-12345.json",
+	`${buildProbeDirPath("/tmp/exchange")} | ${buildQuestionArchivePath("/tmp/exchange/task", NAME, 12345)}`,
+);
 
 // ---------------------------------------------------------------------------
 // W2 — taskSlug (fleet grouping key derivation)
@@ -135,6 +159,11 @@ check(
 	taskSlug("/", win32) === "/" || taskSlug("/", win32) === "",
 	`posixRoot="${taskSlug("/")}" win32Root="${taskSlug("C:\\", win32)}"`,
 );
+check(
+	"W2.5 win32 slug on MIXED separators",
+	taskSlug("C:/tmp/exchange/task", win32) === "task" && taskSlug("C:\\tmp/exchange\\task", win32) === "task",
+	`${taskSlug("C:/tmp/exchange/task", win32)} | ${taskSlug("C:\\tmp/exchange\\task", win32)}`,
+);
 
 // ---------------------------------------------------------------------------
 // W3 — probe-dir classification without separator assumptions
@@ -153,6 +182,11 @@ check(
 	!isProbeDir("C:\\tmp\\exchange\\probe-x", win32) &&
 		!isProbeDir("/tmp/exchange/_probe-old") &&
 		!isProbeDir("/tmp/exchange/task"),
+);
+check(
+	"W3.4 probe classification on MIXED separators (win32 basename folds `/` and `\\`)",
+	isProbeDir("C:/tmp/exchange/_probe", win32) && exchangeIsProbeDir("C:/tmp/exchange/_probe", win32) &&
+		!isProbeDir("C:/tmp/exchange/_probe/old", win32),
 );
 
 // ---------------------------------------------------------------------------
@@ -206,6 +240,34 @@ try {
 		);
 	}
 
+	// W4.5 — TZ §3.7: a brief parent differing from the root ONLY by
+	// drive-letter CASE must SUCCEED end-to-end (not just dodge the membership
+	// rejection like W4.2): a second fixture file under the lower-case `c:`
+	// spelling is readable on this posix host (a distinct relative filename),
+	// so the full validation — membership + read + report-path shape — runs.
+	writeFileSync(
+		"c:\\tmp\\exchange\\task\\brief-winfix-lc.md",
+		"# Windows-path fixture (lower-case drive)\n\nDo the thing. OUTPUT: report-winfix-lc.json\n",
+	);
+	fixtureMade = true;
+	process.env.PI_DELEGATE_EXCHANGE_ROOT = "C:\\tmp\\exchange";
+	try {
+		const opened = ensureExchangeDir("c:\\tmp\\exchange\\task\\brief-winfix-lc.md", win32);
+		check(
+			"W4.5 case-differing drive letter (brief `c:\\…` vs root `C:\\…`) validates END-TO-END on the win32 platform",
+			opened.task === "task" &&
+				opened.dir === "c:\\tmp\\exchange\\task" &&
+				opened.reportPath === "c:\\tmp\\exchange\\task\\report-winfix-lc.json",
+			JSON.stringify(opened),
+		);
+	} catch (err) {
+		check(
+			"W4.5 case-differing drive letter (brief `c:\\…` vs root `C:\\…`) validates END-TO-END on the win32 platform",
+			false,
+			(err as Error).message,
+		);
+	}
+
 	// W4.3 — a genuinely foreign parent still fails E_BRIEF (no false accept).
 	process.env.PI_DELEGATE_EXCHANGE_ROOT = "C:\\tmp\\exchange";
 	try {
@@ -228,7 +290,10 @@ try {
 } finally {
 	if (previousRoot === undefined) delete process.env.PI_DELEGATE_EXCHANGE_ROOT;
 	else process.env.PI_DELEGATE_EXCHANGE_ROOT = previousRoot;
-	if (fixtureMade) rmSync(BRIEF_WIN32_REL, { force: true });
+	if (fixtureMade) {
+		rmSync(BRIEF_WIN32_REL, { force: true });
+		rmSync("c:\\tmp\\exchange\\task\\brief-winfix-lc.md", { force: true });
+	}
 }
 
 // ---------------------------------------------------------------------------

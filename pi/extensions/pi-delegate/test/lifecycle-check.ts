@@ -334,7 +334,9 @@ for (const terminal of ["closed", "closed-early-failed"] as const) {
 
 {
 	const spawnSrc = readFileSync(join(ROOT, "src", "spawn.ts"), "utf8");
-	const observeSrc = readFileSync(join(ROOT, "src", "observe.ts"), "utf8");
+	// Wave 3 decomposition: the retire stamps live in src/watch-retire.ts (the
+	// §23 engine extracted verbatim from observe.ts) — the pin follows the code.
+	const observeSrc = readFileSync(join(ROOT, "src", "watch-retire.ts"), "utf8");
 	check(
 		"L7.1 spawn stamps collect through the lifecycle reducer (stampCollected)",
 		spawnSrc.includes("stampCollected(w, collectedAt)") &&

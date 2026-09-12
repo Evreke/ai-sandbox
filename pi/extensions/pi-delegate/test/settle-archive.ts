@@ -1,12 +1,14 @@
 /**
- * A6 (impl-settle) — unit-ish checks for DESIGN.md §19.1 (D3 two-phase
+ * A6 (impl-settle) — unit-ish checks for the two-phase waitSettle (D3
  * waitSettle), §19.2 (D4 second name-taken shape) and §19.3 (archive).
  *
  * Run with: bun test/settle-archive.ts   (from repo root)
  *
  * herdr is stubbed via a PATH shim (fix2 pattern, cf. test/reverify-fixes.ts):
  * a bash script whose `agent wait` pops scripted statuses from a text file.
- * Archive checks run against a temp HOME so the real archive is never touched.
+ * Archive checks run against a temp agent dir (redirected via pi's
+ * PI_CODING_AGENT_DIR — the seam getAgentDir() honors, read live per call)
+ * so the real archive is never touched.
  * No real herdr ops, no network, no mutation outside /tmp.
  */
 
@@ -74,6 +76,7 @@ writeFileSync(join(STUB_DIR, "herdr"), SHIM, { mode: 0o755 });
 
 const savedPath = process.env.PATH;
 const savedHome = process.env.HOME;
+const savedAgentDir = process.env.PI_CODING_AGENT_DIR;
 process.env.PATH = `${STUB_DIR}:${savedPath}`;
 
 function scriptWait(statuses: string[]) {
@@ -85,7 +88,7 @@ function scriptStartFailure(stderr: string) {
 
 try {
 	// -------------------------------------------------------------------------
-	// D3 — two-phase waitSettle (DESIGN.md §19.1)
+	// D3 — two-phase waitSettle
 	// -------------------------------------------------------------------------
 	const t = createHerdrTransport();
 
@@ -162,7 +165,7 @@ try {
 	}
 
 	// -------------------------------------------------------------------------
-	// D3.7+ — v1.8 aged-finish fix (DESIGN.md §19.1b): herdr ages done→idle
+	// D3.7+ — v1.8 aged-finish fix: herdr ages done→idle
 	// within minutes (live-reproduced 2026-09-05: probe, probe-retry,
 	// fresh-probe-x all flipped), so a late watcher sees only idle and can never
 	// observe working/done — it spun the FULL timeout, then false-reported
@@ -384,7 +387,7 @@ try {
 	rmSync(sessDir, { recursive: true, force: true });
 
 	// -------------------------------------------------------------------------
-	// D4 — second name-taken shape (DESIGN.md §19.2)
+	// D4 — second name-taken shape
 	// -------------------------------------------------------------------------
 	const startReq: StartReq = {
 		name: "routing-rev",
@@ -448,7 +451,9 @@ try {
 	// §19.3 — archive round-trip + failure tolerance
 	// -------------------------------------------------------------------------
 	const fakeHome = mkdtempSync(join(tmpdir(), "qa-archive-home-"));
-	process.env.HOME = fakeHome;
+	// pi docs: the archive resolves via getAgentDir(), which honors
+	// PI_CODING_AGENT_DIR (read live per call — unlike bun's cached homedir()).
+	process.env.PI_CODING_AGENT_DIR = join(fakeHome, ".pi", "agent");
 
 	// 5.1 missing archive root → [].
 	check("A.1 missing archiveRoot → []", JSON.stringify(listArchivedTasks()) === "[]");
@@ -465,8 +470,8 @@ try {
 	const dest = archiveReport(taskDir, reportPath, manifest);
 	check(
 		"A.2 archiveReport returns <root>/<task>/<basename(reportPath)> unprefixed",
-		dest === join(archiveRoot(), "v16-demo", "report-demo-worker.json"),
-		`dest=${dest}`,
+		dest.dest === join(archiveRoot(), "v16-demo", "report-demo-worker.json"),
+		`dest=${JSON.stringify(dest)}`,
 	);
 	let copied = "";
 	try {
@@ -504,16 +509,16 @@ try {
 	writeFileSync(plainPath, "{}");
 	check(
 		"A.3b non-prefixed basename preserved as-is",
-		archiveReport(taskDir, plainPath, manifest) === join(archiveRoot(), "v16-demo", "collected.json"),
+		archiveReport(taskDir, plainPath, manifest).dest === join(archiveRoot(), "v16-demo", "collected.json"),
 	);
 
-	// 5.4 failure tolerance: unreadable source report → null, never throw.
+	// 5.4 failure tolerance: unreadable source report → dest null, never throw.
 	check(
-		"A.4 missing source report → null (never throws)",
-		archiveReport(taskDir, join(taskDir, "nope.json"), manifest) === null,
+		"A.4 missing source report → dest null (never throws)",
+		archiveReport(taskDir, join(taskDir, "nope.json"), manifest).dest === null,
 	);
-	// 5.5 failure tolerance: empty taskDir basename → null.
-	check("A.5 empty taskDir basename → null", archiveReport("/", reportPath, manifest) === null);
+	// 5.5 failure tolerance: empty taskDir basename → dest null.
+	check("A.5 empty taskDir basename → dest null", archiveReport("/", reportPath, manifest).dest === null);
 
 	// 5.6 task dirs WITHOUT manifest.json are not listed.
 	mkdirSync(join(archiveRoot(), "half-written"), { recursive: true });
@@ -557,16 +562,35 @@ try {
 		pruneArchive(Number.NaN) === 0 && pruneArchive(-1) === 0,
 	);
 	const missingHome = mkdtempSync(join(tmpdir(), "qa-archive-missing-"));
-	process.env.HOME = missingHome;
+	process.env.PI_CODING_AGENT_DIR = join(missingHome, ".pi", "agent");
 	check("A.10 missing archiveRoot → 0 pruned, never throws", pruneArchive() === 0);
-	process.env.HOME = fakeHome;
+	process.env.PI_CODING_AGENT_DIR = join(fakeHome, ".pi", "agent");
 	rmSync(missingHome, { recursive: true, force: true });
+
+	// 5.11 Wave 4 item 6 (reliability finding 7): the archive FAILURE REASON
+	// is surfaced — an archive root that cannot host the task dir (here: a
+	// FILE where the delegate-archive dir should be) yields dest null plus
+	// the fs error message the collect note renders ("archive unavailable:
+	// <why>") — never a bare silent null, never a throw.
+	{
+		rmSync(archiveRoot(), { recursive: true, force: true });
+		writeFileSync(archiveRoot(), "a file where the archive dir should be");
+		const outcome = archiveReport(join(fakeHome, "tasks", "blocked-task"), reportPath, manifest);
+		check(
+			"A.11 unreadable archive location → dest null + the REASON surfaced",
+			outcome.dest === null && typeof outcome.error === "string" && outcome.error.length > 0,
+			JSON.stringify(outcome),
+		);
+		rmSync(archiveRoot(), { force: true });
+	}
 
 	rmSync(fakeHome, { recursive: true, force: true });
 } finally {
 	process.env.PATH = savedPath;
 	if (savedHome === undefined) delete process.env.HOME;
 	else process.env.HOME = savedHome;
+	if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+	else process.env.PI_CODING_AGENT_DIR = savedAgentDir;
 	rmSync(STUB_DIR, { recursive: true, force: true });
 }
 

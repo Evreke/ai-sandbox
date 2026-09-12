@@ -1,6 +1,7 @@
 /**
  * pi-delegate — fleet UI module: everything the extension renders about the
- * worker fleet (DESIGN.md §15 overlay, §19.4 ambient widget), plus the two
+ * worker fleet (the /delegate-fleet overlay and the ambient live-rows
+ * widget), plus the two
  * things the UI layers share: worker ownership classification and width-safe
  * text primitives.
  * <p>
@@ -27,7 +28,7 @@
  * Exported surface: WorkerView, buildWorkerView | classifyOwnership,
  * OWNERSHIP_GLYPH, Ownership,
  * SelfIdentity, OwnershipPlacement | stripAnsi, visibleWidth, trunc,
- * clampLines, fmtK | FleetWidgetRow (widget row; historical name FleetRow is
+ * clampLines | FleetWidgetRow (widget row; historical name FleetRow is
  * kept alive by the ui/fleet-ui.ts facade, removed in W5 — importers use
  * FleetWidgetRow), FleetUIDeps, FleetFoldLine,
  * mountFleetUI, disposeFleetUI, renderLiveRows, foldLiveByOwnership,
@@ -59,20 +60,25 @@
  * taxonomy lives in transport.ts).
  */
 
-import { stat } from "node:fs/promises";
+import { basename } from "node:path";
 import type { ExtensionCommandContext, ExtensionContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import {
-	answerPathFor,
 	exchangeRoot,
-	manifestStore,
-	mergeRetireStamps,
-	questionPathFor,
-	readWatchStampLayers,
+	isProbeDir,
+	progressPathFor,
+	readLastProgress,
 } from "./exchange.ts";
+import { manifestStore } from "./manifest-store.ts";
+import { mailboxAnswerState } from "./mailbox-store.ts";
+// Wave 3 decomposition (step 5): the tolerant fs probes are ONE implementation
+// (src/fs-probe.ts) — the local mtimeOf/fileExists copies are deleted.
+import { fileExists } from "./fs-probe.ts";
+import { mergeRetireStamps, readWatchStampLayers } from "./watch-store.ts";
 import { taskSlug } from "./expaths.ts";
 import { workerAudienceMatch } from "./watch-role.ts";
-import { contextPct, parseSessionUsage, resolveContextWindow, WATCH_DEFAULT_STALE_AFTER_MS } from "./usage.ts";
+import { contextPct, formatTokens, parseSessionUsage, resolveContextWindow, WATCH_DEFAULT_STALE_AFTER_MS } from "./usage.ts";
 import {
+	BUDGET_WARN_FRACTION,
 	CONTEXT_WARN_PCT,
 	type AgentStatusName,
 	type Placement,
@@ -88,13 +94,15 @@ import {
  * pi-delegate — worker ownership classification (fleet-UX wave 2, stage 1).
  *
  * Mirror of the watcher's ownership rule (observe.ts isSelf /
- * detectWorkerEvents, DESIGN.md §21.1 F1): a worker is MINE iff the manifest's
+ * detectWorkerEvents): a worker is MINE iff the manifest's
  * `orchestratorSessionPath` equals THIS session's JSONL path. Legacy manifests
  * carry no such field → ownership UNKNOWN.
  *
- * DELIBERATE ASYMMETRY vs the watcher: the watcher fails OPEN (a legacy
- * manifest or a degraded self-id must never swallow a real wake-up), while
- * DISPLAY fails CLOSED — a marker is a claim, and an unknown worker must
+ * DELIBERATE ASYMMETRY vs the watcher — RETIRED: the watcher no longer fails
+ * OPEN. Watcher stage A reversed that to fail-closed; src/watch-role.ts is
+ * the canonical role/ownership table — do not re-derive the watcher's
+ * behavior from this display-side comment. DISPLAY fails CLOSED — a marker
+ * is a claim, and an unknown worker must
  * never render as "mine" (●) in either direction of missing data:
  *   - manifest edge: no `orchestratorSessionPath` → UNKNOWN (legacy).
  *   - self edge: no session file → exact comparison impossible → UNKNOWN,
@@ -145,8 +153,8 @@ export interface OwnershipOptions {
  *
  * Watcher stage A: this is now a DISPLAY MAPPING over the canonical verdict
  * (workerAudienceMatch in src/watch-role.ts) — the UI keeps NO ownership
- * semantics of its own (guideline §3.4: a "UI says foreign but the wake
- * left" mismatch is a defect; §7.1: the display uses the same owner rules
+ * semantics of its own (watch-role.ts role table: a "UI says foreign but
+ * the wake left" mismatch is a defect; the display uses the same owner rules
  * without its own fail-open). Signature note: the canonical verdict reads
  * the manifest-level masterSessionPath too (the B1 fallback) — hence the
  * fourth parameter, which older call sites omit.
@@ -159,7 +167,8 @@ export interface OwnershipOptions {
  *   convenience for the degraded-self-id worktree corner (the mount gate
  *   dropped the same equivalent in the stage C fix — identity by cwd is
  *   ambiguous); it NEVER feeds delivery — a degraded self-id delivers
- *   nothing in observe.ts, unconditionally (guideline §3.6). Tab workers
+ *   nothing in observe.ts, unconditionally (fail-closed — ARCHITECTURE.md
+ *   Law 8). Tab workers
  *   are never matched by cwd → "unknown".
  */
 export function classifyOwnership(
@@ -206,10 +215,10 @@ export const OWNERSHIP_GLYPH: Record<Ownership, string> = {
 /**
  * pi-delegate — shared text helpers for UI rendering (quality fix A7).
  *
- * ONE fmtK, ONE trunc (visibleWidth-aware, wide-char safe), ONE stripAnsi.
+ * ONE token-k spelling (usage.ts formatTokens — Wave 3 step 5 fold), ONE trunc (visibleWidth-aware, wide-char safe), ONE stripAnsi.
  * Previously these were triplicated with DIVERGENT semantics across
  * fleet.ts / observe.ts (status tool) (same names, different
- * output — e.g. fmtK(836) was "836" in fleet.ts but "1k" in fleet-ui.ts).
+ * output — e.g. formatTokens(836) was "836" in fleet.ts but "1k" in fleet-ui.ts).
  * All UI modules import from here; local duplicates were deleted.
  */
 
@@ -269,23 +278,13 @@ export function clampLines(lines: string[], width?: number): string[] {
 	return lines.map((l) => (visibleWidth(l) <= w ? l : trunc(l, w)));
 }
 
-/** Compact k-denominated token count: <1000 → "n" (836 → "836"); else one
- *  decimal below 100k, integer k from 100k up (9592 → "9.6k", 18517 → "18.5k",
- *  150000 → "150k"). Non-finite/negative → "0". */
-export function fmtK(n: number): string {
-	if (!Number.isFinite(n) || n < 0) return "0";
-	if (n < 1000) return String(n);
-	const k = n / 1000;
-	return `${k >= 100 ? Math.round(k) : Math.round(k * 10) / 10}k`;
-}
-
 // ===========================================================================
 // SECTION 3/4 — ambient fleet UI (widget + tool-result rendering)
 // (verbatim move of the old src/ui/fleet-ui.ts; its review-verified header comment is preserved)
 // ===========================================================================
 
 /**
- * pi-delegate — ambient fleet UI (DESIGN.md §19.4).
+ * pi-delegate — ambient fleet UI.
  *
  * OWNERSHIP: contracts authored by the tech lead; implementation owned by
  * worker B6 (impl-ui). All functions MUST be inert when the context has no UI.
@@ -300,8 +299,8 @@ export function fmtK(n: number): string {
  *   registerTool renderCall/renderResult          — themed transcript rendering
  *
  * Design choice (documented in report-impl-ui.json): the refresh interval is
- * NOT cleared when the live set goes empty (only on dispose) — DESIGN.md §19.4
- * says "timer cleared on empty", but that would freeze the widget forever after
+ * NOT cleared when the live set goes empty (only on dispose) — clearing the
+ * timer on empty would freeze the widget forever after
  * the first idle window (nothing would ever re-mount it when a new worker
  * spawns). Keeping the 2 s tick costs one cheap getRows() poll and lets the
  * widget reappear on the next spawn; the WIDGET is cleared on empty, the
@@ -335,21 +334,37 @@ export interface FleetUIDeps {
 // ---------------------------------------------------------------------------
 // Module-level mount registry: /delegate-teardown restores the footer via
 // disposeFleetUI() without needing the dispose handle that mountFleetUI
-// returned (possibly in a different closure). Double-mount replaces.
+// returned (possibly in a different closure). Double-mount replaces — and the
+// replace DISPOSES the old handle (never leaks). Wave 2 (Law 3): the registry
+// lives on globalThis so a double module load (two copies of this module)
+// still shares one registry — a re-mount replaces the previous widget instead
+// of stacking a second one.
 // ---------------------------------------------------------------------------
 
-let activeDispose: (() => void) | null = null;
+const FLEET_MOUNT_REGISTRY_KEY = "__piDelegateFleetMountDispose";
+
+/** The currently mounted fleet UI's dispose (globalThis slot — shared across
+ *  module copies; null when nothing is mounted). */
+let activeDispose: (() => void) | null;
+try {
+	activeDispose = ((globalThis as unknown as Record<string, unknown>)[FLEET_MOUNT_REGISTRY_KEY] as
+		| (() => void)
+		| undefined) ?? null;
+} catch {
+	activeDispose = null;
+}
 
 /** Dispose the currently mounted fleet UI (widget cleared, default footer
  *  restored). Safe to call when nothing is mounted. */
 export function disposeFleetUI(): void {
 	const d = activeDispose;
 	activeDispose = null;
+	(globalThis as unknown as Record<string, unknown>)[FLEET_MOUNT_REGISTRY_KEY] = null;
 	d?.();
 }
 
 // ---------------------------------------------------------------------------
-// Shared formatting helpers live in this module (SECTION 2) (ONE fmtK/trunc/stripAnsi —
+// Shared formatting helpers live in this module (SECTION 2) (ONE token-k spelling via usage.ts formatTokens/ONE trunc/stripAnsi —
 // quality fix A7); this module imports from there.
 // ---------------------------------------------------------------------------
 
@@ -360,8 +375,9 @@ interface FgTheme {
 }
 
 const LIVE_STATUSES = new Set(["working", "blocked"]);
-/** Budget burn at/above this percentage renders in the error color. */
-const BURN_ERROR_PCT = 80;
+/** Budget burn at/above this percentage renders in the error color — derived
+ *  from the ONE 80% spelling (host.ts BUDGET_WARN_FRACTION, Law 9). */
+const BURN_ERROR_PCT = BUDGET_WARN_FRACTION * 100;
 
 function isLive(row: FleetWidgetRow): boolean {
 	return LIVE_STATUSES.has(row.status);
@@ -451,9 +467,13 @@ export function mountFleetUI(ctx: ExtensionContext, deps: FleetUIDeps): () => vo
 			// Defensive: restore the native footer if any older build replaced it.
 			ctx.ui.setFooter(undefined);
 		}
-		if (activeDispose === dispose) activeDispose = null;
+		if (activeDispose === dispose) {
+			activeDispose = null;
+			(globalThis as unknown as Record<string, unknown>)[FLEET_MOUNT_REGISTRY_KEY] = null;
+		}
 	};
 	activeDispose = dispose;
+	(globalThis as unknown as Record<string, unknown>)[FLEET_MOUNT_REGISTRY_KEY] = dispose;
 	return dispose;
 }
 
@@ -472,7 +492,7 @@ export function renderLiveRows(rows: FleetWidgetRow[], theme: Theme, width?: num
 	const lines = mine.map((r) => {
 		const pct = typeof r.budgetPct === "number" ? `${r.budgetPct}%` : "?";
 		const ping = r.lastPing ? ` [ping: ${r.lastPing.phase}]` : "";
-		const line = `▲ ${r.name} ${r.status} ↑${fmtK(r.inputTokens)} ↓${fmtK(r.outputTokens)} ${pct} of budget${ping}`;
+		const line = `▲ ${r.name} ${r.status} ↑${formatTokens(r.inputTokens)} ↓${formatTokens(r.outputTokens)} ${pct} of budget${ping}`;
 		// Budgets ≥80% burn override the status color with error.
 		const color: ThemeColor =
 			typeof r.budgetPct === "number" && r.budgetPct >= BURN_ERROR_PCT
@@ -574,7 +594,7 @@ function wrapLine(text: string, width = 100): string[] {
 
 /**
  * Render one delegate-family tool result as themed lines for the transcript.
- * Rules (DESIGN.md §19.4): status-colored badge; E_* code as error/warning;
+ * Rules: status-colored badge; E_* code as error/warning;
  * ONE-line verdict headline; herdr internals (terminal_id/pane_id/… patterns)
  * NEVER in the headline — caller still puts them in details. Returns lines.
  */
@@ -624,7 +644,7 @@ export function renderDelegateLines(
 // ===========================================================================
 
 /**
- * pi-delegate — `/delegate-fleet` mission-control overlay (DESIGN.md §15).
+ * pi-delegate — `/delegate-fleet` mission-control overlay.
  *
  * OWNERSHIP: worker F2 (impl-fleet); stage 2 (tree + fold) on top.
  *
@@ -669,7 +689,7 @@ export interface FleetDeps {
 
 // ---------------------------------------------------------------------------
 // Local key helper (pi-tui's matchesKey is not reachable from this repo's
-// node_modules layout); width/trunc/fmtK live in this module (SECTION 2).
+// node_modules layout); width/trunc live in this module (SECTION 2).
 // ---------------------------------------------------------------------------
 
 function isEscape(data: string): boolean {
@@ -681,7 +701,7 @@ function isEscape(data: string): boolean {
 // manifest but are not projected onto WorkerView — read them tolerantly.
 // ---------------------------------------------------------------------------
 
-interface ManifestExtras {
+export interface ManifestExtras {
 	sessionPath?: string;
 	budgetTokens?: number;
 	briefPath?: string;
@@ -710,8 +730,11 @@ interface ManifestExtras {
  *     {} or field omitted; NEVER throws
  *   - read-only
  * Raises: none
+ * Wave 2 (Law 9): this is the ONE manifest-extras reader — the ambient widget
+ * (buildWidgetRows) and the overlay (buildRow) both consume it; the former
+ * index.ts copy is deleted.
  */
-async function readManifestExtras(dir: string, name: string): Promise<ManifestExtras> {
+export async function readManifestExtras(dir: string, name: string): Promise<ManifestExtras> {
 	try {
 		// Migration stage 2 (audit step 5): the raw manifest.json re-parse is
 		// GONE — the read goes through the manifest storage port (manifestStore,
@@ -726,6 +749,9 @@ async function readManifestExtras(dir: string, name: string): Promise<ManifestEx
 		const extras: ManifestExtras = {};
 		if (typeof w.sessionPath === "string" && w.sessionPath.length > 0) {
 			extras.sessionPath = w.sessionPath;
+		}
+		if (typeof w.budgetTokens === "number" && Number.isFinite(w.budgetTokens) && w.budgetTokens > 0) {
+			extras.budgetTokens = w.budgetTokens;
 		}
 		if (typeof w.orchestratorSessionPath === "string" && w.orchestratorSessionPath.length > 0) {
 			extras.orchestratorSessionPath = w.orchestratorSessionPath;
@@ -751,23 +777,73 @@ async function readManifestExtras(dir: string, name: string): Promise<ManifestEx
 	}
 }
 
-/** File mtime in ms, or 0 when missing/unreadable. Read-only. */
-async function mtimeOf(path: string): Promise<number> {
-	try {
-		return (await stat(path)).mtimeMs;
-	} catch {
-		return 0;
-	}
+/**
+ * Build the ambient widget's rows (Wave 2, Law 9 — ONE row assembly): the
+ * verbatim move of the former inline mapping in index.ts's FleetUIDeps.getRows
+ * (that copy is deleted). Field-by-field behavior is IDENTICAL to the old
+ * widget path: isProbe comes from isProbeDir(dir) (the overlay's buildRow
+ * derives it from extras.briefPath === "" — a documented difference, both
+ * pinned by their own checks); budgetPct stays nullable (the overlay coerces
+ * to 0); lastPing degrades to undefined on read failure.
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input:
+ *   - views: worker views (as produced by buildWorkerView)
+ *   - self: THIS session's identity (ownership classification — fail-closed)
+ * Output: one FleetWidgetRow per view, same order
+ * Guarantees:
+ *   - never throws: manifest reads, session-usage parses and ping reads all
+ *     degrade (absent extras → zero gauges, no ping marker)
+ *   - read-only: manifest + session JSONL + ping file reads only
+ * Raises: none
+ * EXTERNAL_DEPENDENCY: manifest.json, worker session JSONLs and
+ *   p-<name>.jsonl pings under the exchange dirs (via readManifestExtras /
+ *   parseSessionUsage / readLastProgress).
+ */
+export async function buildWidgetRows(views: WorkerView[], self: SelfIdentity): Promise<FleetWidgetRow[]> {
+	return Promise.all(
+		views.map(async (v) => {
+			const extras = await readManifestExtras(v.dir, v.name);
+			const usage = parseSessionUsage(extras.sessionPath ?? "");
+			const window = resolveContextWindow(extras.model);
+			let lastPing: FleetWidgetRow["lastPing"];
+			try {
+				lastPing = readLastProgress(progressPathFor(v.dir, v.name)) ?? undefined;
+			} catch {
+				lastPing = undefined; // advisory — absent ping → no marker
+			}
+			return {
+				name: v.name,
+				status: v.status,
+				kind: v.kind,
+				branch: v.branch,
+				reportExists: v.reportExists,
+				isProbe: isProbeDir(v.dir),
+				inputTokens: usage.input,
+				outputTokens: usage.output,
+				budgetPct: contextPct(usage, window),
+				lastPing,
+				ownership: classifyOwnership(
+					extras.orchestratorSessionPath,
+					self,
+					v.placement,
+					extras.masterSessionPath,
+				),
+				task: basename(v.dir),
+			};
+		}),
+	);
 }
 
 /** Mailbox state: "Q?" worker question awaiting answer, "A→" answer posted. */
 async function mailState(dir: string, name: string): Promise<"Q?" | "A→" | "--"> {
 	// EXTERNAL_DEPENDENCY: mailbox files on disk — q-<name>.json / a-<name>.json
-	// in the exchange dir (mtime comparison decides which side is newer).
-	const q = await mtimeOf(questionPathFor(dir, name));
-	if (q === 0) return "--";
-	const a = await mtimeOf(answerPathFor(dir, name));
-	return a > q ? "A→" : "Q?";
+	// in the exchange dir (mtime comparison decides which side is newer) —
+	// read through the ONE shared reader (mailbox-store.mailboxAnswerState,
+	// Wave 3 step 5: one implementation for the overlay AND the status tool).
+	const { questionPosted, answerNewerThanQuestion } = await mailboxAnswerState(dir, name);
+	if (!questionPosted) return "--";
+	return answerNewerThanQuestion ? "A→" : "Q?";
 }
 
 // ---------------------------------------------------------------------------
@@ -933,9 +1009,9 @@ export interface FleetLayout {
 /** Column floors — shrink loops never go below these. */
 export const FLEET_FLOORS = { name: 8, branch: 6, usage: 12 } as const;
 
-/** Usage column string: `↑52.8k ↓34.9k (999% of 150k)` (compact fmtK form). */
+/** Usage column string: `↑52.8k ↓34.9k (999% of 150k)` (compact k form, usage.ts formatTokens). */
 export function fleetUsageOf(r: Pick<FleetLayoutRow, "input" | "output" | "percent" | "budget">): string {
-	return `↑${fmtK(r.input)} ↓${fmtK(r.output)} (${r.percent}% of ${fmtK(r.budget)})`;
+	return `↑${formatTokens(r.input)} ↓${formatTokens(r.output)} (${r.percent}% of ${formatTokens(r.budget)})`;
 }
 
 function pad(s: string, len: number): string {
@@ -1645,7 +1721,7 @@ export async function openFleetOverlay(ctx: ExtensionCommandContext, deps: Fleet
 // ===========================================================================
 
 /**
- * pi-delegate — worker view aggregation (DESIGN.md §5.2).
+ * pi-delegate — worker view aggregation.
  *
  * OWNERSHIP: worker B (impl-tools).
  *
@@ -1681,15 +1757,6 @@ export interface WorkerView {
 	startedAt: string;
 	/** Ms since startedAt (0 when unparseable). */
 	elapsedMs: number;
-}
-
-async function fileExists(path: string): Promise<boolean> {
-	try {
-		await stat(path);
-		return true;
-	} catch {
-		return false;
-	}
 }
 
 /**

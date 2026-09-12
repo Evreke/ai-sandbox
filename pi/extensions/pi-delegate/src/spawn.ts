@@ -1,7 +1,7 @@
 /**
- * pi-delegate — spawn module: everything the orchestrator DOES (DESIGN.md §5.1
- * `delegate` tool, §12 `delegate_mailbox` tool, §16–§18 schema/budget/prompt
- * pipeline, §19 settle/collect, §22 collect-time teardown, §23 release ACK).
+ * pi-delegate — spawn module: everything the orchestrator DOES (the `delegate`
+ * tool, the `delegate_mailbox` tool, the schema/budget/prompt
+ * pipeline, settle/collect, collect-time teardown, the release ACK).
  * <p>
  * MODULE_CONTRACT: orchestrator-side pipeline — worker-name validation, tier/
  * provider/model resolution, dual-gauge budget governor (E_CONTEXT/E_BUDGET),
@@ -32,12 +32,13 @@
  * exchange.ts (manifest/report/mailbox lifecycle + archive), usage.ts
  * (session-JSONL gauges), observe.ts (watch/collect config resolution),
  * fleet.ts (render helpers + idle nudge). Never imports the transport
- * implementation (dependency rule, DESIGN.md §4.1 — the Transport instance is
+ * implementation (dependency rule, ARCHITECTURE.md Law 4 — the Transport instance is
  * injected from index.ts). Import graph: spawn is the root consumer —
  * transport/exchange/fleet/observe are all imported BY this module and none
  * of them import it (DAG holds, no module-eval cycles).
- * Exported surface: registerDelegateTool | registerMailboxTool (exact union
- * of the two source files' exports).
+ * Exported surface: registerDelegateTool (the delegate_mailbox tool moved
+ * verbatim to src/mailbox-tool.ts in Wave 3 — registerDelegateTool keeps its
+ * exact name/signature; index.ts imports the two from their own modules).
  * Critical invariants (owned here, per report-ref-map.json hiddenInvariants):
  *   - append-before-start (EXECUTION side; exchange.ts owns the file
  *     conventions via the manifest store): the ManifestWorker entry is appended
@@ -98,38 +99,31 @@
 // archiveReport now lives in ./exchange.ts, watch/collect config in
 // ./observe.ts, ui render helpers in ./fleet.ts, the transport surface in
 // ./transport.ts (facades remain at the old paths until W5).
-import { appendFile, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { appendFile, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
-import { Type } from "typebox";
-import type { Theme } from "@earendil-works/pi-coding-agent";
+import { type Static, Type } from "typebox";
+import { CONFIG_DIR_NAME, type Theme } from "@earendil-works/pi-coding-agent";
 import {
 	aggregateTaskUsage,
-	answerPathFor,
 	applyFleetTaskFields,
-	archiveReport,
 	describeFleet,
 	ensureExchangeDir,
 	exchangeRoot,
 	isProbeDir,
 	persistTaskUsageSnapshot,
 	progressPathFor,
-	questionPathFor,
 	readLastProgress,
-	manifestStore,
-	readQuestion,
-	releasePathFor,
 	reportPathFor,
-	resolveReportSchema,
-	TEARDOWN_LOG_NAME,
 	teardownLogLine,
-	validateReport,
-	validateReportAgainstSchema,
-	writeAnswer,
-	writeRelease,
-	type ManifestWorker,
 } from "./exchange.ts";
+import { archiveReport } from "./archive.ts";
+import { manifestStore, type ManifestWorker } from "./manifest-store.ts";
+import { parseBriefSchema, resolveReportSchema, validateReport, validateReportAgainstSchema } from "./report-schema.ts";
+import {
+	questionPathFor,
+	readQuestion,
+} from "./mailbox-store.ts";
 import {
 	contextPct,
 	formatBudgetLine,
@@ -142,7 +136,7 @@ import {
 	resolveSpawnDefaults,
 	resolveTierTable,
 } from "./usage.ts";
-import { resolveCollectConfig, resolveWatchConfig } from "./observe.ts";
+import { resolveCollectConfig, resolveWatchConfig } from "./watch-config.ts";
 import {
 	type ReportWitness,
 	witnessEmbodimentReport,
@@ -150,8 +144,28 @@ import {
 	reportWitnessProvesRun,
 	stampCollected,
 } from "./lifecycle.ts";
-import { nudgeFailedPathFor } from "./exchange.ts";
-import { probeDirPathFor, questionArchivePathFor } from "./expaths.ts";
+import { nudgeFailedPathFor } from "./mailbox-store.ts";
+// Wave 3 decomposition (step 4.3): the grace state machine moved verbatim to
+// src/grace.ts — the execute closure drives it through the injected seam.
+import { runGraceLoop } from "./grace.ts";
+// The tool-result vocabulary + the error/sleep helpers (extracted in step
+// 4.1) — the structural kill of the byte-identical errText/asDelegateError
+// copies (audit finding 7).
+import { asDelegateError, errText, fail, textResult, typedCode, type ToolResult } from "./tool-result.ts";
+// Wave 4 item 2 (Law 1 truncation duty): worker-written report text is capped
+// in the rendered result via pi's own truncation helpers (src/text-cap.ts).
+import { capWorkerText } from "./text-cap.ts";
+// Wave 3 decomposition (step 5): the tolerant fs probes are ONE implementation
+// (src/fs-probe.ts) — the local reportExists copy is deleted (the grace loop's
+// injection keeps the reportExists name via the aliased import).
+import { fileExists as reportExists } from "./fs-probe.ts";
+// Wave 3 decomposition (step 4.4): the delegate_mailbox tool moved verbatim
+// to src/mailbox-tool.ts (exact tool name + registration signature).
+import { registerMailboxTool } from "./mailbox-tool.ts";
+// Wave 3 decomposition (step 4.2): the clock port moved verbatim to
+// src/clock.ts — the grace loop deps keep consuming it through the import.
+import { type ClockPort, systemClock } from "./clock.ts";
+import { probeDirPathFor, TEARDOWN_LOG_NAME } from "./expaths.ts";
 import { clampLines, notifyFleetIdle, renderDelegateLines } from "./fleet.ts";
 import {
 	CONTEXT_CRITICAL_PCT,
@@ -175,413 +189,23 @@ import {
 } from "./host.ts";
 
 // ===========================================================================
-// SECTION 1/2 — delegate_mailbox tool (DESIGN.md §12, §23)
-// (verbatim move of the old src/tools/mailbox.ts; its review-verified header
-// comment is preserved)
-// ===========================================================================
-
-/**
- * pi-delegate — `delegate_mailbox` tool (DESIGN.md §12).
- *
- * OWNERSHIP: worker B2 (impl-tools2).
- *
- * Orchestrator-facing two-way file mailbox:
- *   read   → pending q-<name>.json question(s) across known task dirs (no mutation)
- *   answer → write a-<name>.json, then nudge idle/blocked/done workers to continue
- *   steer  → same as answer, for mid-run guidance
- *
- * The mailbox is files, never panes: the worker is briefed (briefPrompt) to
- * write q-<name>.json when blocked and poll a-<name>.json for answers.
- *
- * Dependency rule: imports transport.ts and exchange.ts only — never the
- * transport IMPLEMENTATION directly (herdr CLI lives behind
- * createHerdrTransport, bound once in index.ts).
- */
-
-/** Max wait for a nudge prompt *submission* to be accepted (not for settle). */
-const NUDGE_TIMEOUT_MS = 30_000;
-/** F6 nudge resilience: total submitPrompt attempts (1 initial + 2 retries) and
- *  the backoff between them. Bounded by design — worst case ~3×NUDGE_TIMEOUT_MS
- *  + 2 delays, and each attempt stays under the NUDGE_TIMEOUT_MS cap. A
- *  transient `herdr socket: connection_closed` must not leave the worker asleep
- *  on the first failure (2026-09-10 field report). */
-const NUDGE_ATTEMPTS = 3;
-const NUDGE_RETRY_DELAY_MS = 500;
-/** Nudge text — points the worker at the answer file, per DESIGN.md §12. */
-const NUDGE_TEXT = (name: string) =>
-	`Mailbox update posted: read a-${name}.json next to your brief and continue accordingly.`;
-
-type ToolResult = {
-	content: { type: "text"; text: string }[];
-	details: Record<string, unknown>;
-};
-
-function errText(err: unknown): string {
-	return err instanceof Error ? err.message : String(err);
-}
-
-function fail(code: DelegateErrorCode, text: string, extra: Record<string, unknown> = {}): ToolResult {
-	return { content: [{ type: "text", text }], details: { ok: false, code, ...extra } };
-}
-
-/**
- * Migration stage 1 (audit, errors-defect 1): the ERROR CODE is the error's
- * OWN property — an intercept reads the typed code off a DelegateErrorImpl
- * the adapter raised and substitutes the positional (call-site) code ONLY
- * when the failure carried none (plain Error). Before this, the start catch
- * re-flattened the adapter's distinct E_NAME back into E_START, so the
- * adapter's differentiation never reached the tool result.
- * <p>
- * FUNCTION_CONTRACT:
- * Input: err — anything caught around a transport call; fallback — the
- *   call-site positional code
- * Output: err.code when err is a typed DelegateErrorImpl, else fallback
- * Guarantees: pure; never throws; no message-text parsing (the code is read
- *   from the typed field, never matched out of the message)
- * Raises: never
- */
-function typedCode(err: unknown, fallback: DelegateErrorCode): DelegateErrorCode {
-	return err instanceof DelegateErrorImpl ? err.code : fallback;
-}
-
-function textResult(text: string, details: Record<string, unknown>): ToolResult {
-	return { content: [{ type: "text", text }], details: { ok: true, ...details } };
-}
-
-/** Exchange dirs of all known task manifests (read: q-file scan surface).
- *  Migration stage 3 (audit step 9): the scan takes the active backend name
- *  from the bound transport (composition root) — no implicit global. */
-function knownTaskDirs(backendName: string): string[] {
-	const dirs = new Set<string>();
-	for (const manifest of manifestStore.scan(backendName)) dirs.add(manifest.dir);
-	return [...dirs];
-}
-
-/** Exchange dir that owns a worker, from the manifests (answer/steer target). */
-function findWorkerDir(backendName: string, name: string): string | null {
-	for (const manifest of manifestStore.scan(backendName)) {
-		if (manifest.workers.some((w) => w.name === name)) return manifest.dir;
-	}
-	return null;
-}
-
-/**
- * Register the `delegate_mailbox` tool on the orchestrator's extension API.
- * <p>
- * FUNCTION_CONTRACT (tool `execute`):
- * Input:
- *   - action: "read" | "answer" | "steer"
- *   - name: worker name matching WORKER_NAME_RE ([a-z][a-z0-9_-]{0,31})
- *   - text: reply/steering text (required for answer/steer, ignored for read)
- * Output: ToolResult — human-readable text + details{ok, code, …}; E_* codes
- *   are RETURNED as failed results (never thrown)
- * Guarantees:
- *   - "read" is side-effect-free (manifest + q-file reads only)
- *   - answer/steer post a-<name>.json BEFORE nudging; the stale question is
- *     archived (renamed to q-<name>.answered-<ts>.json) so it can never
- *     re-fire AWAITING_ANSWER on a later run; nudge failures do not fail the
- *     action (the answer file is already posted)
- *   - F6 nudge resilience: the pane nudge is retried with backoff
- *     (NUDGE_ATTEMPTS total); on repeated failure a watcher-visible
- *     nudge-failed-<name>.json marker is written so the orchestrator's
- *     watcher delivers the wake-up instead, and a SUBSEQUENT successful
- *     nudge deletes any stale marker (retire-ack consume discipline)
- *   - nudge only fires for idle/blocked workers — never interrupts a
- *     working/done/unknown agent mid-turn
- * Raises (returned, not thrown):
- *   - E_NAME — invalid worker name, or name unknown to any manifest
- *   - E_BRIEF — missing/empty text for answer/steer, or answer write failed
- */
-export function registerMailboxTool(pi: import("@earendil-works/pi-coding-agent").ExtensionAPI, transport: Transport) {
-	pi.registerTool({
-		name: "delegate_mailbox",
-		label: "Delegate Mailbox",
-		description:
-			"Two-way file mailbox with a delegate worker (DESIGN.md §12). action 'read' shows pending worker " +
-			"questions (q-<name>.json) without mutating anything; 'answer' posts a-<name>.json with your reply and " +
-			"nudges an idle/blocked worker to continue; 'steer' posts mid-run guidance the same way; " +
-			"'release' (§23) posts release-<name>.json — the retire ACK: the watcher closes the worker's pane " +
-			"once it is retirable (valid report + drained mailbox + done/idle; probes immediately). " +
-			"Use this when delegate returns an AWAITING_ANSWER result.",
-		promptSnippet: "Read/answer a delegate worker's file mailbox (never touches the pane directly)",
-		promptGuidelines: [
-			"When delegate returns AWAITING_ANSWER, answer the worker's question here (action 'answer'); the worker will be nudged to continue.",
-			"action 'read' is side-effect-free — use it to check for pending questions before/after a delegate run.",
-		],
-		parameters: Type.Object({
-			action: StringEnum(["read", "answer", "steer", "release"] as const, {
-				description:
-					"read = show pending question(s); answer = reply to a question; steer = mid-run guidance; " +
-					"release = post the §23 retire ACK (watcher closes the pane when the worker is retirable)",
-			}),
-			name: Type.String({ description: "Worker name; must match [a-z][a-z0-9_-]{0,31}" }),
-			text: Type.Optional(
-				Type.String({ description: "Answer/steering text (required for 'answer' and 'steer')" }),
-			),
-		}),
-		renderCall(args, theme) {
-			const action = typeof args?.action === "string" ? args.action : "?";
-			const name = typeof args?.name === "string" ? args.name : "?";
-			const head = theme.fg("toolTitle", theme.bold("delegate_mailbox "));
-			return {
-				render: (width?: number) => clampLines([`${head} ${theme.fg("muted", action)} ${theme.fg("accent", name)}`], width),
-				invalidate: () => {},
-			};
-		},
-		renderResult(result, _options, theme) {
-			const resultText = (result?.content ?? [])
-				.filter((c): c is { type: "text"; text: string } => c.type === "text")
-				.map((c) => c.text)
-				.join("\n");
-			const lines = renderDelegateLines("delegate_mailbox", resultText, theme);
-			return { render: (width?: number) => clampLines(lines, width), invalidate: () => {} };
-		},
-		async execute(_toolCallId, params) {
-			if (!WORKER_NAME_RE.test(params.name)) {
-				return fail(
-					"E_NAME",
-					`E_NAME — invalid worker name "${params.name}". ` +
-						"Names must match [a-z][a-z0-9_-]{0,31}; use the canonical name from the manifest/delegate_status.",
-					{ name: params.name },
-				);
-			}
-
-			// --- read: side-effect-free scan of every known task dir -----------------
-			if (params.action === "read") {
-				const questions: QuestionEnvelope[] = [];
-				for (const dir of knownTaskDirs(transport.backendName())) {
-					const q = readQuestion(questionPathFor(dir, params.name));
-					if (q) questions.push(q);
-				}
-				if (questions.length === 0) {
-					return textResult(
-						`No pending question for worker ${params.name} in any known task dir ` +
-							`(no readable q-${params.name}.json under ${exchangeRoot()}).`,
-						{ action: "read", name: params.name, questions: [] },
-					);
-				}
-				const lines = questions.flatMap((q) => [
-					`Pending question from ${q.worker} (${q.ts}):`,
-					q.question,
-					q.context ? `Context: ${q.context}` : "",
-					q.options?.length ? `Options: ${q.options.join(" | ")}` : "",
-					`Answer via delegate_mailbox (action 'answer', name '${params.name}').`,
-					"",
-				]);
-				return textResult(lines.join("\n").trim(), {
-					action: "read",
-					name: params.name,
-					questions,
-				});
-			}
-
-			// --- answer | steer: locate the worker's task dir from the manifests -----
-			const dir = findWorkerDir(transport.backendName(), params.name);
-			if (!dir) {
-				return fail(
-					"E_NAME",
-					`E_NAME — no delegate worker named "${params.name}" is known (no manifest under ${exchangeRoot()} references it). ` +
-						"Check delegate_status for known workers; a worker must have been spawned via delegate first.",
-					{ action: params.action, name: params.name },
-				);
-			}
-
-			// --- release (§23 retire ACK): post the marker; the WATCHER consumes it.
-			// No nudge is sent: release is a retirement signal, not worker mail — a
-			// nudged worker would start a NEW turn on a pane that is about to close.
-			// Needs no text, so it is handled BEFORE the answer/steer text guard.
-			if (params.action === "release") {
-				const releasePath = releasePathFor(dir, params.name);
-				// §23 MASTER SWITCH: auto-teardown is opt-in (watch.retire, default
-				// FALSE). While disabled a release is an HONEST NO-OP: nothing is
-				// posted, and any existing marker is DELETED (best-effort) so a stale
-				// release can never fire a close after the feature is enabled later.
-				if (!resolveWatchConfig().retire) {
-					let removedNote = "";
-					try {
-						await rm(releasePath, { force: true });
-						removedNote = " Any existing release marker was deleted — a stale marker must not fire a close once watch.retire is enabled.";
-					} catch (err) {
-						removedNote = ` Stale-marker cleanup failed (${errText(err)}) — delete ${releasePath} manually or it may fire a close once watch.retire is enabled.`;
-					}
-					return textResult(
-						`No-op: auto-teardown is disabled via watch.retire=false — no release posted for worker ${params.name}.${removedNote}`,
-						{ action: "release", name: params.name, dir, releasePath, retireEnabled: false, noOp: true },
-					);
-				}
-				try {
-					await writeRelease(releasePath);
-				} catch (err) {
-					return fail(
-						"E_BRIEF",
-						`E_BRIEF — failed to write release marker at ${releasePath}: ${errText(err)}`,
-						{ action: "release", name: params.name, dir, releasePath, stderr: errText(err) },
-					);
-				}
-				return textResult(
-					`Release posted for worker ${params.name} (${releasePath}) — the watcher retires it when ` +
-						"retirable (valid report + drained mailbox + done/idle; probes immediately on their settled " +
-						"verdict). No nudge sent: release is a retirement signal, not worker mail.",
-					{ action: "release", name: params.name, dir, releasePath },
-				);
-			}
-
-			// Answering/steering requires text — E_BRIEF per contract (E_NAME is for
-			// bad names).
-			if (!params.text || params.text.trim().length === 0) {
-				return fail(
-					"E_BRIEF",
-					`E_BRIEF — mailbox answer text required: pass the reply/steering text for worker ${params.name} ` +
-						"in the 'text' parameter.",
-					{ action: params.action, name: params.name, dir },
-				);
-			}
-
-			const answerPath = answerPathFor(dir, params.name);
-			try {
-				// EXTERNAL_DEPENDENCY: exchange dir on disk — answer file at
-				// /tmp/exchange/<task>/a-<name>.json (atomic write inside exchange.ts).
-				await writeAnswer(answerPath, params.text);
-			} catch (err) {
-				return fail(
-					"E_BRIEF",
-					`E_BRIEF — failed to write mailbox answer at ${answerPath}: ${errText(err)}`,
-					{ action: params.action, name: params.name, dir, answerPath, stderr: errText(err) },
-				);
-			}
-
-			// EXTERNAL_DEPENDENCY: fs rename inside the exchange dir
-			// (/tmp/exchange/<task>/q-<name>.json → q-<name>.answered-<ts>.json).
-			// Archive the question right after the answer lands: q-<name>.json must not
-			// survive a successful answer, or a later run for the same worker name would
-			// re-fire AWAITING_ANSWER with the stale question (review fix). Best-effort:
-			// a missing q-file is normal for 'steer'; any other rename failure is noted
-			// but does not fail the action — the answer file is already posted.
-			let archiveNote = "";
-			try {
-				await rename(
-					questionPathFor(dir, params.name),
-					questionArchivePathFor(dir, params.name, Date.now()),
-				);
-				archiveNote = " Pending question archived.";
-			} catch (err) {
-				if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
-					archiveNote =
-						` Question archive failed (${errText(err)}) — delete q-${params.name}.json manually, otherwise a later run may re-fire AWAITING_ANSWER with the stale question.`;
-				}
-			}
-
-			// Nudge idle/blocked/done workers — a working agent must not be
-			// interrupted mid-turn. A done agent IS woken: submitPrompt starts a new
-			// turn on the existing pane and that turn reads the answer file (§12
-			// promises a nudge for answer/steer with no status restriction). Unknown
-			// status → honest warning instead of a silent success.
-			//
-			// F6 nudge resilience: submitPrompt is retried with a short backoff
-			// (NUDGE_ATTEMPTS total, each attempt under NUDGE_TIMEOUT_MS) — a
-			// transient `connection_closed` from the herdr socket must not leave the
-			// worker asleep on the first failure. On REPEATED failure a watcher-
-			// visible marker (nudge-failed-<name>.json) is written into the worker's
-			// exchange dir, so the orchestrator's watcher delivers the wake-up on the
-			// next tick instead of the socket; on a SUBSEQUENT successful nudge any
-			// stale marker is deleted (the §23 retire-ack consume discipline — a
-			// leftover marker must not fire for a fresh same-name retry).
-			let nudged = false;
-			let nudgeNote = "";
-			try {
-				const status = (await transport.getStatus(params.name))?.status ?? "unknown";
-				if (status === "idle" || status === "blocked" || status === "done") {
-					// EXTERNAL_DEPENDENCY: herdr pane IPC via the injected transport
-					// (submitPrompt types into the worker's live pane; 30 s accept cap).
-					let lastErr: unknown = null;
-					for (let attempt = 1; attempt <= NUDGE_ATTEMPTS; attempt++) {
-						try {
-							await transport.submitPrompt({
-								name: params.name,
-								text: NUDGE_TEXT(params.name),
-								timeoutMs: NUDGE_TIMEOUT_MS,
-							});
-							nudged = true;
-							break;
-						} catch (err) {
-							lastErr = err;
-							if (attempt < NUDGE_ATTEMPTS) await sleep(NUDGE_RETRY_DELAY_MS);
-						}
-					}
-					if (nudged) {
-						// Consume any stale nudge-failed marker (advisory, best-effort —
-						// mirrors the release-ACK consume in observe.ts retirePass).
-						try {
-							await rm(nudgeFailedPathFor(dir, params.name), { force: true });
-						} catch {
-							// marker cleanup is advisory — the next successful nudge retries
-							// and the marker's own ts fingerprint keeps old events deduped
-						}
-						if (status === "done") {
-							nudgeNote = " Worker had finished (status done) — re-prompted; the new turn reads a-" + params.name + ".json.";
-						}
-					} else {
-						const markerPath = nudgeFailedPathFor(dir, params.name);
-						const ts = new Date().toISOString();
-						try {
-							// Best-effort plain write (not atomic): the watcher's marker
-							// reader is tolerant — a torn read degrades to "no marker" and
-							// this handler re-writes it on the next failed answer/steer.
-							await writeFile(
-								markerPath,
-								`${JSON.stringify({ name: params.name, ts, error: errText(lastErr) }, null, "\t")}\n`,
-							);
-							nudgeNote =
-								` Nudge prompt failed after ${NUDGE_ATTEMPTS} attempts (${errText(lastErr)}) — the answer IS posted at a-${params.name}.json ` +
-								`and a nudge-failed marker was written (${markerPath}): the watcher delivers the wake-up on its next tick. ` +
-								"If it does not, re-prompt the pane manually or retry the steer.";
-						} catch (markerErr) {
-							nudgeNote =
-								` Nudge prompt failed after ${NUDGE_ATTEMPTS} attempts (${errText(lastErr)}) — the answer file IS posted ` +
-								`(marker write also failed: ${errText(markerErr)}); check the pane via delegate_status and nudge manually if needed.`;
-						}
-					}
-				} else if (status === "unknown") {
-					nudgeNote =
-						` Worker status is unknown — the answer IS posted but may never be read; verify the pane via delegate_status and nudge or re-spawn the worker manually if it does not pick the mail up.`;
-				} else {
-					nudgeNote =
-						` Worker status is ${status} — no nudge sent to avoid interrupting the running turn; the worker reads a-${params.name}.json between steps when its brief says steering is expected.`;
-				}
-			} catch (err) {
-				nudgeNote =
-					` Nudge prompt failed (${errText(err)}) — the answer file IS posted; check the pane via delegate_status and nudge manually if needed.`;
-			}
-			// The getStatus/submitPrompt block above never throws on its own paths —
-			// this outer catch covers unexpected shape changes; retry/marker logic
-			// lives INSIDE the idle/blocked/done branch (F6).
-
-			return textResult(
-				`${params.action === "steer" ? "Steering" : "Answer"} posted to ${answerPath} for worker ${params.name}.` +
-					(nudged ? ` Nudge prompt sent — the worker will read a-${params.name}.json and continue.` : nudgeNote) +
-					archiveNote,
-				{ action: params.action, name: params.name, dir, answerPath, nudged },
-			);
-		},
-	});
-}
 
 
 // ===========================================================================
-// SECTION 2/2 — delegate tool (DESIGN.md §5.1, §16–§22)
+// SECTION 2/2 — delegate tool
 // (verbatim move of the old src/tools/delegate.ts; its review-verified header
 // comment is preserved)
 // ===========================================================================
 
 /**
- * pi-delegate — `delegate` tool (DESIGN.md §5.1).
+ * pi-delegate — `delegate` tool.
  *
  * OWNERSHIP: worker B (impl-tools).
  *
  * Spawns one herdr worker, briefs it, and blocks until it settles, then
  * validates the report file. BLOCKING by design; Esc (abort signal) detaches —
  * the worker keeps running and is recoverable via `delegate_status`. Errors are
- * surfaced as structured tool results (DESIGN.md §7), never thrown raw.
+ * surfaced as structured tool results (ARCHITECTURE.md Law 8), never thrown raw.
  *
  * Manifest discipline: the ManifestWorker record is written immediately after
  * place() succeeds and BEFORE startAgent — a failed start still leaves a real
@@ -607,12 +231,16 @@ export function registerMailboxTool(pi: import("@earendil-works/pi-coding-agent"
 export const RETRY_MANDATE =
 	"The retry MUST use a NEW worker name (e.g. <name>-r2) — the original name stays taken by the settled agent.";
 
-/** Interactive-readiness timeout for `agent start` (DESIGN.md §5.1 step 5). */
+/** Interactive-readiness timeout for `agent start`. */
 const START_TIMEOUT_MS = 120_000;
 /** Max wait for prompt *submission* to be accepted (not for settle). */
 const SUBMIT_TIMEOUT_MS = 30_000;
 /** Default settle timeout for probe mode (short smoke gate). */
 const PROBE_TIMEOUT_MS = 120_000;
+/** Cap for the DEPRECATED timeoutMs alias (§20.1 hardened): a legacy stale
+ *  timeoutMs must never hold the session hostage — folded into waitMs capped
+ *  here AND clamped again in execute()'s wait computation. ONE spelling. */
+const WAIT_CAP_MS = 120_000;
 /** Exchange dir for probe runs — no brief/task, but placements must stay
  *  teardown- and status-visible (manifestStore.scan() covers every manifest under
  *  the exchange root). Derived from exchangeRoot() so sandboxed tests
@@ -620,7 +248,7 @@ const PROBE_TIMEOUT_MS = 120_000;
 function probeExchangeDir(): string {
 	return probeDirPathFor(exchangeRoot());
 }
-/** Fixed probe prompt (DESIGN.md §5.1 step 4). */
+/** Fixed probe prompt. */
 const PROBE_PROMPT = "Reply with exactly: OUTPUT: OK";
 /** Settle-vs-report race grace window: settle can fire before the report file
  *  hits the disk (or mid-turn idle blip), so a missing/unparseable report is
@@ -648,28 +276,15 @@ const delegateParams = Type.Object({
 	thinking: Type.Optional(Type.String({ description: "Thinking level override; otherwise the configured tier/defaults decide (see ~/.pi/agent/pi-delegate.config.json) — no built-in default" })),
 	waitMs: Type.Optional(Type.Number({ description: "How long this call BLOCKS waiting for the worker (default: watch.settleGateMs from ~/.pi/agent/pi-delegate.config.json, 15000 ms — just enough to prove the worker started). At the cap the call auto-detaches: END YOUR TURN, the background watcher wakes you when the report lands or the worker needs attention. Long waits are explicit opt-in via this param." })),
 	timeoutMs: Type.Optional(Type.Number({ description: "Deprecated alias for waitMs — CAPPED at 120000 ms unless waitMs is set explicitly." })),
-	releaseOn: Type.Optional(Type.Union([Type.Literal("started"), Type.Literal("settle")], { description: "When to release this call: 'settle' (default) blocks the full window unless the worker settles inline; 'started' releases as soon as the worker is proven started and working — the background watcher wakes you on report-ready/question/death. Default from watch.releaseOn in ~/.pi/agent/pi-delegate.config.json. Never applies to probes." })),
+	releaseOn: Type.Optional(StringEnum(["started", "settle"] as const, {
+		description:
+			"When to release this call: 'settle' (default) blocks the full window unless the worker settles inline; 'started' releases as soon as the worker is proven started and working — the background watcher wakes you on report-ready/question/death. Default from watch.releaseOn in ~/.pi/agent/pi-delegate.config.json. Never applies to probes.",
+	})),
 
 	budgetTokens: Type.Optional(Type.Number({ minimum: 1, description: "Optional OUTPUT-token cap (sum of assistant output); over-budget workers are refused on retry with E_BUDGET." })),
 	maxContextPct: Type.Optional(Type.Number({ minimum: 10, maximum: 99, description: "Context-window %% refusal line (default 80 — the operator restart habit). Re-spawning a worker at/over this context %% is refused with E_CONTEXT." })),
 	extraArgs: Type.Optional(Type.Array(Type.String(), { description: "Extra args appended after --" })),
 });
-
-function asDelegateError(err: unknown): DelegateError | null {
-	if (err instanceof Error && typeof (err as DelegateError).code === "string") {
-		return err as DelegateError;
-	}
-	return null;
-}
-
-async function reportExists(path: string): Promise<boolean> {
-	try {
-		await stat(path);
-		return true;
-	} catch {
-		return false;
-	}
-}
 
 /** Best-effort teardown audit line — MIRROR of the /delegate-teardown
  *  command's logTo format (index.ts, absorbed from commands.ts in W5):
@@ -718,7 +333,7 @@ async function isParseFailure(path: string): Promise<boolean> {
 	}
 }
 
-/** Fleet journal (DESIGN.md §19.4): best-effort session entry, headless-safe.
+/** Fleet journal: best-effort session entry, headless-safe.
  *  Guarded: only when appendEntry is available on the api object.
  * <p>
  * FUNCTION_CONTRACT:
@@ -773,242 +388,187 @@ function liveSessionFile(ctx: {
 	}
 }
 
-/**
- * Watcher stage A (guideline §9): best-effort line into the watcher's audit
- * file — the same append-only sink the watcher log uses. Advisory by
- * contract: a write failure is swallowed, never affects the spawn outcome.
- * <p>
- * FUNCTION_CONTRACT:
- * Input: line — the audit text (ISO timestamp is prepended here)
- * Output: none
- * Guarantees:
- *   - appends one line to ~/.pi/agent/delegate-watch.log, best-effort
- *   - never throws past the caller (append failures are swallowed)
- * Raises: never
- * EXTERNAL_DEPENDENCY: ~/.pi/agent/delegate-watch.log (append-only audit
- *   file under $HOME; os.homedir() is cached by bun — see the
- *   makeWatcherLogSink contract in observe.ts for the test seam).
- */
-function watchAudit(line: string): void {
-	void appendFile(join(homedir(), ".pi", "agent", "delegate-watch.log"), `${new Date().toISOString()} ${line}\n`).catch(
-		() => undefined,
-	);
-}
-
-/** Abort-aware sleep: resolves early when the signal fires. */
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-	return new Promise((res) => {
-		const t = setTimeout(res, ms);
-		signal?.addEventListener(
-			"abort",
-			() => {
-				clearTimeout(t);
-				res();
-			},
-			{ once: true },
-		);
-	});
-}
+// Watcher stage A: best-effort line into the watcher's audit
+// file. Wave 3 decomposition (step 5): the spawn-side watcher-audit append is
+// the ONE shared ISO-stamped sink — watcher.ts appendWatcherAudit (spawn's
+// private implementation of the append was deleted; audit finding 7).
+// Advisory by contract: a write failure is swallowed, never affects the
+// spawn outcome. EXTERNAL_DEPENDENCY: ~/.pi/agent/delegate-watch.log (the
+// append-only audit file under pi's agent dir — see appendWatcherAudit's
+// contract in watcher.ts for the test seam).
+import { appendWatcherAudit } from "./watcher.ts";
 
 // ===========================================================================
-// Migration stage 2 (audit step 7) — injectable clock/delay port + the
-// settle→collect seam as an explicit state machine
+// Wave 3 decomposition (step 4.5, the audit's "shrink its blast radius"):
+// the two execute() phases that read NO closure mutable state become pure
+// functions with explicit args — tier/provider/model resolution and
+// report-schema resolution. NOT a rewrite of execute(): each phase keeps its
+// exact decision logic, E_* texts and details payloads verbatim; only the
+// phase boundary becomes a discriminated result the closure returns (E_TIER/
+// E_BRIEF) or consumes. The remaining execute() closure shrink is the
+// written next-cycle plan (README "Future work").
 // ===========================================================================
 
-/**
- * Clock/delay port (audit step 7): the pipeline's ONLY access to wall-clock
- * time and sleeping. Injecting it makes time-dependent pipeline sections
- * (the grace recheck loop first) testable on virtual clocks — no real
- * waiting in tests, deterministic sequences.
- * <p>
- * MODULE_CONTRACT (port): delay() MUST resolve early when the signal fires
- * (the abort-detaches-never-kills discipline — the wait is cancellable,
- * never the worker); now() is a monotonic-enough millisecond read.
- */
-export interface ClockPort {
-	now(): number;
-	delay(ms: number, signal?: AbortSignal): Promise<void>;
-}
-
-/** The production clock: real timers. */
-export const systemClock: ClockPort = {
-	now: () => Date.now(),
-	delay: (ms, signal) => sleep(ms, signal),
-};
-
-export interface VirtualClock extends ClockPort {
-	/** Resolve every pending delay whose due time falls within the next `ms`
-	 *  of virtual time, advancing now() past them. Awaits until the resolvers
-	 *  have run (microtask flush). */
-	advance(ms: number): Promise<void>;
+/** Explicit inputs of the tier-resolution phase (no closure state). */
+interface TierResolutionInput {
+	name: string;
+	tier?: string;
+	provider?: string;
+	model?: string;
+	thinking?: string;
 }
 
 /**
- * Virtual clock for tests: delays never use real time — they resolve when
- * advance() moves virtual time past their due point.
+ * v1.9.2 tier resolution as a PURE function (verbatim decision logic from
+ * the execute closure).
  * <p>
  * FUNCTION_CONTRACT:
- * Input: startNow — the initial virtual time (ms)
- * Output: a VirtualClock (ClockPort + advance)
+ * Input:
+ *   - input: the call's explicit tier/provider/model/thinking params + the
+ *     worker name (for the E_TIER details payload)
+ *   - tierTable: resolveTierTable() result (the config "tiers" section)
+ *   - spawnDefaults: resolveSpawnDefaults() result (the config "defaults")
+ * Output: {ok:true, provider, model, thinking} — every key resolved (string),
+ *   or {ok:false, failure} — the E_TIER tool result to return verbatim
  * Guarantees:
- *   - delay() never resolves before an advance() covers its due time
- *   - delay() honors the abort signal (the port contract): an aborted wait
- *     resolves early — the abort-detaches-never-kills discipline holds on
- *     virtual time too
- *   - advance() resolves ALL due waiters in scheduling order and flushes a
- *     microtask tick so chained delays observe the new time
+ *   - explicit params > tiers[<tier>] > defaults, per key; there is NO
+ *     built-in worker tier — an unconfigured environment fails with E_TIER
+ *     (never a guessed provider)
+ *   - pure: no I/O, no closure reads; the config reads happen in the CALLER
  * Raises: never
  */
-export function createVirtualClock(startNow = 0): VirtualClock {
-	let now = startNow;
-	const waiters: Array<{ due: number; resolve: () => void }> = [];
-	return {
-		now: () => now,
-		delay(ms, signal) {
-			return new Promise<void>((res) => {
-				const waiter = { due: now + ms, resolve: res };
-				waiters.push(waiter);
-				if (signal) {
-					if (signal.aborted) {
-						const i = waiters.indexOf(waiter);
-						if (i >= 0) waiters.splice(i, 1);
-						res();
-						return;
-					}
-					signal.addEventListener(
-						"abort",
-						() => {
-							const i = waiters.indexOf(waiter);
-							if (i >= 0) waiters.splice(i, 1);
-							res();
-						},
-						{ once: true },
-					);
-				}
-			});
-		},
-		async advance(ms) {
-			now += ms;
-			const due = waiters.filter((w) => w.due <= now);
-			for (const w of waiters) {
-				if (w.due > now) continue;
-				w.resolve();
-			}
-			for (let i = waiters.length - 1; i >= 0; i--) {
-				if (due.includes(waiters[i])) waiters.splice(i, 1);
-			}
-			await new Promise<void>((r) => setTimeout(r, 0));
-		},
-	};
-}
-
-/** One collect attempt (the collectReport() shape — verdict + the path it
- *  actually read + whether the requested-name fallback was used). */
-export interface CollectAttempt {
-	verdict: { ok: true; report: WorkerReport } | { ok: false; error: string };
-	usedPath: string;
-	fallbackUsed: boolean;
-}
-
-/** The grace-loop state machine's states (the settle→collect seam). */
-export type GraceState =
-	| { kind: "evaluate"; attempt: CollectAttempt; graceAttempt: number }
-	| { kind: "collected"; attempt: CollectAttempt; graceAttempt: number }
-	| { kind: "awaiting-answer"; question: QuestionEnvelope }
-	| { kind: "exhausted"; attempt: CollectAttempt; graceAttempt: number }
-	| { kind: "aborted"; graceAttempt: number };
-
-/**
- * Dependencies of the grace transition — everything is injected, nothing is
- * read from module state (the seam is fully explicit and testable).
- */
-export interface GraceLoopDeps {
-	/** Re-read + re-validate the report (the collectReport closure). */
-	collect: () => CollectAttempt;
-	/** Tolerant pending-question read (q-<name>.json). */
-	pendingQuestion: () => QuestionEnvelope | null;
-	/** Advisory progress-ping read (p-<name>.jsonl tail). */
-	readProgressPing: () => ProgressEvent | null;
-	reportExists: (path: string) => Promise<boolean>;
-	isParseFailure: (path: string) => Promise<boolean>;
-	/** The injected clock — the loop's ONLY time source. */
-	clock: ClockPort;
-	/** Abort signal of the tool call (abort = detach, never kill). */
-	signal?: AbortSignal;
-	maxRechecks: number;
-	delayMs: number;
-	onRecheck?: (attempt: number, missing: boolean, usedPath: string) => void;
-	onPing?: (ping: ProgressEvent) => void;
-}
-
-/**
- * ONE transition of the settle→collect grace state machine: takes a state,
- * returns the next. From "evaluate" it applies the priority ladder of the
- * unified grace loop (report → question → retryable report state) — the
- * exact pre-extraction semantics (v1.9b review fix 2); every other state is
- * terminal and returned unchanged.
- * <p>
- * FUNCTION_CONTRACT:
- * Input: state — the current grace state; deps — the injected seam
- * Output: the next state ("evaluate" again after a delay+recollect, or a
- *   terminal kind: collected / awaiting-answer / exhausted / aborted)
- * Guarantees:
- *   - priority order preserved: a valid verdict wins BEFORE the question
- *     check; the question wins BEFORE the retryable check
- *   - a schema rejection over a readable file is stable (never retried →
- *     "exhausted" with graceAttempt untouched)
- *   - abort during the injected delay → "aborted" (the CALLER salvages:
- *     re-collect + probe salvage + detach — the loop never kills a worker)
- *   - the delay goes through deps.clock (virtual in tests)
- * Raises: never (advisory reads are guarded by the caller's closures)
- */
-export async function graceTransition(state: GraceState, deps: GraceLoopDeps): Promise<GraceState> {
-	if (state.kind !== "evaluate") return state;
-	const { attempt, graceAttempt } = state;
-	// 1. A valid collect outranks everything (the loop condition of the
-	// pre-extraction code checked the verdict first).
-	if (attempt.verdict.ok) return { kind: "collected", attempt, graceAttempt };
-	// 2. A pending question outranks the retry ladder — the orchestrator's
-	// next action is answering, not waiting for a report.
-	const question = deps.pendingQuestion();
-	if (question) return { kind: "awaiting-answer", question };
-	// 3. Advisory progress ping (v1.5, §18) — streamed, never decisive.
-	const ping = deps.readProgressPing();
-	if (ping) deps.onPing?.(ping);
-	// 4. Retryable report state (missing / mid-write JSON) → wait + recheck;
-	// a stable rejection (readable, schema-invalid) is final.
-	const missing = !(await deps.reportExists(attempt.usedPath));
-	const retryable = missing || (await deps.isParseFailure(attempt.usedPath));
-	if (!retryable) return { kind: "exhausted", attempt, graceAttempt };
-	const next = graceAttempt + 1;
-	if (next > deps.maxRechecks) return { kind: "exhausted", attempt, graceAttempt };
-	deps.onRecheck?.(next, missing, attempt.usedPath);
-	await deps.clock.delay(deps.delayMs, deps.signal);
-	if (deps.signal?.aborted) return { kind: "aborted", graceAttempt };
-	return { kind: "evaluate", attempt: deps.collect(), graceAttempt: next };
-}
-
-/**
- * Run the grace state machine to a terminal state (the extracted post-settle
- * grace loop — the settle→collect seam).
- * <p>
- * FUNCTION_CONTRACT:
- * Input: deps — the injected seam (collect, question/ping readers, fs
- *   probes, clock, signal, recheck budget)
- * Output: the terminal GraceState — never "evaluate"
- * Guarantees:
- *   - behavior-identical to the pre-extraction inline loop (the three
- *     execute drivers pin it end to end)
- *   - termination: each delay+recheck increments graceAttempt; the recheck
- *     budget caps the loop
- * Raises: never (reportExists/isParseFailure/pendingQuestion are tolerant)
- */
-export async function runGraceLoop(deps: GraceLoopDeps): Promise<Exclude<GraceState, { kind: "evaluate" }>> {
-	let state: GraceState = { kind: "evaluate", attempt: deps.collect(), graceAttempt: 0 };
-	while (state.kind === "evaluate") {
-		state = await graceTransition(state, deps);
+function resolveTierPlacement(
+	input: TierResolutionInput,
+	tierTable: Record<string, SpawnTier>,
+	spawnDefaults: { provider?: string; model?: string; thinking?: string; tier?: string },
+): { ok: true; provider: string; model: string; thinking: string } | { ok: false; failure: ToolResult } {
+	const requestedTier = input.tier ?? spawnDefaults.tier;
+	let tierEntry: SpawnTier | undefined;
+	if (requestedTier !== undefined) {
+		tierEntry = tierTable[requestedTier];
+		if (tierEntry === undefined) {
+			const available = Object.keys(tierTable).sort();
+			return {
+				ok: false,
+				failure: fail(
+					"E_TIER",
+					`E_TIER — unknown worker tier "${requestedTier}"` +
+						` (configured tiers: ${available.length > 0 ? available.join(", ") : "none"}). ` +
+						"Add it to ~/.pi/agent/pi-delegate.config.json under \"tiers\", drop the tier param, " +
+						"or pass provider/model/thinking explicitly.",
+					{ tier: requestedTier, availableTiers: available, name: input.name },
+				),
+			};
+		}
 	}
-	return state;
+	const pickTier = (
+		explicit: string | undefined,
+		fromTier: string | undefined,
+		fromDefaults: string | undefined,
+	): string | undefined => explicit ?? fromTier ?? fromDefaults;
+	const provider = pickTier(input.provider, tierEntry?.provider, spawnDefaults.provider);
+	const model = pickTier(input.model, tierEntry?.model, spawnDefaults.model);
+	const thinking = pickTier(input.thinking, tierEntry?.thinking, spawnDefaults.thinking);
+	const missingTierKeys = [
+		provider === undefined ? "provider" : undefined,
+		model === undefined ? "model" : undefined,
+		thinking === undefined ? "thinking" : undefined,
+	].filter((k): k is string => typeof k === "string");
+	if (missingTierKeys.length > 0) {
+		return {
+			ok: false,
+			failure: fail(
+				"E_TIER",
+				`E_TIER — no worker ${missingTierKeys.join("/")} configured (no built-in tier exists). ` +
+					"Set \"tiers\" / \"defaults\" in ~/.pi/agent/pi-delegate.config.json, e.g. " +
+					'{"tiers": {"flash": {"provider": "zai", "model": "glm-5.3-flash", "thinking": "high"}}, ' +
+					"\"defaults\": {\"tier\": \"flash\"}} — or pass provider/model/thinking explicitly.",
+				{ missing: missingTierKeys, name: input.name },
+			),
+		};
+	}
+	// The E_TIER guard above guarantees all three keys are defined (the same
+	// shape the execute closure's later `provider as string` sites relied on).
+	return { ok: true, provider: provider as string, model: model as string, thinking: thinking as string };
+}
+
+/** Explicit inputs of the report-schema resolution phase (no closure state). */
+interface SchemaResolutionInput {
+	name: string;
+	/** Resolved brief path (empty for probes). */
+	briefPath: string;
+	/** Session cwd — the project-local schema library root is resolved from it. */
+	cwd: string;
+	isProbe: boolean;
+}
+
+/**
+ * v1.5 report-schema resolution as a PURE function (verbatim decision logic
+ * from the execute closure; the one advisory side effect — the
+ * "schema resolver threw" progress line — comes back as degradedWarning for
+ * the caller to emit, keeping the function itself side-effect-free).
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: name (worker name, for the E_BRIEF payload); briefPath (resolved);
+ *   cwd; isProbe (probes have no brief → base schema only, no I/O)
+ * Output: {ok:true, briefSchema, schemaProvenance, resolvedSchema,
+ *   degradedWarning?} — the three closure variables' values, or
+ *   {ok:false, failure} — the E_BRIEF tool result to return verbatim
+ * Guarantees:
+ *   - a bad schema rejects the spawn with E_BRIEF BEFORE place() (never
+ *     wastes a worker)
+ *   - an unexpected resolver THROW degrades to base-schema-only validation
+ *     (ok:true + degradedWarning) — the {ok:false} path is the real
+ *     rejection; schema null = the brief has no reportSchema key (base-only
+ *     validation, never a rejection)
+ *   - pure except the resolver's own documented fs reads (resolveReportSchema)
+ * Raises: never (the resolver's throws are caught here, per the contract)
+ */
+function resolveBriefReportSchema(input: SchemaResolutionInput): {
+	ok: true;
+	briefSchema: Record<string, unknown> | null;
+	schemaProvenance: string[];
+	resolvedSchema: Record<string, unknown> | null;
+	degradedWarning?: string;
+} | { ok: false; failure: ToolResult } {
+	const { name, briefPath, cwd, isProbe } = input;
+	if (isProbe) return { ok: true, briefSchema: null, schemaProvenance: [], resolvedSchema: null };
+	let resolved: ReturnType<typeof resolveReportSchema>;
+	let degradedWarning: string | undefined;
+	try {
+		// EXTERNAL_DEPENDENCY: filesystem — <cwd>/.pi/delegate-schemas/
+		// (via pi's CONFIG_DIR_NAME — the literal ".pi" honoring pi's
+		// project-config convention) and ~/.pi/agent/pi-delegate-schemas/
+		// (library type files <name>.json).
+		// Two-tier schema library: project-local
+		// <cwd>/.pi/delegate-schemas/ searched FIRST, user-level second.
+		resolved = resolveReportSchema(briefPath, resolve(cwd, CONFIG_DIR_NAME, "delegate-schemas"));
+	} catch (err) {
+		// A throw is not a resolution failure per the contract ({ok:false} is) —
+		// degrade to base-schema-only validation instead of rejecting the spawn.
+		resolved = { ok: true, schema: null, provenance: [] };
+		degradedWarning = errText(err);
+	}
+	if (!resolved.ok) {
+		return {
+			ok: false,
+			failure: fail(
+				"E_BRIEF",
+				`E_BRIEF — report schema resolution failed for ${name}: ${resolved.error}\n` +
+					"Fix the brief's reportSchema reference or inline fragment before spawning.",
+				{ briefPath, name, resolutionError: resolved.error },
+			),
+		};
+	}
+	// Corrected contract (merge gate): schema is null when the brief has no
+	// reportSchema key — ok-with-null → base-only validation, never a rejection.
+	return {
+		ok: true,
+		briefSchema: resolved.schema,
+		schemaProvenance: resolved.provenance,
+		resolvedSchema: resolved.schema,
+		...(degradedWarning !== undefined ? { degradedWarning } : {}),
+	};
 }
 
 /**
@@ -1021,7 +581,7 @@ export async function runGraceLoop(deps: GraceLoopDeps): Promise<Exclude<GraceSt
  * Output: none (registers the tool as a side effect)
  * Guarantees:
  *   - execute() NEVER throws past the tool boundary: every failure shape
- *     returns a structured tool result with an E_* code (DESIGN.md §7)
+ *     returns a structured tool result with an E_* code (ARCHITECTURE.md Law 8)
  *   - blocking by design up to the settle gate (or explicit waitMs); Esc/abort
  *     detaches — after the agent exists the worker is NEVER killed
  *   - the report file is the completion criterion; probes are the exception
@@ -1048,14 +608,33 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			"mode 'probe' is the explicit smoke gate — run one probe before any ≥3 fan-out. " +
 			"Esc detaches without killing the worker. Report status 'fail' still means the worker ran and reported honestly.",
 		promptSnippet: "Spawn a worker with a brief file and block until its report lands",
+		prepareArguments(args): Static<typeof delegateParams> {
+			// Legacy-session shim (pi docs Argument preparation): old sessions may
+			// carry the deprecated timeoutMs alias. Fold it into waitMs ONLY when
+			// waitMs is not already present, applying the same WAIT_CAP_MS clamp
+			// execute() applies to the alias — the resulting call behaves exactly
+			// like the pre-refactor runtime for old calls. The public schema stays
+			// strict: everything without a string/number timeoutMs passes through
+			// untouched and is validated as-is.
+			if (!args || typeof args !== "object") return args as Static<typeof delegateParams>;
+			const input = args as Record<string, unknown>;
+			if (typeof input.waitMs === "number") return args as Static<typeof delegateParams>;
+			const legacy =
+				typeof input.timeoutMs === "number" ? input.timeoutMs
+				: typeof input.timeoutMs === "string" && input.timeoutMs.trim() !== "" && Number.isFinite(Number(input.timeoutMs))
+					? Number(input.timeoutMs)
+					: undefined;
+			if (legacy === undefined) return args as Static<typeof delegateParams>;
+			return { ...input, waitMs: Math.min(legacy, WAIT_CAP_MS) } as Static<typeof delegateParams>;
+		},
 		promptGuidelines: [
 			"Use delegate only after the brief file exists under ${exchangeRoot()}/<task>/ — pass its path as briefPath; the brief is the worker's instructions and its OUTPUT section must point at report-<name>.json.",
 			"delegate blocks until the worker settles; the worker's report file is the completion criterion, not the agent status — status fail in the report is still an honest completion.",
 			"If delegate returns E_REPORT_MISSING or E_REPORT_INVALID, do a diagnosed retry with root cause + fix shape (at most 2 repeats, then escalate); never repeat verbatim. " +
 			RETRY_MANDATE,
-			"mode 'probe' is OPTIONAL (enterprise cost): only for untrusted environments — the first real worker's structured failures (E_PLACE/E_START/E_NAME) are just as cheap a smoke signal. Probes verify the pane reply \"OUTPUT: OK\" by streaming readback.",
-			"Probe workers NEVER write a report file — a 'probe OK/FAIL' result is final by itself; never wait for or read a probe's report-<name>.json (only real workers produce reports).",
-			"After E_TIMEOUT or a detach, END YOUR TURN: the background watcher (DESIGN.md §21) wakes you when the report lands, a question arrives, grill_deck is invoked, context goes critical, or the worker dies. Never sleep in bash to wait for a worker and never re-call delegate to wait; delegate_status polling is the only in-turn alternative (bash sleep only when the watcher is absent — old extension build).",
+			"delegate mode 'probe' is OPTIONAL (enterprise cost): only for untrusted environments — the first real worker's structured failures (E_PLACE/E_START/E_NAME) are just as cheap a smoke signal. Probes verify the pane reply \"OUTPUT: OK\" by streaming readback.",
+			"delegate probe workers NEVER write a report file — a 'probe OK/FAIL' result is final by itself; never wait for or read a probe's report-<name>.json (only real workers produce reports).",
+			"After delegate returns E_TIMEOUT or a detach, END YOUR TURN: the background watcher wakes you when the report lands, a question arrives, grill_deck is invoked, context goes critical, or the worker dies. Never sleep in bash to wait for a worker and never re-call delegate to wait; delegate_status polling is the only in-turn alternative (bash sleep only when the watcher is absent — old extension build).",
 		],
 		parameters: delegateParams,
 		renderCall(args, theme: Theme) {
@@ -1095,8 +674,9 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			// Symptom of the old behavior: a legacy/stale timeoutMs (1800000) held the
 			// session hostage for 30 min with no heartbeat escape hatch. What was
 			// done: WAIT_CAP_MS clamps the deprecated timeoutMs; an explicit waitMs is
-			// uncapped opt-in long blocking.
-			const WAIT_CAP_MS = 120_000;
+			// uncapped opt-in long blocking. (prepareArguments also folds the legacy
+			// alias into waitMs for resumed old sessions — the clamp here is the
+			// backstop for raw timeoutMs that still reaches execute.)
 			const settleGateMs = resolveWatchConfig().settleGateMs;
 			const timeoutMs =
 				params.waitMs ??
@@ -1114,51 +694,22 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			// EXTERNAL_DEPENDENCY: ~/.pi/agent/pi-delegate.config.json — "tiers" and
 			// "defaults" sections (via resolveSpawnDefaults/resolveTierTable in
 			// usage.ts); missing/unconfigured → E_TIER, never a guessed provider.
-			// v1.9.2 tier resolution — explicit params > tiers[<tier>] > defaults,
-			// per key. There is NO built-in worker tier: an unconfigured environment
-			// fails fast with E_TIER here (before touching herdr) instead of
-			// silently spawning a provider the operator never chose.
-			const spawnDefaults = resolveSpawnDefaults();
-			const tierTable = resolveTierTable();
-			const requestedTier = params.tier ?? spawnDefaults.tier;
-			let tierEntry: SpawnTier | undefined;
-			if (requestedTier !== undefined) {
-				tierEntry = tierTable[requestedTier];
-				if (tierEntry === undefined) {
-					const available = Object.keys(tierTable).sort();
-					return fail(
-						"E_TIER",
-						`E_TIER — unknown worker tier "${requestedTier}"` +
-							` (configured tiers: ${available.length > 0 ? available.join(", ") : "none"}). ` +
-							"Add it to ~/.pi/agent/pi-delegate.config.json under \"tiers\", drop the tier param, " +
-							"or pass provider/model/thinking explicitly.",
-						{ tier: requestedTier, availableTiers: available, name: params.name },
-					);
-				}
-			}
-			const pickTier = (
-				explicit: string | undefined,
-				fromTier: string | undefined,
-				fromDefaults: string | undefined,
-			): string | undefined => explicit ?? fromTier ?? fromDefaults;
-			const provider = pickTier(params.provider, tierEntry?.provider, spawnDefaults.provider);
-			const model = pickTier(params.model, tierEntry?.model, spawnDefaults.model);
-			const thinking = pickTier(params.thinking, tierEntry?.thinking, spawnDefaults.thinking);
-			const missingTierKeys = [
-				provider === undefined ? "provider" : undefined,
-				model === undefined ? "model" : undefined,
-				thinking === undefined ? "thinking" : undefined,
-			].filter((k): k is string => typeof k === "string");
-			if (missingTierKeys.length > 0) {
-				return fail(
-					"E_TIER",
-					`E_TIER — no worker ${missingTierKeys.join("/")} configured (no built-in tier exists). ` +
-						"Set \"tiers\" / \"defaults\" in ~/.pi/agent/pi-delegate.config.json, e.g. " +
-						'{"tiers": {"flash": {"provider": "zai", "model": "glm-5.3-flash", "thinking": "high"}}, ' +
-						"\"defaults\": {\"tier\": \"flash\"}} — or pass provider/model/thinking explicitly.",
-					{ missing: missingTierKeys, name: params.name },
-				);
-			}
+			// Wave 3 (step 4.5): the phase is a pure function over explicit args
+			// (resolveTierPlacement) — the decision logic, E_TIER texts and details
+			// payloads are verbatim; only the boundary is a discriminated result.
+			const tierResolution = resolveTierPlacement(
+				{
+					name: params.name,
+					tier: params.tier,
+					provider: params.provider,
+					model: params.model,
+					thinking: params.thinking,
+				},
+				resolveTierTable(),
+				resolveSpawnDefaults(),
+			);
+			if (!tierResolution.ok) return tierResolution.failure;
+			const { provider, model, thinking } = tierResolution;
 			const mode = params.mode ?? "worktree";
 			// Probe is not a placement mode: it uses the cheapest real placement (tab).
 			const placementMode: PlacementMode = mode === "probe" ? "tab" : mode;
@@ -1191,7 +742,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			}
 			const manifestDir = exchangeDir ?? probeExchangeDir();
 
-			// Dual-gauge governor (DESIGN.md §20): refuse to re-spawn a worker whose
+			// Dual-gauge governor: refuse to re-spawn a worker whose
 			// recorded session tripped EITHER gauge — context % (primary, pi's own
 			// formula) or output budget (secondary, when set).
 			const maxPct = params.maxContextPct ?? CONTEXT_WARN_PCT;
@@ -1220,48 +771,27 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				}
 			}
 
-			// v1.5 (DESIGN.md §16–§17): resolve the brief's report schema — inline
+			// v1.5: resolve the brief's report schema — inline
 			// fragment or named library type — once, BEFORE place(): a bad schema must
 			// never waste a worker. On {ok:false} the spawn is rejected with E_BRIEF.
-			// The resolved provenance chain is recorded in the manifest (§17) and
-			// quoted in terminal results when the fragment rejects a report.
-			// Unexpected throws (contract bugs) degrade to base-schema-only validation
-			// rather than blocking the run — the {ok:false} path is the real rejection.
-			let briefSchema: Record<string, unknown> | null = null;
-			let schemaProvenance: string[] = [];
-			// Merged fragment (§17) — recorded in the manifest as reportSchemaFragment
-			// during the post-start reconcile, and quoted in fragment-rejection errors.
-			let resolvedSchema: Record<string, unknown> | null = null;
-			if (!isProbe) {
-				let resolved: ReturnType<typeof resolveReportSchema>;
-				try {
-					// EXTERNAL_DEPENDENCY: filesystem — <cwd>/.pi/delegate-schemas/ and
-					// ~/.pi/agent/pi-delegate-schemas/ (library type files <name>.json).
-					// Two-tier schema library (DESIGN.md §16): project-local
-					// <cwd>/.pi/delegate-schemas/ searched FIRST, user-level second.
-					resolved = resolveReportSchema(briefPath, resolve(ctx.cwd, ".pi", "delegate-schemas"));
-				} catch (err) {
-					// A throw is not a resolution failure per the contract ({ok:false} is) —
-					// degrade to base-schema-only validation instead of rejecting the spawn.
-					resolved = { ok: true, schema: null, provenance: [] };
-					step(
-						`warning: schema resolver threw unexpectedly (${errText(err)}) — falling back to base-schema-only validation`,
-						{ phase: "schema-degraded", error: errText(err) },
-					);
-				}
-				if (!resolved.ok) {
-					return fail(
-						"E_BRIEF",
-						`E_BRIEF — report schema resolution failed for ${params.name}: ${resolved.error}\n` +
-							"Fix the brief's reportSchema reference or inline fragment before spawning.",
-						{ briefPath, name: params.name, resolutionError: resolved.error },
-					);
-				}
-				// Corrected contract (merge gate): schema is null when the brief has no
-				// reportSchema key — ok-with-null → base-only validation, never a rejection.
-				briefSchema = resolved.schema;
-				schemaProvenance = resolved.provenance;
-				resolvedSchema = resolved.schema;
+			// Wave 3 (step 4.5): the phase is a pure function over explicit args
+			// (resolveBriefReportSchema) — the decision logic, the degrade-to-base
+			// contract and the E_BRIEF text are verbatim; the one advisory side
+			// effect (the degraded-resolution progress line) comes back as
+			// degradedWarning and is emitted here, in the original order.
+			const schemaResolution = resolveBriefReportSchema({
+				name: params.name,
+				briefPath,
+				cwd: ctx.cwd,
+				isProbe,
+			});
+			if (!schemaResolution.ok) return schemaResolution.failure;
+			const { briefSchema, schemaProvenance, resolvedSchema } = schemaResolution;
+			if (schemaResolution.degradedWarning !== undefined) {
+				step(
+					`warning: schema resolver threw unexpectedly (${schemaResolution.degradedWarning}) — falling back to base-schema-only validation`,
+					{ phase: "schema-degraded", error: schemaResolution.degradedWarning },
+				);
 			}
 
 			// 2. Place (worktree create / tab create — transport serializes mutations).
@@ -1293,6 +823,21 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 					{ name: params.name, mode, stderr: errText(err) },
 				);
 			}
+
+			// placementRef-only end state (Law 4, Wave 4): the ref is the primary
+			// handle; the legacy paneId stays as the documented fallback for legacy
+			// placement records (pre-ref cohorts). Only a placement with NEITHER
+			// handle is an adapter contract violation — refuse with E_PLACE instead
+			// of threading `undefined` into startAgent/embodiment keys.
+			const placementHandle = placement.placementRef ?? placement.paneId;
+			if (!placementHandle) {
+				return fail(
+					"E_PLACE",
+					`E_PLACE — ${mode} placement for ${params.name} returned neither a placementRef nor a legacy paneId (adapter contract violation).`,
+					{ name: params.name, mode },
+				);
+			}
+			const placementRef: string = placementHandle;
 
 			//    BUG_FIX_CONTEXT: symptom — a failed start left an orphaned pane/
 			//    worktree invisible to teardown because the manifest entry was only
@@ -1337,7 +882,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			// manifest-update try, so every result path can carry it).
 			let ownerWarning = "";
 			try {
-				// v1.5 (DESIGN.md §17): record the resolved-schema provenance as a plain
+				// v1.5: record the resolved-schema provenance as a plain
 				// JSON manifest key — ManifestWorker now declares the field (quality fix
 				// A7), so the entry type-checks without a cast.
 				// The E_TIER guard above guarantees provider/model/thinking are defined
@@ -1351,11 +896,11 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				// are distinguishable by construction.
 				const embodiment = nextEmbodiment(
 					params.name,
-					placement.placementRef ?? placement.paneId,
+					placementRef,
 					manifestStore.read(manifestDir)?.workers ?? [],
 				);
 				const orchestratorSessionPath = liveSessionFile(ctx);
-				// Watcher stage A (guideline §3.3): a spawn that could NOT read its
+				// Watcher stage A: a spawn that could NOT read its
 				// session id must not go out silently — the delivery default is now
 				// fail-closed, so this worker's orchestrator would never be woken.
 				// Full fail-spawn is a separate decision (not this PR); per §3.3's
@@ -1377,7 +922,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 						"could not read this session's id — the worker is registered WITHOUT an owner session path; " +
 						"the watcher will NOT wake this session for its events (fail-closed default). " +
 						"watch.legacyFailOpen:true would restore legacy delivery but is unsafe on a multi-session machine.";
-					watchAudit(
+					appendWatcherAudit(
 						`spawn worker=${params.name} — no owner session id recorded (sessionManager unavailable); ` +
 							"the watcher will not deliver wake-ups for this worker (fail-closed default)",
 					);
@@ -1427,10 +972,10 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			}
 
 			// 4. Start the agent; read back the canonical name.
-			step(`Starting agent in placement ${placement.placementRef ?? placement.paneId} (provider=${provider}, model=${model}, thinking=${thinking})…`, {
+			step(`Starting agent in placement ${placementRef} (provider=${provider}, model=${model}, thinking=${thinking})…`, {
 				phase: "start",
 				name: params.name,
-				placementRef: placement.placementRef ?? placement.paneId,
+				placementRef,
 			});
 			let start;
 			try {
@@ -1438,7 +983,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 					name: params.name,
 					// Workerhost inversion (design §3): StartReq keyed by the opaque ref;
 					// legacy pane id as fallback so pre-ref placement records still start.
-					placementRef: placement.placementRef ?? placement.paneId,
+					placementRef,
 					provider: provider as string,
 					model: model as string,
 					thinking: thinking as string,
@@ -1456,6 +1001,12 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				// placement ref (legacy pane id fallback) and only if it never gained a
 				// sessionPath — a pre-existing same-name
 				// worker (its own placement / a real sessionPath) is preserved.
+				// Wave 4 item 6 (reliability finding 7): a failed BEST-EFFORT rollback
+				// is not silence — the failure reason is logged INTO the start-failure
+				// text (the placement may stay manifest-tracked; the orchestrator must
+				// know the cleanup pointer is now load-bearing).
+				let rollbackNote = "";
+				let rollbackFailedReason: string | null = null;
 				try {
 					await manifestStore.update(manifestDir, (m) => ({
 						...m,
@@ -1469,9 +1020,9 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 								),
 						),
 					}));
-				} catch {
-					// Best-effort rollback — the failure text below already points at
-					// manual reconciliation via /delegate-teardown.
+				} catch (rollbackErr) {
+					rollbackFailedReason = errText(rollbackErr);
+					rollbackNote = ` Manifest rollback FAILED (${rollbackFailedReason}) — the start-failed entry may stay tracked; run /delegate-teardown to clean it up.`;
 				}
 				const code = typedCode(err, "E_START");
 				return fail(
@@ -1480,12 +1031,13 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 						"Check pane readiness; a retry is a new delegate call. " +
 						(manifestWarning
 							? `Placement NOT tracked in manifest (${manifestWarning}) — clean it up manually via /delegate-teardown or the host workspace listing.`
-							: "Placement tracked in manifest — run /delegate-teardown to clean up."),
-					{ name: params.name, placement, stderr: errText(err) },
+							: "Placement tracked in manifest — run /delegate-teardown to clean up.") +
+						rollbackNote,
+					{ name: params.name, placement, stderr: errText(err), ...(rollbackFailedReason ? { rollbackFailed: rollbackFailedReason } : {}) },
 				);
 			}
 			const canonical = start.name;
-			// Budget accounting source (DESIGN.md §14): the worker's session JSONL
+			// Budget accounting source: the worker's session JSONL
 			// path, captured by the transport from the herdr agent start result
 			// (result.agent.agent_session.value) and recorded in the manifest below.
 			// v1.9: mutable — when herdr exposes no session path (current builds:
@@ -1501,7 +1053,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			// live and the canonical name is known.
 			journal(pi, "spawn", canonical, "started");
 
-			// Tier-mismatch guard (DESIGN.md §19.4): when the brief text declares a
+			// Tier-mismatch guard: when the brief text declares a
 			// tier ("frontier tier"/"flash tier"/"execution tier") and the spawned
 			// model contradicts it, surface a warning on every terminal result.
 			let tierWarning = "";
@@ -1524,7 +1076,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			// report collection use the canonical name + report path. Also records the
 			// session JSONL path (when the transport exposed one) and the resolved
 			// effective budget — the manifest entry is the budget governor's accounting
-			// source (DESIGN.md §14).
+			// source.
 			{
 				const canonicalReportPath = reportPathFor(manifestDir, canonical);
 				try {
@@ -1540,7 +1092,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 									...(sessionPath ? { sessionPath } : {}),
 									budgetTokens: params.budgetTokens,
 									maxContextPct: maxPct,
-									// v1.5 (DESIGN.md §17): record the MERGED FRAGMENT (not just the
+									// v1.5: record the MERGED FRAGMENT (not just the
 									// name chain) so collect failures can quote what the report was
 									// held to. ManifestWorker declares the field (quality fix A7).
 									...(resolvedSchema ? { reportSchemaFragment: resolvedSchema } : {}),
@@ -1576,7 +1128,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			// Raises: never
 			// EXTERNAL_DEPENDENCY: filesystem — the worker's pi session JSONL (via
 			//   parseSessionUsage) for tokens/turns.
-			// Terminal-result gauge accounting (DESIGN.md §20): the DUAL gauge line is
+			// Terminal-result gauge accounting: the DUAL gauge line is
 			// appended to every terminal result text — ctx% primary (pi's formula),
 			// output-budget secondary (when set), turns tripwire — with escalation
 			// warnings at the 80/90 context lines and over-output-budget notice.
@@ -1639,7 +1191,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			//   - fires only when zero workers are working/blocked; any failure
 			//     (herdr unreachable) is swallowed — advisory only
 			// Raises: never
-			// Last-live-worker nudge (DESIGN.md §19.4): when no worker is live
+			// Last-live-worker nudge: when no worker is live
 			// (working/blocked) anymore after this collect, fire notifyFleetIdle with
 			// the task manifest's worker count. Advisory — never affects outcomes.
 			const maybeNotifyFleetIdle = async (): Promise<void> => {
@@ -1675,7 +1227,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			// Raises: never (all sub-steps are guarded)
 			// Success result builder — shared by the normal path, the fallback-path
 			// collect (fix: requested-name report) and the detached-after-settle path.
-			// v1.12.1 lifecycle hygiene (DESIGN.md §22): after a VALID strict collect
+			// v1.12.1 lifecycle hygiene: after a VALID strict collect
 			// (report delivered, collectedAt stamped) the worker is torn down
 			// automatically — the pane/worktree has served its purpose. USER DECISIONS
 			// locked: default ON (collect.teardownAfterCollect), grace 0, only on VALID
@@ -1696,7 +1248,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				}
 				await logTeardownAudit(
 					manifestDir,
-					`plan: teardown worker=${canonical} kind=${placement.kind} workspace=${placement.workspaceId} pane=${placement.paneId} (auto-after-collect)`,
+					`plan: teardown worker=${canonical} kind=${placement.kind} workspace=${placement.workspaceId ?? "-"} pane=${placement.paneId ?? "-"} (auto-after-collect)`,
 				);
 				try {
 					// Migration stage 1 (extensibility-defect 1): the close result says
@@ -1731,23 +1283,27 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 					placement.kind === "worktree"
 						? `worktree, branch ${placement.branch ?? branch}`
 						: "tab (shared checkout)";
-				const verdictLine =
-					report.status === "pass"
-						? `Report OK: status=pass — ${report.summary}`
-						: `Report OK: status=fail (honest failure — the worker ran and reported) — ${report.summary}`;
 				const b = gaugeSummary();
-				// Archive on successful collect — pass OR fail verdict (DESIGN.md §19.3).
+				// Archive on successful collect — pass OR fail verdict.
 				// Best-effort by contract: null/throw → warning line, never an error.
+				// Wave 4 item 6 (reliability finding 7): the failure REASON is
+				// surfaced in the note ("archive unavailable: <why>") instead of a
+				// bare "(archive unavailable)".
 				let archivePath: string | null = null;
+				let archiveError: string | null = null;
 				try {
 					const manifest = manifestStore.read(manifestDir);
 					if (manifest) {
-						archivePath = archiveReport(manifestDir, usedReportPath, manifest as unknown as Record<string, unknown>);
+						const archived = archiveReport(manifestDir, usedReportPath, manifest as unknown as Record<string, unknown>);
+						archivePath = archived.dest;
+						archiveError = archived.error ?? null;
 					}
-				} catch {
-					archivePath = null;
+				} catch (err) {
+					archiveError = errText(err);
 				}
-				const archiveNote = archivePath ? `\nArchived: ${archivePath}` : "\n(archive unavailable)";
+				const archiveNote = archivePath
+					? `\nArchived: ${archivePath}`
+					: `\n(archive unavailable${archiveError ? `: ${archiveError}` : ""})`;
 				// BUG_FIX_CONTEXT: symptom — every fresh orchestrator session re-waked
 				// on an already-collected report. Why the old state did not work: the
 				// watcher's `seen` dedup is session-scoped memory only. What was done:
@@ -1798,17 +1354,31 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				}
 				const collectedStampNote = collectedNote ? `\nWarning: ${collectedNote}` : "";
 				journal(pi, "collect", canonical, report.status, archivePath ?? undefined);
-				// Last live worker settled → teardown nudge (DESIGN.md §19.4).
+				// Last live worker settled → teardown nudge.
 				void maybeNotifyFleetIdle();
 				// v1.12.1: the collect is DONE here (report valid, collectedAt
 				// stamped) — the auto-teardown below can only append an advisory
 				// note, never change this result's verdict.
 				const teardownNote = await teardownAfterCollect();
 				const teardownNoteLine = teardownNote ? `\n${teardownNote}` : "";
+				// Law 1 truncation duty (Wave 4 item 2): report.summary and the
+				// artifacts list are worker-written — the DISPLAY text is head-truncated
+				// to pi's default limits; the full report stays on disk (usedReportPath),
+				// in details.report, and in the archived copy. The notice tells the LLM
+				// what was cut and where the full copy lives.
+				const fullCopyNote = `Full report: ${usedReportPath}${archivePath ? ` (archived: ${archivePath})` : ""}.`;
+				const summaryCap = capWorkerText(report.summary, fullCopyNote);
+				const artifactsList = report.artifacts.length > 0 ? report.artifacts.join(", ") : "";
+				const artifactsCap = capWorkerText(artifactsList, fullCopyNote);
+				const reportDisplayTruncated = summaryCap.truncated || artifactsCap.truncated;
+				const verdictLine =
+					report.status === "pass"
+						? `Report OK: status=pass — ${summaryCap.text}`
+						: `Report OK: status=fail (honest failure — the worker ran and reported) — ${summaryCap.text}`;
 				return textResult(
 					`${extraNote}Worker ${canonical} finished in ${elapsedMs} ms (${placementDesc}).\n` +
 						`${verdictLine}\n` +
-						`Artifacts: ${report.artifacts.length > 0 ? report.artifacts.join(", ") : "(none)"}` +
+						`Artifacts: ${artifactsList ? artifactsCap.text : "(none)"}` +
 						archiveNote +
 						collectedStampNote +
 						teardownNoteLine +
@@ -1828,7 +1398,10 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 						report,
 						elapsedMs,
 						startedAt: startedAtDate.toISOString(),
-						...(archivePath ? { archivePath } : { archiveWarning: "archive unavailable" }),
+						...(archivePath
+						? { archivePath }
+						: { archiveWarning: archiveError ? `archive unavailable: ${archiveError}` : "archive unavailable" }),
+						...(reportDisplayTruncated ? { reportDisplayTruncated: true } : {}),
 						...(collectedNote ? { collectedAtWarning: collectedNote } : {}),
 						...(teardownNote ? { teardownAfterCollect: teardownNote } : {}),
 						...(tierWarning ? { tierWarning } : {}),
@@ -1843,7 +1416,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			// FUNCTION_CONTRACT:
 			// Input: none (closure: reportPath, canonical name, requested name, briefSchema)
 			// Output: {verdict, usedPath, fallbackUsed} — verdict from
-			//   validateReportAgainstSchema (base ∩ brief fragment, DESIGN.md §11)
+			//   validateReportAgainstSchema (base ∩ brief fragment)
 			// Guarantees:
 			//   - canonical-name report first; when names differ and the canonical
 			//     path does not validate, the requested-name path is tried as fallback
@@ -1857,7 +1430,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				usedPath: string;
 				fallbackUsed: boolean;
 			} => {
-				// v1.2: base ∩ brief-fragment validation (DESIGN.md §11) — the declared
+				// v1.2: base ∩ brief-fragment validation — the declared
 				// schema applies on the first pass and on every grace recheck alike.
 				const verdict = validateReportAgainstSchema(reportPath, canonical, briefSchema);
 				if (verdict.ok || canonical === params.name) {
@@ -1939,7 +1512,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 					{ canonical, placement, stderr: errText(err) },
 				);
 			}
-			// v1.9 (DESIGN.md §19.1c): current herdr builds do not expose the
+			// v1.9: current herdr builds do not expose the
 			// worker's session path (agent get/start carry no agent_session) —
 			// resolve it from pi's session storage so the aged-finish proof, the
 			// dual gauges and probe salvage keep working. Best-effort: no candidate
@@ -2169,7 +1742,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 
 			// --- Probe flow: no report validation; pane status is the verdict.
 			if (isProbe) {
-				// Honest-settle v1.6 (DESIGN.md §19.1, R6 blocker fix): a never-started
+				// Honest-settle v1.6 (R6 blocker fix): a never-started
 				// probe is probe FAIL — never let the pane status produce a spurious
 				// 'probe OK' (the original spurious-pass bug half-survived here).
 				if (settle.kind === "never-started") {
@@ -2377,7 +1950,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			}
 
 			const missing = !(await reportExists(collected.usedPath));
-			// Honest-settle v1.6 (DESIGN.md §19.1): never-started → the prompt was
+			// Honest-settle v1.6: never-started → the prompt was
 			// never consumed and the worker never started — a distinct terminal code
 			// instead of E_REPORT_MISSING. Migration stage 3 (audit step 8): the
 			// outcome is the union KIND from the seam (the flag set is gone).
@@ -2392,7 +1965,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				: missing
 					? `no report file at ${collected.usedPath} after settle (status: ${settle.status})`
 					: `report at ${collected.usedPath} failed schema validation: ${collected.verdict.error}`;
-			// v1.2 (DESIGN.md §11): distinguish a brief-reportSchema violation — base
+			// v1.2: distinguish a brief-reportSchema violation — base
 			// schema passes but the declared fragment rejects. The fragment error is
 			// already quoted verbatim in `what`; add dedicated guidance.
 			let schemaNote = "";
@@ -2402,7 +1975,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 					schemaNote =
 						"\nThis is a brief-reportSchema violation: the report violates the brief's reportSchema — " +
 						"either the worker or the schema fragment is wrong; compare evidence, then fix the brief or re-brief.";
-					// v1.5 (DESIGN.md §17): the audit trail answers "what schema was this
+					// v1.5: the audit trail answers "what schema was this
 					// report held to" — quote the merged fragment (truncated) + provenance.
 					if (resolvedSchema) {
 						const fragmentJson = JSON.stringify(resolvedSchema);
@@ -2416,7 +1989,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			}
 			const b = gaugeSummary();
 			// A settle (even a failed one) that empties the fleet still fires the
-			// teardown nudge (DESIGN.md §19.4).
+			// teardown nudge.
 			void maybeNotifyFleetIdle();
 			return fail(
 				code,

@@ -1,5 +1,5 @@
 /**
- * T-watch — event-driven background watcher checks (DESIGN.md §21).
+ * T-watch — event-driven background watcher checks.
  *
  * Run with: bun test/watcher-check.ts   (from the extension dir)
  *
@@ -22,7 +22,7 @@
  *       W7  worker-dead + every suppression (live, herdr unreachable, report on
  *           disk, placement grace, probe run); since watcher stage C the branch
  *           is ALSO the explicit missing-report state for a SETTLED worker
- *           (done/idle, still live) — guideline §6.2.1.
+ *           (done/idle, still live).
  *   W8  Dedup: fires once per worker+kind+fingerprint; a condition that stops
  *       being true resets its key; a rewritten report / re-asked question is a
  *       NEW fact and re-fires; a worker that leaves the manifests is forgotten.
@@ -53,16 +53,38 @@
  *       the watcher alive for a worktree worker-orchestrator (leafWorker
  *       exemption); the worker-orchestrator mount decision is behaviorally
  *       tested in test/composer-check.ts (the old index.ts static pin is
- *       gone).
+ *       gone). W21.1/W21.2 (TZ 1.17.0 §3.4): the gate's own ownership
+ *       compare goes through sameSessionPath — a win32 casing drift keeps a
+ *       worker-orchestrator's watcher alive (criterion 7), a posix case
+ *       difference still mutes (criterion 8).
+ *   W22 fleet-in-flight (1.17.0): a SETTLED worker-orchestrator with no
+ *       report is NOT worker-dead while its own fleet still has live
+ *       members — ONE fleet-in-flight per live-set shape (fingerprint =
+ *       launch stamp + sorted live child names, so a draining fleet
+ *       re-arms); all children non-live → worker-dead fires again (the
+ *       stuck-TL rule); no children → the pre-existing worker-dead wording;
+ *       a win32 casing drift on the child's orchestratorSessionPath still
+ *       matches through sameSessionPath.
+ *   W23 auto fix-nudge (fix-report-heal, 2026-09-12): a schema-violating
+ *       report is self-healed, not re-spawned — a LIVE worker gets an
+ *       automatic mailbox steer (a-<name>.json with the validator error +
+ *       the IN PLACE fix mandate) and the event message gains the
+ *       auto-nudge suffix; dedup holds (one nudge per report mtime); a
+ *       rewritten report → report-ready, no second nudge; a NOT-live worker
+ *       gets guidance only (no a-file, no suffix); a failed pane nudge lands
+ *       in the EXISTING nudge-failed marker machinery (real marker file →
+ *       nudge-failed event on a later tick); the report-invalid guidance is
+ *       cheapest-first (steer before re-spawn) in both live and non-live
+ *       shapes.
  * Exit 0 only if all checks pass.
  *
- *   W18 Result-plane states (watcher stage C, guideline §6.2): the
+ *   W18 Result-plane states (watcher stage C): the
  *       missing-report wake is delivered and durably committed; the branch is
  *       not gated on collectedAt; a corrupt q-file is audited with its cause
  *       (zero wake-ups, zero records) and never masked as report-ready.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
@@ -82,6 +104,7 @@ import {
 	formatEventBatch,
 	isWorkerSession,
 	makeSender,
+	markDeliveredBeforeThrow,
 	ownsChildManifests,
 	resolveWatchConfig,
 	startWatcher,
@@ -105,7 +128,8 @@ import {
 	type ManifestWorker,
 } from "../src/exchange.ts";
 import { countSessionToolCall, sessionToolCallNames } from "../src/usage.ts";
-import type { AgentStatus, Transport } from "../src/host.ts";
+import { answerPathFor, nudgeFailedPathFor } from "../src/mailbox-store.ts";
+import type { AgentStatus, PromptReq, Transport } from "../src/host.ts";
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = "") {
@@ -150,10 +174,9 @@ check(
 	/promptGuidelines[\s\S]*END YOUR TURN[\s\S]*\]/.test(delegateSrc),
 );
 const observeSrcFull = readFileSync(resolve(ROOT, "src/observe.ts"), "utf8");
-const statusSrc = observeSrcFull.slice(
-	observeSrcFull.indexOf("SECTION 1/3"),
-	observeSrcFull.indexOf("SECTION 2/3"),
-);
+// Wave 3 decomposition: the `delegate_status` tool lives in src/status-tool.ts
+// now — the pin reads the module that owns the code.
+const statusSrc = readFileSync(resolve(ROOT, "src/status-tool.ts"), "utf8") || observeSrcFull;
 check(
 	"W1.6 delegate_status guideline: no polling loop, the watcher wakes you",
 	/promptGuidelines[\s\S]*do NOT poll it in a loop[\s\S]*\]/.test(statusSrc),
@@ -419,7 +442,7 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 	);
 	writeFileSync(questionPathFor(dir, "w-question"), "{not json");
 	check("W4.3 corrupt q-file → no question event, never a throw", !kindsOf(eventsFor(w)).includes("mailbox-question"));
-	// Watcher stage C (guideline §6.2.5): the corrupt q-file is a result-plane
+	// Watcher stage C: the corrupt q-file is a result-plane
 	// fact — audited with the cause, never masked as a report event.
 	{
 		const skips: Array<{ worker: string; reason: string; detail?: string }> = [];
@@ -514,7 +537,7 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 		dead?.message ?? "",
 	);
 	check("W7.2 live worker → no worker-dead", !kindsOf(eventsFor(w, { statuses: [LIVE("w-dead")] })).includes("worker-dead"));
-	// Watcher stage C (guideline §6.2.1): a SETTLED worker (done/idle, still
+	// Watcher stage C: a SETTLED worker (done/idle, still
 	// known to herdr) without a report is the explicit missing-report state —
 	// the same worker-dead branch, not silence.
 	const settled = eventsFor(w, { statuses: [{ name: "w-dead", status: "idle" }] }).find((e) => e.kind === "worker-dead");
@@ -556,7 +579,7 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 }
 
 // ---------------------------------------------------------------------------
-// W18. Result-plane states (watcher stage C, guideline §6.2): a missing
+// W18. Result-plane states (watcher stage C): a missing
 // report, an invalid report and a corrupt q-file are VALID worker outcomes
 // from the sensor's point of view — explicit, observable, and distinct from
 // a router/delivery failure. The missing-report state lives in the
@@ -600,8 +623,8 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 		h.stop();
 	}
 
-	// (2) The missing-report branch is NOT gated on collectedAt (guideline
-	// §6.2.1): the branch is about an ABSENT report; the collect stamp
+	// (2) The missing-report branch is NOT gated on collectedAt: the branch is
+	// about an ABSENT report; the collect stamp
 	// silences only the report branches.
 	{
 		const dir = taskDir("stagec-collected-missing");
@@ -1132,8 +1155,8 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 	// the skip is auditable via the onSkip hook. The explicit
 	// watch.legacyFailOpen:true rollback restores the old delivery — which is
 	// unsafe on a machine with several sessions. A degraded self-id is a
-	// DIFFERENT edge: it delivers NOTHING with or without the flag (guideline
-	// §3.6 — no configuration escape).
+	// DIFFERENT edge: it delivers NOTHING with or without the flag (no
+	// configuration escape — ARCHITECTURE Law 8).
 	const wLegacy = mkWorker(odir, "w-legacy");
 	writeValidReport(odir, "w-legacy");
 	{
@@ -1158,7 +1181,7 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 		);
 	}
 	check(
-		"W14.13 degraded self (no sessionFile) delivers NOTHING — fail-closed with AND without the flag (guideline §3.6)",
+		"W14.13 degraded self (no sessionFile) delivers NOTHING — fail-closed with AND without the flag (ARCHITECTURE Law 8)",
 		eventsFor(wReport, { statuses: [LIVE("w-own-report")], selfSessionFile: undefined }).length === 0 &&
 			eventsFor(wReport, { statuses: [LIVE("w-own-report")], selfSessionFile: undefined, legacyFailOpen: true }).length === 0,
 	);
@@ -1260,7 +1283,7 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 		})(),
 	);
 	check(
-		"W14.22 degraded self (no sessionFile) + foreign masterSessionPath → delivers NOTHING, flag or not (§3.6: no configuration escape)",
+		"W14.22 degraded self (no sessionFile) + foreign masterSessionPath → delivers NOTHING, flag or not (no configuration escape — ARCHITECTURE Law 8)",
 		detectWorkerEvents(masterSnap(wMasterForeign, ORCH_A).workers[0]!, { nowMs: NOW }).length === 0 &&
 			detectWorkerEvents(masterSnap(wMasterForeign, ORCH_A).workers[0]!, { nowMs: NOW, legacyFailOpen: true }).length === 0,
 	);
@@ -1489,7 +1512,9 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 
 	// startWatcher threads the config threshold into detection (static pin, same
 	// convention as W14.17 — startWatcher needs a live pi to runtime-test).
-	const watchSrcStale = readFileSync(resolve(ROOT, "src/observe.ts"), "utf8");
+	// Wave 3 decomposition: startWatcher lives in src/watcher.ts now — the pin
+	// follows the code.
+	const watchSrcStale = readFileSync(resolve(ROOT, "src/watcher.ts"), "utf8");
 	check(
 		"W15.15 startWatcher threads watch.staleAfterMs (§23 retireTtlMs and the stage-A legacyFailOpen) into detect opts",
 		/staleAfterMs: cfg\.staleAfterMs/.test(watchSrcStale) &&
@@ -1617,7 +1642,81 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 		handle.stop();
 	}
 
-	// (г) Migration stage 3 (audit step 10): the old index.ts STATIC pins
+	// (в2) TZ 1.17.0 §3.4 regression (W21, worker win-session-r2): the leaf-worker gate's
+	// OWN ownership compare (watcher.ts selfOwnsChildren) must go through
+	// sameSessionPath too — a win32 casing drift between the owner writer and
+	// the live self id must NOT mute a worker-orchestrator's own children
+	// (acceptance criterion 7), while a posix case difference still does
+	// (criterion 8). The posix-drift scenario runs FIRST, with the durable
+	// store off, so it cannot be suppressed for the wrong reason by the
+	// win32 run's committed records.
+	{
+		const driftDir = taskDir("f6-win-drift");
+		const driftChild = mkWorker(driftDir, "dev-impl");
+		driftChild.sessionPath = "/tmp/sessions/dev-drift.jsonl";
+		driftChild.orchestratorSessionPath = "C:\\SESSIONS\\LEAD.JSONL"; // same file as driftSelf on win32
+		writeValidReport(driftDir, "dev-impl");
+		const driftSelf = "c:\\sessions\\lead.jsonl";
+		const driftSnap = snapshotFor([driftChild], [LIVE("dev-impl")], { sessionFile: driftSelf, cwd: LEAD_CWD });
+		// The lead's own entry is marked self by workersFromManifests only when
+		// the platform policy already matches; the unit under test here is the
+		// WATCHER gate, so self:true is pinned directly (isSelf itself is
+		// covered by W4/ownership-check on the sameSessionPath level).
+		const driftLeadEntry: WatchWorker = {
+			name: "lead-impl",
+			dir: taskDir("f6-win-drift-lead"),
+			reportPath: reportPathFor(taskDir("f6-win-drift-lead"), "lead-impl"),
+			sessionPath: "C:\\SESSIONS\\LEAD.JSONL",
+			live: false,
+			kind: "worktree",
+			self: true,
+			probe: false,
+		};
+		driftSnap.workers.push(driftLeadEntry);
+		const mkDriftWatcher = (
+			detect: DetectOptions,
+			send: (t: string) => void = () => {},
+			durableDelivery?: boolean,
+		) =>
+			createWatcher({
+				transport: { listStatuses: async () => [] } as unknown as Transport,
+				intervalMs: 3_600_000,
+				send,
+				snapshot: async () => driftSnap,
+				self: { sessionFile: driftSelf, cwd: LEAD_CWD },
+				detect,
+				...(durableDelivery !== undefined ? { durableDelivery } : {}),
+				log: () => {},
+			});
+		// Posix default: the drifted owner path is a DIFFERENT file → the lead
+		// entry stays a leaf → the mute swallows the batch (no delivery).
+		{
+			const handle = mkDriftWatcher({}, () => {}, false);
+			const ev = await handle.tick();
+			check(
+				"W21.1 posix default: casing-drifted owner → leaf mute, no delivery (criterion 8)",
+				ev.length === 0,
+				`${kindsOf(ev)}`,
+			);
+			handle.stop();
+		}
+		// win32 injected: the drift folds → the lead is a worker-orchestrator →
+		// its watcher stays alive and the child's report-ready is delivered.
+		{
+			const sent: string[] = [];
+			const handle = mkDriftWatcher({ platform: "win32" }, (t: string) => {
+				sent.push(t);
+			});
+			const ev = await handle.tick();
+			check(
+				"W21.2 win32: casing-drifted owner still delivers the child's report-ready (criterion 7)",
+				ev.some((e) => e.kind === "report-ready" && e.worker === "dev-impl") && sent.length === 1,
+				`${kindsOf(ev)} ${JSON.stringify(sent)}`,
+			);
+			handle.stop();
+		}
+	}
+
 	// (W16.12/W16.13 — regex scans over index.ts source for the F6 gate) are
 	// GONE — the mount decision is behaviorally tested in test/composer-check.ts
 	// (M1 pure worker silent, M2 worker-orchestrator mounts) against the
@@ -1717,7 +1816,7 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 	);
 
 	// Gauge/absence kinds now carry EPISODE fingerprints (watcher stage B,
-	// guideline §5.4): worker-dead fingerprints by the manifest launch stamp.
+	// worker-dead fingerprints by the manifest launch stamp.
 	// The reset rule is therefore the uniform fingerprinted one — a herdr
 	// status flap WITHIN one launch (dead → alive → dead again, same
 	// startedAt) is the SAME death episode and does not re-fire; a NEW run of
@@ -1758,7 +1857,7 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 
 
 // ---------------------------------------------------------------------------
-// W17. Durable delivery store (watcher stage B, guideline §5): the memory
+// W17. Durable delivery store (watcher stage B): the memory
 // dedup is a CACHE of the per-task delivered-facts file — a commit happens
 // ONLY after a successful send, a failed send never touches the disk, a
 // failed commit is not a failed delivery, records are garbage-collected
@@ -2204,7 +2303,7 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 		h.stop();
 	}
 
-	// (9) Audit line for a REAL send (guideline §9.1, DESIGN.md §21 delivery): a
+	// (9) Audit line for a REAL send (watcher delivery): a
 	// successful send writes exactly ONE watcher-log line per batch naming the
 	// send fact and the batch content (dir :: worker/kind#fingerprint per event)
 	// — the recovery trail after an incident. Negative parts: silent mode and a
@@ -2280,6 +2379,503 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 			h.stop();
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// W19. Accept-then-log (Wave 2, audit B4): a delivery sink that queued the
+// wake with pi and THREW afterwards counts as DELIVERED — dedup keys stay,
+// the durable record commits, no re-fire next tick (a rollback would deliver
+// an already-queued wake twice). A sink that throws BEFORE queuing keeps the
+// rollback + re-fire behavior (W9.13 pins that path end to end).
+// ---------------------------------------------------------------------------
+
+{
+	const dir = taskDir("accept-then-log");
+	const w = mkWorker(dir, "w-accept");
+	writeValidReport(dir, "w-accept");
+	const snap = snapshotFor([w], [LIVE("w-accept")]);
+	const transport = { listStatuses: async () => [LIVE("w-accept")] } as unknown as Transport;
+
+	// (a) queue-then-throw: the sink hands the message over, then a LATER
+	// step fails — the error carries the markDeliveredBeforeThrow tag.
+	{
+		const sent: string[] = [];
+		const commits: number[] = [];
+		const h = createWatcher({
+			transport,
+			intervalMs: 3_600_000,
+			send: (t: string) => {
+				sent.push(t); // pi accepted/queued the wake…
+				throw markDeliveredBeforeThrow(new Error("post-acceptance audit step failed")); // …then a later step threw
+			},
+			snapshot: async () => snap,
+			self: { sessionFile: TEST_SELF },
+			detect: { legacyFailOpen: true },
+			commitDelivery: async () => {
+				commits.push(1);
+			},
+			log: () => {},
+		});
+		const b1 = await h.tick();
+		check("W19.1 queue-then-throw returns the batch (delivery proceeds)", b1.length === 1, kindsOf(b1));
+		check("W19.2 queue-then-throw counts as DELIVERED — the durable record commits", commits.length === 1, String(commits.length));
+		check("W19.3 queue-then-throw does NOT re-fire on the next tick", (await h.tick()).length === 0 && sent.length === 1, JSON.stringify(sent));
+		h.stop();
+	}
+
+	// (b) pre-delivery throw: pi never accepted — rollback + re-fire preserved.
+	{
+		const preSent: string[] = [];
+		const commits: number[] = [];
+		const h = createWatcher({
+			transport,
+			intervalMs: 3_600_000,
+			send: (): never => {
+				throw new Error("pi refused before accepting"); // UNTAGGED — genuine pre-delivery failure
+			},
+			snapshot: async () => snap,
+			self: { sessionFile: TEST_SELF },
+			detect: { legacyFailOpen: true },
+			commitDelivery: async () => {
+				commits.push(1);
+			},
+			log: () => {},
+		});
+		const b1 = await h.tick();
+		check("W19.4 pre-delivery throw delivers nothing and commits nothing", b1.length === 1 && preSent.length === 0 && commits.length === 0, `${kindsOf(b1)} commits=${commits.length}`);
+		check("W19.5 pre-delivery throw re-fires on the next tick (rollback preserved)", (await h.tick()).length === 1, kindsOf(b1));
+		h.stop();
+	}
+
+	// (c) makeSender itself: the acceptance point — a throw from
+	// pi.sendUserMessage propagates (pre-delivery, the rollback path); an
+	// accepting call returns delivered (no post-acceptance step exists in the
+	// production sink, and none may flip the outcome).
+	{
+		let threw = false;
+		try {
+			makeSender({
+				sendUserMessage: () => {
+					throw new Error("assertActive refusal");
+				},
+			} as never)("wake");
+			} catch {
+				threw = true;
+			}
+		check("W19.6 makeSender: a pi-side throw propagates as a PRE-delivery failure (rollback path)", threw);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// W20. The watcher-vs-collect race (Wave 2): report-kind suppression reads
+// collectedAt in the tick snapshot — a collect that stamps between the
+// snapshot and the send must NOT produce a duplicate report-ready wake for a
+// fresh session. The fix re-reads collectedAt from the manifest immediately
+// before the batch is sent.
+// ---------------------------------------------------------------------------
+
+{
+	const dir = taskDir("collect-race");
+	const w = mkWorker(dir, "w-race");
+	writeValidReport(dir, "w-race");
+	// The on-disk manifest starts WITHOUT the stamp (what collect writes only
+	// at the END of its flow — the snapshot below predates it).
+	const writeManifestOnDisk = (collected: boolean) =>
+		writeFileSync(
+			join(dir, "manifest.json"),
+			JSON.stringify({
+				task: "collect-race",
+				dir,
+				workers: [collected ? { ...w, collectedAt: new Date().toISOString() } : w],
+			}),
+		);
+	writeManifestOnDisk(false);
+	// The tick snapshot: built BEFORE the stamp lands (no collectedAt on the
+	// worker object the detection sees).
+	const staleSnap = snapshotFor([w], [LIVE("w-race")]);
+	const sent: string[] = [];
+	const h = createWatcher({
+		transport: { listStatuses: async () => [LIVE("w-race")] } as unknown as Transport,
+		intervalMs: 3_600_000,
+		send: (t: string) => {
+			sent.push(t);
+		},
+		snapshot: async () => {
+			// The collect stamp lands AFTER the snapshot resolved but BEFORE the
+			// send — the exact audit race window.
+			writeManifestOnDisk(true);
+			return staleSnap;
+		},
+		self: { sessionFile: TEST_SELF },
+		detect: { legacyFailOpen: true },
+		log: () => {},
+	});
+	const ev = await h.tick();
+	check("W20.1 collect stamped between snapshot and send → the report-ready wake is DROPPED", ev.length === 0 && sent.length === 0, `${kindsOf(ev)} sent=${JSON.stringify(sent)}`);
+	check("W20.2 the dropped wake does not re-fire either (memory keys stay, next snapshot reads the stamp)", (await h.tick()).length === 0 && sent.length === 0, JSON.stringify(sent));
+	h.stop();
+
+	// Regression guard: WITHOUT the stamp the report-ready still fires (the
+	// re-read must only drop events the stamp genuinely covers).
+	{
+		const dir2 = taskDir("collect-race-clean");
+		const w2 = mkWorker(dir2, "w-race2");
+		writeValidReport(dir2, "w-race2");
+		const sent2: string[] = [];
+		const h2 = createWatcher({
+			transport: { listStatuses: async () => [LIVE("w-race2")] } as unknown as Transport,
+			intervalMs: 3_600_000,
+			send: (t: string) => {
+				sent2.push(t);
+			},
+			snapshot: async () => snapshotFor([w2], [LIVE("w-race2")]),
+			self: { sessionFile: TEST_SELF },
+			detect: { legacyFailOpen: true },
+			log: () => {},
+		});
+		const ev2 = await h2.tick();
+		check("W20.3 no stamp → report-ready still fires (regression)", ev2.some((e) => e.kind === "report-ready") && sent2.length === 1, `${kindsOf(ev2)} sent=${JSON.stringify(sent2)}`);
+		h2.stop();
+	}
+}
+
+// ---------------------------------------------------------------------------
+// W22. fleet-in-flight (1.17.0): a tier-1 worker-orchestrator that ENDED ITS
+// TURN right after spawning its own fleet (per the delegate contract) goes
+// idle with no report — the PARENT's watcher must NOT fire worker-dead while
+// the fleet is alive (the incident: retries → E_NAME collisions → broken
+// integration). The worker-dead branch classifies from the SNAPSHOT's peer
+// entries: children = every OTHER worker whose orchestratorSessionPath is
+// the worker's sessionPath (sameSessionPath — win32 casing drift safe).
+// ---------------------------------------------------------------------------
+
+{
+	const META = "/tmp/sessions/f22-meta.jsonl";
+	const TL = "/tmp/sessions/f22-lead.jsonl";
+	const TL_LAUNCH = new Date(NOW - 10 * 60_000).toISOString(); // mkWorker's startedAt
+
+	const metaDir = taskDir("f22-meta");
+	const tl = mkWorker(metaDir, "tl-lead"); // no report on disk — the incident shape
+	tl.sessionPath = TL;
+	tl.orchestratorSessionPath = META; // the meta session owns the TL (its watcher classifies)
+	const childDir = taskDir("f22-child");
+	const ca = mkWorker(childDir, "mtl-a", { orchestratorSessionPath: TL });
+	const cb = mkWorker(childDir, "mtl-b", { orchestratorSessionPath: TL });
+	const cc = mkWorker(childDir, "mtl-c", { orchestratorSessionPath: TL });
+
+	// (1) TL idle + no report; three live children (in ANOTHER task dir — the
+	//     snapshot scan covers all dirs) → NO worker-dead, EXACTLY ONE
+	//     fleet-in-flight with N=3 and the names in the message. The children
+	//     themselves are foreign to the meta watcher (owned by the TL) → silent.
+	{
+		const snap = snapshotFor([tl, ca, cb, cc], [
+			{ name: "tl-lead", status: "idle" },
+			LIVE("mtl-a"),
+			LIVE("mtl-b"),
+			LIVE("mtl-c"),
+		]);
+		const seen = newSeen();
+		const batch = detectEvents(snap, seen, { nowMs: NOW, selfSessionFile: META });
+		check(
+			"W22.1 idle TL with a live fleet → no worker-dead, exactly ONE fleet-in-flight (N=3, names in the message)",
+			batch.length === 1 &&
+				batch[0]?.kind === "fleet-in-flight" &&
+				batch[0]?.worker === "tl-lead" &&
+				/3 live: mtl-a,mtl-b,mtl-c/.test(batch[0]?.message ?? "") &&
+				!kindsOf(batch).includes("worker-dead"),
+			`${kindsOf(batch)} ${JSON.stringify(batch.map((e) => e.message))}`,
+		);
+		check(
+			"W22.1b the fleet-in-flight fingerprint is the launch stamp @ the sorted live child names",
+			batch[0]?.fingerprint === `${TL_LAUNCH}@mtl-a,mtl-b,mtl-c`,
+			batch[0]?.fingerprint ?? "",
+		);
+		check(
+			"W22.1c the message tells the orchestrator NOT to retry the name",
+			/do NOT retry its name/.test(batch[0]?.message ?? "") && /E_NAME/.test(batch[0]?.message ?? ""),
+			batch[0]?.message ?? "",
+		);
+
+		// (2) Second tick, SAME live set → no duplicate (fingerprint one-shot holds).
+		const again = detectEvents(snap, seen, { nowMs: NOW, selfSessionFile: META });
+		check("W22.2 the same live set on the next tick → no duplicate fleet-in-flight", again.length === 0, `${kindsOf(again)}`);
+
+		// (3) One child drains (herdr no longer knows mtl-c) → live set changed →
+		//     exactly one NEW fleet-in-flight with the updated N (re-arm works).
+		const drainedSnap = snapshotFor([tl, ca, cb, cc], [{ name: "tl-lead", status: "idle" }, LIVE("mtl-a"), LIVE("mtl-b")]);
+		const reFired = detectEvents(drainedSnap, seen, { nowMs: NOW, selfSessionFile: META });
+		check(
+			"W22.3 a drained child changes the live set → exactly one NEW fleet-in-flight with N=2",
+			reFired.length === 1 && reFired[0]?.kind === "fleet-in-flight" && /2 live: mtl-a,mtl-b/.test(reFired[0]?.message ?? ""),
+			`${kindsOf(reFired)} ${JSON.stringify(reFired.map((e) => e.message))}`,
+		);
+	}
+
+	// (4) ALL children non-live → suppression lifts: worker-dead fires for the
+	//     TL (a TL whose whole fleet is gone and which still has no report is
+	//     genuinely stuck — the parent must act).
+	{
+		const stuckSnap = snapshotFor([tl, ca, cb, cc], [{ name: "tl-lead", status: "idle" }]);
+		const dead = detectEvents(stuckSnap, newSeen(), { nowMs: NOW, selfSessionFile: META });
+		check(
+			"W22.4 all children non-live → worker-dead fires for the TL (suppression only while the fleet is alive)",
+			dead.length === 1 && dead[0]?.kind === "worker-dead" && dead[0]?.worker === "tl-lead",
+			`${kindsOf(dead)} ${JSON.stringify(dead.map((e) => e.message))}`,
+		);
+	}
+
+	// (5) TL idle + no report with NO children → the pre-existing worker-dead
+	//     behavior, pinned byte-for-byte in wording shape.
+	{
+		const loneSnap = snapshotFor([tl], [{ name: "tl-lead", status: "idle" }]);
+		const dead = detectEvents(loneSnap, newSeen(), { nowMs: NOW, selfSessionFile: META });
+		check(
+			"W22.5 idle TL, no children → worker-dead with the settled wording (pre-existing behavior)",
+			dead.length === 1 &&
+				dead[0]?.kind === "worker-dead" &&
+				/settled \(idle\) with no report at .+ — it finished without producing the result/.test(dead[0]?.message ?? ""),
+			JSON.stringify(dead.map((e) => e.message)),
+		);
+	}
+
+	// (6) A child entry with a win32-casing-drifted orchestratorSessionPath is
+	//     still the TL's child (sameSessionPath, platform injected) →
+	//     suppression holds; on the posix default the drift is a different
+	//     file → no children → worker-dead fires (the contrast). The TL's own
+	//     owner field and the watcher's self id use one consistent casing so
+	//     the ownership verdict is "mine" under BOTH platforms.
+	{
+		const META2 = "/tmp/sessions/f22-meta2.jsonl";
+		const TL2 = "C:\\SESSIONS\\F22-LEAD.JSONL";
+		const driftDir = taskDir("f22-drift");
+		const tl2 = mkWorker(driftDir, "tl-drift");
+		tl2.sessionPath = TL2;
+		tl2.orchestratorSessionPath = META2;
+		const driftChildDir = taskDir("f22-drift-child");
+		const dc = mkWorker(driftChildDir, "mtl-d", { orchestratorSessionPath: "c:\\sessions\\f22-lead.jsonl" });
+		const driftStatuses = [{ name: "tl-drift", status: "idle" as const }, LIVE("mtl-d")];
+		const winBatch = detectEvents(snapshotFor([tl2, dc], driftStatuses), newSeen(), {
+			nowMs: NOW,
+			selfSessionFile: META2,
+			platform: "win32",
+		});
+		check(
+			"W22.6 win32: casing-drifted child owner still detected as the TL's child → suppression holds (one fleet-in-flight)",
+			winBatch.length === 1 && winBatch[0]?.kind === "fleet-in-flight" && /1 live: mtl-d/.test(winBatch[0]?.message ?? ""),
+			`${kindsOf(winBatch)} ${JSON.stringify(winBatch.map((e) => e.message))}`,
+		);
+		const posixBatch = detectEvents(snapshotFor([tl2, dc], driftStatuses), newSeen(), {
+			nowMs: NOW,
+			selfSessionFile: META2,
+		});
+		check(
+			"W22.6b posix default: the drifted owner is a different file → no children → worker-dead fires",
+			posixBatch.length === 1 && posixBatch[0]?.kind === "worker-dead",
+			`${kindsOf(posixBatch)}`,
+		);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// W23. Auto fix-nudge for schema-violating reports (fix-report-heal, 2026-09-12)
+// ---------------------------------------------------------------------------
+
+{
+	const dir = taskDir("heal");
+	const NAME = "w-heal";
+	const w = mkWorker(dir, NAME);
+	const p = reportPathFor(dir, NAME);
+	// The EXACT incident shape (dice-two, 2026-09-12): a flash-class report
+	// with the conversational "done" instead of the contract's "pass".
+	const writeDoneReport = () => {
+		writeFileSync(p, JSON.stringify({ worker: NAME, status: "done", summary: "s", artifacts: [], evidence: [{ claim: "c", file: "f.ts:1" }] }));
+		utimesSync(p, new Date(NOW), new Date(NOW));
+	};
+	writeDoneReport();
+	const aPath = answerPathFor(dir, NAME);
+
+	const prompts: string[] = [];
+	let nudgeAlwaysFails = false;
+	const status: AgentStatus = { name: NAME, status: "idle" };
+	const transport = {
+		backendName: () => "herdr",
+		listStatuses: async () => [status],
+		getStatus: async () => status,
+		submitPrompt: async (req: PromptReq) => {
+			if (nudgeAlwaysFails) throw new Error("herdr socket: connection_closed: server closed the connection");
+			prompts.push(req.text);
+		},
+	} as unknown as Transport;
+
+	const snap = snapshotFor([w], [status]);
+	const sent: string[] = [];
+	const h = createWatcher({
+		transport,
+		intervalMs: 3_600_000, // hand-driven ticks only
+		send: (t: string) => {
+			sent.push(t);
+		},
+		snapshot: async () => snap,
+		self: { sessionFile: TEST_SELF },
+		detect: { legacyFailOpen: true },
+		log: () => {},
+	});
+
+	// (1) LIVE worker + invalid report → a-file posted with the validator
+	//     error text; the wake message carries the auto-nudge suffix.
+	const batch = await h.tick();
+	const invalid = batch.find((e) => e.kind === "report-invalid");
+	check("W23.1 report-invalid fires for the live worker", invalid !== undefined, kindsOf(batch));
+	let aEnv: { from?: string; answer?: string } = {};
+	try {
+		aEnv = JSON.parse(readFileSync(aPath, "utf8")) as { from?: string; answer?: string };
+	} catch {
+		// leave empty — the check below reports it
+	}
+	check(
+		"W23.1b the a-file steer names the validator error + the IN PLACE fix mandate",
+		aEnv.from === "orchestrator" &&
+			/must be "pass" or "fail", got: "done"/.test(aEnv.answer ?? "") &&
+			/Fix the report file IN PLACE/.test(aEnv.answer ?? "") &&
+			/stay idle/.test(aEnv.answer ?? ""),
+		aEnv.answer ?? "NO a-FILE",
+	);
+	check(
+		"W23.1c the delivered wake carries the auto-nudge suffix",
+		sent.length === 1 && sent[0].includes("an automatic fix nudge was posted to the live worker"),
+		sent[0] ?? "NOTHING SENT",
+	);
+	check("W23.1d the pane nudge fired (idle worker is nudgeable)", prompts.length === 1, JSON.stringify(prompts));
+
+	// (2) Second tick, same report mtime → NO second a-file write (dedup via
+	//     the mtime fingerprint holds), no second nudge.
+	const aMtime1 = statSync(aPath).mtimeMs;
+	const batch2 = await h.tick();
+	const aMtime2 = statSync(aPath).mtimeMs;
+	check(
+		"W23.2 same report mtime → no re-fire, no second steer write, no second nudge",
+		batch2.length === 0 && aMtime1 === aMtime2 && prompts.length === 1,
+		`${kindsOf(batch2)} mtime ${aMtime1}→${aMtime2} prompts=${prompts.length}`,
+	);
+
+	// (3) The worker rewrites the report with "pass" (new mtime) →
+	//     report-ready fires, no new nudge.
+	writeFileSync(p, JSON.stringify({ worker: NAME, status: "pass", summary: "s", artifacts: [], evidence: [{ claim: "c", file: "f.ts:1" }] }));
+	utimesSync(p, new Date(NOW + 60_000), new Date(NOW + 60_000));
+	const batch3 = await h.tick();
+	const aMtime3 = statSync(aPath).mtimeMs;
+	check(
+		"W23.3 fixed report → report-ready, no new steer write, no new nudge",
+		batch3.length === 1 && batch3[0]?.kind === "report-ready" && aMtime3 === aMtime2 && prompts.length === 1,
+		`${kindsOf(batch3)} mtime ${aMtime3} prompts=${prompts.length}`,
+	);
+	check(
+		"W23.3b report-ready never carries the auto-nudge suffix",
+		batch3.length === 1 && !batch3[0]!.message.includes("automatic fix nudge"),
+		batch3[0]?.message ?? "",
+	);
+	h.stop();
+
+	// (4) Worker NOT live (herdr does not know it) → no a-file posted; the
+	//     message has NO auto-nudge suffix (guidance-only) — and the guidance
+	//     is cheapest-first in BOTH shapes (W23.6 wording pin rides here).
+	const dir4 = taskDir("heal-gone");
+	const gone = mkWorker(dir4, "w-heal-gone");
+	writeFileSync(
+		reportPathFor(dir4, "w-heal-gone"),
+		JSON.stringify({ worker: "w-heal-gone", status: "done", summary: "s", artifacts: [], evidence: [{ claim: "c", file: "f.ts:1" }] }),
+	);
+	utimesSync(reportPathFor(dir4, "w-heal-gone"), new Date(NOW), new Date(NOW));
+	const goneSnap = snapshotFor([gone], NO_STATUS); // herdr does not know the worker
+	const sent4: string[] = [];
+	const h4 = createWatcher({
+		transport: { backendName: () => "herdr", listStatuses: async () => [] } as unknown as Transport,
+		intervalMs: 3_600_000,
+		send: (t: string) => {
+			sent4.push(t);
+		},
+		snapshot: async () => goneSnap,
+		self: { sessionFile: TEST_SELF },
+		detect: { legacyFailOpen: true },
+		log: () => {},
+	});
+	const batch4 = await h4.tick();
+	const goneInvalid = batch4.find((e) => e.kind === "report-invalid");
+	check(
+		"W23.4 not-live worker → report-invalid fires WITHOUT the suffix, no a-file",
+		goneInvalid !== undefined &&
+			!goneInvalid!.message.includes("automatic fix nudge") &&
+			!existsSync(answerPathFor(dir4, "w-heal-gone")),
+		`${kindsOf(batch4)} ${(goneInvalid?.message ?? "").slice(-80)}`,
+	);
+	check(
+		"W23.6 the guidance is cheapest-first: steer-in-place before re-spawn, diagnosed fallback kept",
+		!!goneInvalid &&
+			goneInvalid.message.includes("cheapest fix first") &&
+			goneInvalid.message.includes("delegate_mailbox action 'steer'") &&
+			goneInvalid.message.includes("IN PLACE") &&
+			goneInvalid.message.includes("full re-spawn (diagnosed, never verbatim) only if the worker is gone or ignores the fix"),
+		goneInvalid?.message ?? "",
+	);
+	check(
+		"W23.6b the live shape carries the same cheapest-first guidance",
+		!!invalid && invalid.message.includes("cheapest fix first") && invalid.message.includes("diagnosed, never verbatim"),
+		invalid?.message ?? "",
+	);
+	h4.stop();
+
+	// (5) The steer-post PANE failure lands in the EXISTING nudge-failed
+	//     marker machinery — real marker file, real detection (no mocks).
+	const dir5 = taskDir("heal-fail");
+	const failing = mkWorker(dir5, "w-heal-fail");
+	writeFileSync(
+		reportPathFor(dir5, "w-heal-fail"),
+		JSON.stringify({ worker: "w-heal-fail", status: "done", summary: "s", artifacts: [], evidence: [{ claim: "c", file: "f.ts:1" }] }),
+	);
+	utimesSync(reportPathFor(dir5, "w-heal-fail"), new Date(NOW), new Date(NOW));
+	nudgeAlwaysFails = true;
+	const failStatus: AgentStatus = { name: "w-heal-fail", status: "idle" };
+	const failSnap = snapshotFor([failing], [failStatus]);
+	const sent5: string[] = [];
+	const h5 = createWatcher({
+		transport: {
+			backendName: () => "herdr",
+			listStatuses: async () => [failStatus],
+			getStatus: async () => failStatus,
+			submitPrompt: async () => {
+				throw new Error("herdr socket: connection_closed: server closed the connection");
+			},
+		} as unknown as Transport,
+		intervalMs: 3_600_000,
+		send: (t: string) => {
+			sent5.push(t);
+		},
+		snapshot: async () => failSnap,
+		self: { sessionFile: TEST_SELF },
+		detect: { legacyFailOpen: true },
+		log: () => {},
+	});
+	const batch5 = await h5.tick();
+	const markerPath = nudgeFailedPathFor(dir5, "w-heal-fail");
+	check(
+		"W23.5 nudge failure → the steer envelope IS posted and the EXISTING nudge-failed marker is written",
+		existsSync(markerPath) && existsSync(answerPathFor(dir5, "w-heal-fail")) && batch5.some((e) => e.kind === "report-invalid"),
+		`marker=${existsSync(markerPath)} kinds=${kindsOf(batch5)}`,
+	);
+	const marker = JSON.parse(readFileSync(markerPath, "utf8")) as { name?: string; error?: string };
+	check(
+		"W23.5b the marker names the worker and the socket error (envelope shape intact)",
+		marker.name === "w-heal-fail" && /connection_closed/.test(marker.error ?? ""),
+		JSON.stringify(marker),
+	);
+	// The next tick picks the marker up through the REAL detection path.
+	const batch5b = await h5.tick();
+	check(
+		"W23.5c the next tick fires the nudge-failed event from the marker (integration, not a mock)",
+		batch5b.some((e) => e.kind === "nudge-failed") && !batch5b.some((e) => e.kind === "report-invalid"),
+		kindsOf(batch5b),
+	);
+	h5.stop();
 }
 
 rmSync(FIX, { recursive: true, force: true });

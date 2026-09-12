@@ -38,7 +38,7 @@ const REPO = mkdtempSync(join(tmpdir(), "fake-settle-"));
 async function settle(script: string[], req: Partial<Parameters<FakeWorkerHost["waitSettle"]>[0]> = {}) {
 	const fake = new FakeWorkerHost({ repoPath: REPO, statusScript: script as never });
 	const placement = await fake.place({ mode: "tab", repoPath: REPO, branch: "b", label: "l" });
-	await fake.startAgent({ name: "w", placementRef: placement.placementRef ?? placement.paneId, provider: "p", model: "m", thinking: "t", timeoutMs: 1000 });
+	await fake.startAgent({ name: "w", placementRef: placement.placementRef!, provider: "p", model: "m", thinking: "t", timeoutMs: 1000 });
 	return fake.waitSettle({ name: "w", timeoutMs: 5_000, ...req });
 }
 

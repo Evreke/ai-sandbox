@@ -2,7 +2,7 @@
  * pi-delegate — extension entry point.
  *
  * Installs the transport once and registers the delegate tool layer on it.
- * Also mounts the ambient fleet UI (DESIGN.md §19.4) on session_start —
+ * Also mounts the ambient fleet UI on session_start —
  * guarded by ctx.hasUI so headless runs stay inert. Command wiring
  * (/delegate-fleet, /delegate-teardown) lives in src/observe.ts
  * (registerCommands, moved there in W6) — index only calls it.
@@ -10,22 +10,22 @@
  * Install (local-only repo, symlinked into pi's auto-discovery dir):
  *   ln -s /root/projects/pi-delegate ~/.pi/agent/extensions/pi-delegate
  *
- * See DESIGN.md for the architecture and the dependency rule: no src/ module
- * imports the transport implementation — the transport is injected here.
+ * Architecture and the dependency rule (no src/ module imports the transport
+ * implementation — the transport is injected here): ARCHITECTURE.md Law 4.
  */
 
 import { readFileSync } from "node:fs";
-import { basename } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { isProbeDir, manifestStore, progressPathFor, readLastProgress } from "./src/exchange.ts";
-import { buildWorkerView, classifyOwnership, type SelfIdentity } from "./src/fleet.ts";
-import { registerCommands, registerStatusTool, stopWatcher } from "./src/observe.ts";
+import { buildWorkerView, type SelfIdentity } from "./src/fleet.ts";
+import { registerCommands } from "./src/commands.ts";
+import { registerStatusTool } from "./src/status-tool.ts";
 import { mountSessionWatcher } from "./src/compose.ts";
-import { contextPct, parseSessionUsage, resolveContextWindow } from "./src/usage.ts";
-import { disposeFleetUI, mountFleetUI, type FleetWidgetRow as FleetRow, type FleetUIDeps } from "./src/fleet.ts";
+import { buildWidgetRows, disposeFleetUI, mountFleetUI, type FleetWidgetRow as FleetRow, type FleetUIDeps } from "./src/fleet.ts";
 import { createHerdrTransport } from "./src/herdr/host.ts";
 import { BUDGET_CONFIG_PATH, DelegateErrorImpl, type Transport } from "./src/host.ts";
-import { registerDelegateTool, registerMailboxTool } from "./src/spawn.ts";
+import { registerDelegateTool } from "./src/spawn.ts";
+// Wave 3 decomposition: the mailbox tool lives in src/mailbox-tool.ts.
+import { registerMailboxTool } from "./src/mailbox-tool.ts";
 
 // ===========================================================================
 // Host binding (workerhost inversion, design §5/§6 migration steps 5–6):
@@ -95,54 +95,47 @@ function createConfiguredHost(): Transport {
 	);
 }
 
-/** Per-worker manifest extras not projected onto WorkerView (session JSONL
- *  path + recorded effective budget) — read tolerantly, same shape fleet.ts
- *  uses for its overlay rows. */
-interface ManifestExtras {
-	sessionPath?: string;
-	budgetTokens?: number;
-	model?: string;
-	orchestratorSessionPath?: string;
-	/** Watcher stage A: the manifest-level fleet owner (F1) — feeds the
-	 *  canonical display mapping so a known-foreign master renders foreign. */
-	masterSessionPath?: string;
-}
-
-async function readManifestExtras(dir: string, name: string): Promise<ManifestExtras> {
-	try {
-		// Migration stage 2 (audit step 5): the raw manifest.json re-parse is
-		// GONE — the read goes through the manifest storage port (manifestStore,
-		// file-backed, tolerant; one reader of the manifest protocol fewer).
-		// EXTERNAL_DEPENDENCY: exchange manifest at <dir>/manifest.json
-		// (dir under /tmp/exchange/<task>/) — read tolerantly per refresh tick.
-		const manifest = manifestStore.read(dir);
-		if (!manifest) return {};
-		const w = manifest.workers.find((x) => x.name === name);
-		if (!w) return {};
-		const extras: ManifestExtras = {};
-		if (typeof w.sessionPath === "string" && w.sessionPath.length > 0) extras.sessionPath = w.sessionPath;
-		if (typeof w.budgetTokens === "number" && Number.isFinite(w.budgetTokens) && w.budgetTokens > 0) {
-			extras.budgetTokens = w.budgetTokens;
-		}
-		if (typeof w.orchestratorSessionPath === "string" && w.orchestratorSessionPath.length > 0) {
-			extras.orchestratorSessionPath = w.orchestratorSessionPath;
-		}
-		// Watcher stage A: the manifest-level fleet owner feeds the canonical
-		// display mapping (classifyOwnership → workerAudienceMatch).
-		if (typeof manifest.masterSessionPath === "string" && manifest.masterSessionPath.length > 0) {
-			extras.masterSessionPath = manifest.masterSessionPath;
-		}
-		return extras;
-	} catch {
-		return {}; // missing/corrupt manifest → zero-usage row, never throw
-	}
-}
-
 // ===========================================================================
 // /delegate-fleet + /delegate-teardown commands: moved to src/observe.ts
 // (registerCommands) in W6 — index.ts is back to a wiring-only composition
 // root (its interface per SPEC).
 // ===========================================================================
+
+/**
+ * Per-session lifecycle context (Wave 2, ARCHITECTURE.md Law 3 — session
+ * lifetime owns everything mounted in it): created by the session_start
+ * handler below, stored as the process's current session, and torn down —
+ * and ONLY its own handles — by the paired session_shutdown.
+ * <p>
+ * MODULE_CONTRACT (session lifecycle):
+ *   - one pi process runs ONE active session runtime at a time, so the
+ *     process holds ONE current context (the last session_start's); pi fires
+ *     session_shutdown before session_start on new/resume/fork, so the
+ *     pairing holds on every session replacement.
+ *   - the WATCHER mounts are additionally arbitrated per session file inside
+ *     observe.ts (globalThis registry): a second mount for an already-mounted
+ *     session file is refused there — this covers a double module load, where
+ *     two copies of THIS module each register handlers (each copy's shutdown
+ *     tears down its own context's handles; the refused second watcher mount
+ *     returns the first instance's handle, so both copies converge on the
+ *     same idempotent stop).
+ *   - RESIDUAL (deliberate, documented in observe.ts's header): two separate
+ *     pi PROCESSES over the same session file are not arbitrated — no
+ *     cross-process lockfile in this wave.
+ */
+interface SessionLifecycle {
+	/** This session's file identity (degradable: undefined when the session
+	 *  manager cannot prove it — the gates decide with what is known). */
+	sessionFile?: string;
+	/** Ambient fleet widget dispose (no-op when headless or not mounted). */
+	fleetDispose: () => void;
+	/** Watcher stop handle — undefined when the composer did not mount (a
+	 *  pure worker session mounts no watcher, F6 two-tier contract). */
+	watcherStop?: () => void;
+}
+
+/** The current session's lifecycle context (see the contract above). */
+let currentSession: SessionLifecycle | null = null;
 
 /**
  * Extension entry point for pi-delegate.
@@ -153,13 +146,20 @@ async function readManifestExtras(dir: string, name: string): Promise<ManifestEx
  * Output: none — wires the whole tool layer:
  *   - creates ONE herdr transport and registers delegate/status/mailbox tools
  *     and the /delegate-* commands on it
- *   - session_start #1: mounts the ambient fleet UI (hasUI-guarded)
- *   - session_start #2: calls the watcher composer (src/compose.ts) — the
- *     "worker or orchestrator" mount decision lives there; prunes the archive
- *   - session_shutdown: disposes the fleet UI + stops the watcher (no timer
- *     outlives the session)
- * Guarantees:
- *   - idempotent mounts (double mount/start replaces via module registries)
+ *   - session_start (ONE handler): builds the per-session lifecycle context
+ *     (Law 3) — session file identity, the fleet dispose handle, the watcher
+ *     stop handle — and mounts:
+ *     · the ambient fleet UI (hasUI-guarded; its module registry replace-on-
+ *       reload contract is kept and now disposes the old handle),
+ *     · the watcher via the composer (src/compose.ts) — the "worker or
+ *       orchestrator" mount decision lives there; the composer returns the
+ *       stop handle; a second mount for the same session file is refused in
+ *       observe.ts (double module-load guard); the archive is pruned
+ *   - session_shutdown: tears down EXACTLY this session's context handles
+ *     (fleet dispose + watcher stop). The module-global clears
+ *     (disposeFleetUI/stopWatcher) are NOT called here anymore — one
+ *     session's shutdown must never touch another session's mounts (Law 3,
+ *     audit: the D2 double-delivery mechanism).
  *   - degraded self-id (sessionManager throws) degrades ownership
  *     classification to UNKNOWN — never mislabels a worker "mine"
  *   - watcher/fleet failures are advisory and can never affect
@@ -173,104 +173,87 @@ export default function (pi: ExtensionAPI) {
 	registerMailboxTool(pi, transport);
 	registerCommands(pi, transport);
 
-	// Ambient fleet UI (DESIGN.md §19.4): mount on session_start (fires on
-	// startup AND on new/resume/fork). mountFleetUI is idempotent (double-mount
-	// replaces via its module-level registry) and inert headless — the hasUI
-	// guard here is belt-and-braces so deps are not even built headless.
+	// Wave 2 (Law 3): ONE session_start handler builds the per-session
+	// lifecycle context and mounts everything under it. Previously two
+	// separate handlers mounted the fleet UI and the watcher and shutdown
+	// cleared GLOBAL registries — one session's shutdown could dispose
+	// another session's mounts and a double module load ran two watchers
+	// (the audit's D2 double-delivery mechanism, closed here + in observe.ts).
 	pi.on("session_start", async (_event, ctx) => {
-		if (!ctx.hasUI) return;
-
-		// Self identity for ownership classification (v1.12.0): the LIVE
-		// sessionManager getter, tolerantly degraded — same wiring as the
-		// watcher (observe.ts startWatcher). Absent self-id → classifyOwnership
-		// degrades to UNKNOWN, never "mine" (display is fail-closed).
-		const self: SelfIdentity = (() => {
-			let sessionFile: string | undefined;
-			try {
-				sessionFile = ctx.sessionManager?.getSessionFile?.();
-			} catch {
-				sessionFile = undefined;
-			}
-			return { sessionFile, cwd: ctx.cwd };
-		})();
-
-		let placedCount = 0;
-		const deps: FleetUIDeps = {
-			async getRows(): Promise<FleetRow[]> {
-				// Called every 2 s by the fleet UI; each call is a full read sweep:
-				// EXTERNAL_DEPENDENCY: herdr statuses (transport), manifest files,
-				// worker session JSONLs (usage gauges) and p-<name>.jsonl pings.
-				const views = await buildWorkerView(transport);
-				placedCount = views.length;
-				return Promise.all(
-					views.map(async (v) => {
-					const extras = await readManifestExtras(v.dir, v.name);
-					const usage = parseSessionUsage(extras.sessionPath ?? "");
-					const window = resolveContextWindow(extras.model);
-					let lastPing: FleetRow["lastPing"];
-					try {
-						lastPing = readLastProgress(progressPathFor(v.dir, v.name)) ?? undefined;
-					} catch {
-						lastPing = undefined; // advisory — absent ping → no marker
-					}
-					return {
-						name: v.name,
-						status: v.status,
-						kind: v.kind,
-						branch: v.branch,
-						reportExists: v.reportExists,
-						isProbe: isProbeDir(v.dir),
-						inputTokens: usage.input,
-						outputTokens: usage.output,
-						budgetPct: contextPct(usage, window),
-						lastPing,
-						ownership: classifyOwnership(
-							extras.orchestratorSessionPath,
-							self,
-							v.placement,
-							extras.masterSessionPath,
-						),
-						task: basename(v.dir),
-					};
-					}),
-				);
-			},
-		};
-		mountFleetUI(ctx, deps);
-	});
-
-	// Event-driven watcher (DESIGN.md §21): the replacement for the improvised
-	// bash sleep after E_TIMEOUT. Mounted for EVERY session — deliberately NOT
-	// behind ctx.hasUI: the wake-up matters headless too (rpc/print). Start is
-	// idempotent (module registry, double-start replaces) and every failure is
-	// advisory, so a broken watcher can never affect spawn/collect outcomes.
-	// Migration stage 3 (audit step 10): the "worker or orchestrator" decision
-	// and the mount live in the composer (src/compose.ts, mountSessionWatcher)
-	// — index.ts only derives the (degradable) self-id and calls it. The F6
-	// two-tier contract (a worker-orchestrator that owns child manifests still
-	// mounts; a PURE worker stays watcher-less) is documented and tested there.
-	pi.on("session_start", async (_event, ctx) => {
+		// Self identity for ownership classification (v1.12.0) + the watcher
+		// mount gate: the LIVE sessionManager getter, tolerantly degraded —
+		// same wiring as before. Absent self-id → classifyOwnership degrades
+		// to UNKNOWN (display is fail-closed) and the mount gates decide with
+		// what is known (v1.11.x contract).
 		let sessionFile: string | undefined;
 		try {
 			sessionFile = ctx.sessionManager?.getSessionFile?.();
 		} catch {
-			sessionFile = undefined; // degraded self-id — the gate decides with what is known
+			sessionFile = undefined;
 		}
-		mountSessionWatcher({
+		const self: SelfIdentity = { sessionFile, cwd: ctx.cwd };
+
+		// Ambient fleet UI: mount on session_start (fires on
+		// startup AND on new/resume/fork). Replace-on-reload stays the
+		// documented contract for the widget — mountFleetUI disposes the old
+		// handle when replacing (never leaks); inert headless — the hasUI guard
+		// here is belt-and-braces so deps are not even built headless.
+		let fleetDispose: () => void = () => {};
+		if (ctx.hasUI) {
+			let placedCount = 0;
+			const deps: FleetUIDeps = {
+				async getRows(): Promise<FleetRow[]> {
+					// Called every 2 s by the fleet UI; each call is a full read sweep:
+					// EXTERNAL_DEPENDENCY: herdr statuses (transport), manifest files,
+					// worker session JSONLs (usage gauges) and p-<name>.jsonl pings.
+					// Wave 2 (Law 9): the row assembly itself lives in fleet.ts
+					// (buildWidgetRows) — one implementation for widget and overlay.
+					const views = await buildWorkerView(transport);
+					placedCount = views.length;
+					return buildWidgetRows(views, self);
+				},
+			};
+			fleetDispose = mountFleetUI(ctx, deps);
+		}
+
+		// Event-driven watcher: the replacement for the
+		// improvised bash sleep after E_TIMEOUT. Mounted for EVERY session —
+		// deliberately NOT behind ctx.hasUI: the wake-up matters headless too
+		// (rpc/print). The composer returns the stop handle (Law 3: mounts
+		// return handles); a second mount for an already-mounted session file
+		// is refused inside observe.ts (double module-load guard). Every
+		// failure is advisory, so a broken watcher can never affect
+		// spawn/collect outcomes.
+		const watcher = mountSessionWatcher({
 			pi,
 			transport,
-			self: { sessionFile, cwd: ctx.cwd },
+			self,
 			sessionManager: ctx.sessionManager,
 		});
+
+		currentSession = { sessionFile, fleetDispose, watcherStop: watcher.stop };
 	});
 
-	// Session-end cleanup (quality fix A7): mountFleetUI's 2 s poll (herdr
-	// `agent list` + manifest reads) must not outlive the session. disposeFleetUI
-	// is the module-level registry in fleet.ts — idempotent, safe when
-	// nothing is mounted. Event name verified in pi docs (extensions.md):
-	// "session_shutdown" fires before teardown for quit/reload/new/resume/fork.
+	// Session-end cleanup (quality fix A7 + Wave 2 Law 3): the fleet UI's 2 s
+	// poll (herdr `agent list` + manifest reads) and the watcher's interval
+	// must not outlive the session — but teardown touches ONLY this session's
+	// handles (the context object above), never the global registries: one
+	// session's shutdown must not stop another session's watcher. Event name
+	// verified in pi docs (extensions.md): "session_shutdown" fires before
+	// teardown for quit/reload/new/resume/fork.
 	pi.on("session_shutdown", async (_event, _ctx) => {
-		disposeFleetUI();
-		stopWatcher(); // §21: the poll timer must not outlive the session
+		const session = currentSession;
+		currentSession = null;
+		if (!session) return;
+		try {
+			session.fleetDispose();
+		} catch {
+			// advisory — never throw past session_shutdown
+		}
+		try {
+			session.watcherStop?.();
+		} catch {
+			// advisory — never throw past session_shutdown
+		}
 	});
 }

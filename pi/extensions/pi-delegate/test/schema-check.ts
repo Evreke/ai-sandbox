@@ -1,6 +1,6 @@
 /**
  * T16 — Schema library/inheritance + progress pings unit checks
- * (DESIGN.md §16–§18, worker A5 contracts).
+ * (worker A5 contracts).
  *
  * Run with: bun test/schema-check.ts   (from repo root)
  *
@@ -80,7 +80,7 @@ function writeSchema(name: string, schema: unknown): void {
 	writeFileSync(absentPath, "---\ntitle: no-schema\n---\nbody\n", "utf8");
 	const absent = resolveReportSchema(absentPath);
 	check(
-		// Corrected contract (DESIGN.md §11 backward compat): absent reportSchema
+		// Corrected contract (backward compat): absent reportSchema
 		// → base-only, schema null — schema-less briefs remain valid.
 		"absent reportSchema → base-only (ok, schema:null)",
 		absent.ok && absent.schema === null && absent.provenance.length === 0,
@@ -248,7 +248,7 @@ function writeSchema(name: string, schema: unknown): void {
 	writeFileSync(join(schemaDir, "null.json"), "null", "utf8");
 	const nul = resolveReportSchemaInDir(writeBrief("null", "null"), schemaDir);
 	check(
-		// reportSchema: null in frontmatter ≈ unset → base-only (DESIGN.md §11);
+		// reportSchema: null in frontmatter ≈ unset → base-only;
 		// a null library FILE still rejects via loadLibrarySchema (tested by
 		// unknown-name path).
 		"reportSchema:null in brief → base-only (ok, schema:null)",

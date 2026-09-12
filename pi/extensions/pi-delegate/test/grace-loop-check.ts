@@ -29,14 +29,9 @@
 
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import {
-	createVirtualClock,
-	graceTransition,
-	runGraceLoop,
-	type CollectAttempt,
-	type GraceLoopDeps,
-	type GraceState,
-} from "../src/spawn.ts";
+import { graceTransition, runGraceLoop, type CollectAttempt, type GraceLoopDeps, type GraceState } from "../src/grace.ts";
+// Wave 3 decomposition: the clock port lives in src/clock.ts now.
+import { createVirtualClock } from "../src/clock.ts";
 import type { ProgressEvent, QuestionEnvelope, WorkerReport } from "../src/host.ts";
 
 let failures = 0;
@@ -247,6 +242,7 @@ async function main() {
 	// --- G5. Wiring pin -----------------------------------------------------
 	{
 		const src = readFileSync(join(ROOT, "src", "spawn.ts"), "utf8");
+		const clockSrc = readFileSync(join(ROOT, "src", "clock.ts"), "utf8");
 		check(
 			"G5.1 execute feeds the machine with the system clock + the stage budget",
 			src.includes("clock: systemClock") &&
@@ -256,7 +252,9 @@ async function main() {
 		);
 		check(
 			"G5.2 the virtual clock is exported for tests (the port seam)",
-			src.includes("export function createVirtualClock") && src.includes("export const systemClock"),
+			// Wave 3 decomposition: the port lives in src/clock.ts now — the pin
+			// follows the code.
+			clockSrc.includes("export function createVirtualClock") && clockSrc.includes("export const systemClock"),
 		);
 	}
 

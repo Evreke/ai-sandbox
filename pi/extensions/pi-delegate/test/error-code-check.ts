@@ -10,7 +10,7 @@
  *   E1  adapter (herdr, PATH-stubbed): plain-text name-taken start failure →
  *       DelegateErrorImpl with code "E_NAME" (the typed field, no parsing).
  *   E2  adapter: status-read failure (`agent get` down) → code "E_STATUS"
- *       (was a borrowed E_START — DESIGN.md §7 backlog item closed).
+ *       (was a borrowed E_START — backlog item closed).
  *   E3  adapter: tab-close failure → code "E_TEARDOWN" (was E_PLACE).
  *   E4  adapter: worktree-remove failure → code "E_TEARDOWN".
  *   E5  tool level: the SAME typed E_NAME from the herdr adapter travels
@@ -209,7 +209,7 @@ try {
 		backendName: () => "herdr",
 	};
 
-	let captured: { execute: (...a: unknown[]) => Promise<{ details: Record<string, unknown> }> };
+	let captured!: { execute: (...a: unknown[]) => Promise<{ details: Record<string, unknown> }> };
 	const fakePi = { registerTool: (tl: never) => (captured = tl as never) };
 	registerDelegateTool(fakePi as never, hybrid);
 
@@ -246,9 +246,9 @@ try {
 	const { FakeWorkerHost } = await import("../src/host/fake.ts");
 	const fake = new FakeWorkerHost({ repoPath: rootCwd });
 	const p = await fake.place({ mode: "tab", repoPath: rootCwd, branch: "b", label: "l" });
-	await fake.startAgent({ name: "dup", placementRef: p.placementRef ?? p.paneId, provider: "p", model: "m", thinking: "low", timeoutMs: 1000 });
+	await fake.startAgent({ name: "dup", placementRef: p.placementRef!, provider: "p", model: "m", thinking: "low", timeoutMs: 1000 });
 	try {
-		await fake.startAgent({ name: "dup", placementRef: p.placementRef ?? p.paneId, provider: "p", model: "m", thinking: "low", timeoutMs: 1000 });
+		await fake.startAgent({ name: "dup", placementRef: p.placementRef!, provider: "p", model: "m", thinking: "low", timeoutMs: 1000 });
 		check("E7 fake collision guidance = dictionary base + detail", false, "no throw");
 	} catch (e) {
 		const g = (e as DelegateErrorImpl).guidance ?? "";

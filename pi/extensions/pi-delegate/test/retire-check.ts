@@ -3,7 +3,7 @@
  *
  * Run with: bun test/retire-check.ts   (from the extension dir)
  *
- * The approved state machine (DESIGN.md §23):
+ * The approved state machine:
  *   RETIRABLE (evaluated by the watcher) = valid report (base + brief
  *   fragment) AND drained mailbox AND herdr status done/idle.
  *   CLOSE on ACK (release-<name>.json) or TTL (watch.retireTtlMs since the
@@ -629,9 +629,13 @@ function dOwnCheckLegacy(t: FakeTransport): boolean {
 // ---------------------------------------------------------------------------
 
 {
-	const watchSrc = readFileSync(resolve(ROOT, "src/observe.ts"), "utf8");
+	// Wave 3 decomposition: the watcher tick lives in src/watcher.ts — the pin
+	// follows the code.
+	const watchSrc = readFileSync(resolve(ROOT, "src/watcher.ts"), "utf8");
 	check("R6.1 the watcher tick runs the retire pass", /await retirePass\(/.test(watchSrc));
-	const mailboxSrc = readFileSync(resolve(ROOT, "src/spawn.ts"), "utf8");
+	// Wave 3 decomposition: the delegate_mailbox tool lives in
+	// src/mailbox-tool.ts — the pin follows the code.
+	const mailboxSrc = readFileSync(resolve(ROOT, "src/mailbox-tool.ts"), "utf8");
 	check("R6.2 delegate_mailbox exposes the release action", /"read", "answer", "steer", "release"/.test(mailboxSrc) && /writeRelease\(/.test(mailboxSrc));
 	check("R6.3 the mailbox release branch writes releasePathFor(dir, name)", /releasePathFor\(dir, params\.name\)/.test(mailboxSrc));
 	check(
@@ -644,7 +648,11 @@ function dOwnCheckLegacy(t: FakeTransport): boolean {
 	);
 	check(
 		"R6.7 retirePass gates on the master switch (no-op when disabled)",
-		/opts\.retireEnabled \?\? resolveWatchConfig\(\)\.retire/.test(watchSrc) && /if \(!enabled\) return \[\];/.test(watchSrc),
+		// Wave 3 decomposition: the pass itself lives in src/watch-retire.ts.
+		(() => {
+			const retireSrc = readFileSync(resolve(ROOT, "src/watch-retire.ts"), "utf8");
+			return /opts\.retireEnabled \?\? resolveWatchConfig\(\)\.retire/.test(retireSrc) && /if \(!enabled\) return \[\];/.test(retireSrc);
+		})(),
 	);
 
 	// writeRelease → releasePathFor roundtrip (the ACK surface end to end).

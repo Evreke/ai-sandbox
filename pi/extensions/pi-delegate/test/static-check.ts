@@ -1,13 +1,13 @@
 /**
- * T1 — Static/design conformance checks (DESIGN.md §8).
+ * T1 — Static/design conformance checks.
  *
  * Run with: bun test/static-check.ts   (from repo root)
  *
  * Checks (migration stage 3, audit step 10: every fix-specific source-text
  * pin is replaced by a BEHAVIORAL test — the registered tools/commands are
  * driven, the exported pure helpers are exercised; the ONLY remaining
- * source scans are the three hygiene lint rules, which prohibit literals
- * and are textual by nature):
+ * source scans are the four hygiene lint rules, which prohibit literals
+ * or path shapes and are textual by nature):
  *   1. Package boundary (migration stage 3, audit step 9): the herdr adapter
  *      is published ONLY as the separate export subpath "./herdr" — module
  *      resolution, not a source-text regex, enforces the import rule; the
@@ -24,6 +24,11 @@
  *      nudge-failed marker (T2.5b).
  *   6. Hygiene lint (source scans by nature): the seam imports no relative
  *      modules; no hardcoded tier or /root/ literal in src/.
+ *   7. Exchange-path pin (TZ windows-path §3.7, source scan by nature):
+ *      production src/ builds exchange-layer paths ONLY through
+ *      src/expaths.ts — no raw `/`-separator template-literal path assembly,
+ *      no split("/") path parsing, no endsWith("/_probe") classification,
+ *      no startsWith(x + "/") containment outside the builder itself.
  *
  * Exit 0 only if all checks pass.
  */
@@ -148,6 +153,257 @@ check(
 	rootPathOffenders.length === 0,
 	rootPathOffenders.join(", "),
 );
+
+// ---------------------------------------------------------------------------
+// 1.7 Law 1 pins (constitution): the platform is the API — no hardcoded
+// agent-dir joins, no union-of-literals tool enums.
+// ---------------------------------------------------------------------------
+
+/** Strip line comments (slash-slash) and block comments (slash-star ... star-
+ *  slash) from TypeScript source so
+ *  only CODE constructs are scanned (display-only guidance inside comments is
+ *  allowed to mention ~/.pi/agent paths). String literals survive stripping —
+ *  they are scanned by the shape rules below, which distinguish code joins
+ *  from prose (a prose path is inside a sentence, never a join argument). */
+function stripComments(src: string): string {
+	return src
+		// Block comments are blanked char-by-char with NEWLINES preserved, so
+		// scanners below report line numbers against the ORIGINAL file.
+		.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ""))
+		// Line comments: a `//` is a comment when preceded by line start or a
+		// non-`\`/non-`:` char — `:` keeps protocol spellings (`https://…`) in
+		// strings alive, `\\` keeps a regex literal's escaped-slash body
+		// (`/^\//` contains an adjacent `//` of delimiters, not a comment).
+		.replace(/(^|[^:\\])\/\/[^\n]*/g, "$1");
+}
+
+// Law 1 (directory constants): never join os.homedir() with literal .pi/.pi/agent
+// segments — pi exports getAgentDir()/CONFIG_DIR_NAME for this. The pin scans
+// CODE (comments stripped) and flags exactly the audit's offender shapes:
+//   - a homedir() call followed by a ".pi" join segment (homedir(), ".pi", ...)
+//   - a join(...) argument carrying a ".pi" or ".pi/agent" literal segment
+//   - a module constant assigned a relative ".pi/..." path literal
+//   - a template-literal path assembly containing .pi/agent
+// Display-only strings inside sentences ("see ~/.pi/agent/...") never match:
+// they are neither join arguments nor assignments nor template assemblies.
+const agentDirOffenders: string[] = [];
+for (const f of listTsFiles(resolve(ROOT, "src"))) {
+	const code = stripComments(readFileSync(f, "utf8"));
+	const lines = code.split("\n");
+	lines.forEach((line, i) => {
+		const offenderShape =
+			/homedir\(\)\s*,\s*["']\.pi["']/.test(line) ||
+			/join\(\s*["'][^"']*\.pi\/agent[^"']*["']/.test(line) ||
+			/join\([^\n]*["']\.pi["']/.test(line) ||
+			/=\s*["']\.pi\//.test(line) ||
+			/`[^`]*\.pi\/agent[^`]*`/.test(line);
+		if (offenderShape) agentDirOffenders.push(`${f}:${i + 1}: ${line.trim().slice(0, 120)}`);
+	});
+}
+check(
+	"T1.7 src/ builds no agent-dir path by joining homedir() with literal .pi/.pi/agent segments (Law 1: pi's getAgentDir()/CONFIG_DIR_NAME instead)",
+	agentDirOffenders.length === 0,
+	agentDirOffenders.join(" | "),
+);
+
+// Law 1 (tool enums): no tool parameter schema uses Type.Union of Type.Literal
+// members — that shape breaks Google models; StringEnum from @earendil-works/
+// pi-ai is the only allowed spelling. Scans the two tool-schema files
+// (comments stripped; prose mentions of the rule in comments are invisible).
+const enumUnionOffenders: string[] = [];
+for (const f of [resolve(ROOT, "src/spawn.ts"), resolve(ROOT, "src/observe.ts")]) {
+	const code = stripComments(readFileSync(f, "utf8"));
+	const lines = code.split("\n");
+	lines.forEach((line, i) => {
+		if (/Type\.Union\s*\(\s*\[[^\n]*Type\.Literal/.test(line)) {
+			enumUnionOffenders.push(`${f}:${i + 1}: ${line.trim().slice(0, 120)}`);
+		}
+	});
+}
+check(
+	"T1.7b no tool parameter schema in src/spawn.ts / src/observe.ts uses Type.Union of Type.Literal members (Law 1: StringEnum instead)",
+	enumUnionOffenders.length === 0,
+	enumUnionOffenders.join(" | "),
+);
+
+// ---------------------------------------------------------------------------
+// 1.8 Law 6 pin — layering: no src/ module imports src/observe.ts except
+//     the composition root's slices (Wave 3a: the watch-config extraction
+//     killed the spawn→observe edge; this pin keeps it dead).
+// ---------------------------------------------------------------------------
+
+// Plain read-based assertion (modeled on the T1.5/T1.6 hygiene scans):
+// every src/**/*.ts file must not carry a relative import of ./observe —
+// with exactly two allowlisted exceptions: src/compose.ts (the watcher
+// mount slice) and index.ts (the composition root — outside src/ anyway,
+// listed here for clarity). Everything the rest of the layer needs from
+// observe's neighborhood lives in the extracted modules (watch-config.ts,
+// watch-store.ts, report-schema.ts, mailbox-store.ts, manifest-store.ts,
+// archive.ts); importing observe for it re-creates the forbidden edge.
+// Re-audit 2026-09-12: the allowlist is EMPTY — compose.ts no longer imports
+// observe.ts either; the pin is exact. Keep the filter shape so a future
+// waiver needs a named entry + a written reason, not a silent pass.
+const OBSERVE_IMPORT_ALLOWLIST = new Set<string>([]);
+const observeImportOffenders = listTsFiles(resolve(ROOT, "src"))
+	.filter((f) => !OBSERVE_IMPORT_ALLOWLIST.has(f.split("/").pop() ?? ""))
+	.filter((f) => /from\s*["']\.\/observe(\.ts)?["']/.test(readFileSync(f, "utf8")));
+check(
+	"T1.8 no src/ module imports src/observe.ts except compose.ts (Law 6: the spawn→observe edge stays dead — config lives in watch-config.ts)",
+	observeImportOffenders.length === 0,
+	observeImportOffenders.join(", "),
+);
+
+// ---------------------------------------------------------------------------
+// 1.9 Exchange-path pin (TZ windows-path §3.7): production src/ builds
+//     exchange-layer paths ONLY through src/expaths.ts. The migration is
+//     done (reportPathFor / questionPathFor / … / taskSlug / isProbeDir /
+//     sameDir / isDirUnder); this pin keeps the raw shapes dead:
+//       - template-literal path assembly   `${dir}/report-x.json`
+//       - split on a path separator        dir.split("/")
+//       - probe classify by suffix         dir.endsWith("/_probe")
+//       - containment by concat            cwd.startsWith(root + "/")
+//     Comments are stripped first (BUG_FIX_CONTEXT prose at fleet.ts and
+//     herdr/host.ts legally documents the OLD shapes — it must not fire);
+//     string literals are scanned as-is (guidance strings live there).
+// ---------------------------------------------------------------------------
+
+/** Deterministic offender shapes, one regex each. All non-global — they are
+ *  exec'd per line with no lastIndex state, so the scanner below is pure and
+ *  unit-callable (the T1.9b bite-proof calls it on canary fixtures). */
+const EXCHANGE_PATH_PATTERNS: ReadonlyArray<{ kind: string; re: RegExp }> = [
+	{
+		// `${expr}/<segment starting with a letter/underscore>` — a path is being
+		// continued past an interpolated dir. Counters (`${attempt}/${n}`),
+		// display rows (`${e.worker}/${e.kind}`) and guidance placeholders
+		// (`${exchangeRoot()}/<task>/`) have a non-letter after the `/` and do
+		// not match — see the T1.9c precision fixtures.
+		kind: "template path assembly",
+		re: /\$\{[^}\n]+\}\/[A-Za-z_]/,
+	},
+	{
+		// .split("/") / .split('\\') and the char-class regex twins — path
+		// PARSING by separator. The class form requires an actual separator
+		// member (a source-level `\\` or `/` inside [...]) so `[^\n]`-style
+		// classes (e.g. /\s+/) never fire.
+		kind: "split on path separator",
+		re: /\.split\(\s*(["'])[\\/]\1\s*\)|\.split\(\s*\/\[[^\]]*(?:\\\\|\/)[^\]]*\]\/[a-z]*\s*\)/,
+	},
+	{
+		// The old probe classifier and its backslash twin. In SOURCE text the
+		// backslash twin is written "\\_probe" (two backslash chars) — both
+		// spellings are covered.
+		kind: "endsWith probe-suffix classify",
+		re: /\.endsWith\(\s*(["'])(?:[\/]|\\\\)_probe\1\s*\)/,
+	},
+	{
+		// Containment by concat: .startsWith(expr + "/") and the template twin
+		// .startsWith(`${expr}/`). expaths.isDirUnder is the replacement.
+		kind: "startsWith containment concat",
+		re: /\.startsWith\(\s*(?:[A-Za-z_$][\w$.]*\s*\+\s*(["'])[\/]\1|`[^`\n]*\}[\/]`\s*)\)/,
+	},
+];
+
+/** Pure per-source scan (unit-callable — the T1.9b bite-proof feeds it
+ *  canary fixtures directly). Input is raw file text; comments are stripped
+ *  here, line numbers refer to the original file (stripComments keeps
+ *  newlines). Output offenders carry line + kind + the matched text. */
+export function scanCodeForExchangePathOffenders(
+	code: string,
+): Array<{ line: number; kind: string; text: string }> {
+	const out: Array<{ line: number; kind: string; text: string }> = [];
+	stripComments(code).split("\n").forEach((lineText, i) => {
+		for (const { kind, re } of EXCHANGE_PATH_PATTERNS) {
+			const m = re.exec(lineText);
+			if (m) out.push({ line: i + 1, kind, text: m[0].trim() });
+		}
+	});
+	return out;
+}
+
+/** Named waivers (T1.8 convention: an entry + a written reason, never a
+ *  silent pass). Matched on file basename + offender kind. */
+const EXCHANGE_PATH_ALLOWLIST: ReadonlyArray<{ file: string; kind: string; reason: string }> = [
+	{
+		file: "report-schema.ts",
+		kind: "split on path separator",
+		reason:
+			"splits the type-fest JSON-pointer instancePath (reportSchema error location) on '/' — a JSON pointer, never a filesystem path",
+	},
+];
+
+const exchangePathOffenders: string[] = [];
+for (const f of listTsFiles(resolve(ROOT, "src"))) {
+	// src/expaths.ts is EXCLUDED: the builder itself owns these shapes — the
+	// pin enforces that nothing OUTSIDE it re-invents them.
+	if ((f.split(/[\\/]/).pop() ?? "") === "expaths.ts") continue;
+	const base = f.split(/[\\/]/).pop() ?? f;
+	for (const o of scanCodeForExchangePathOffenders(readFileSync(f, "utf8"))) {
+		const waived = EXCHANGE_PATH_ALLOWLIST.some((a) => a.file === base && a.kind === o.kind);
+		if (!waived) exchangePathOffenders.push(`${f}:${o.line} [${o.kind}] ${o.text}`);
+	}
+}
+check(
+	"T1.9 src/ builds exchange-layer paths only through expaths.ts — no raw template/split/endsWith/startsWith path shapes (TZ §3.7)",
+	exchangePathOffenders.length === 0,
+	exchangePathOffenders.join(" | "),
+);
+
+// Bite-proof (Law 8): the pin must actually FIRE on every forbidden shape —
+// each canary below is a real offender the scan must flag by kind.
+const PIN_CANARIES: ReadonlyArray<[string, string]> = [
+	["template path assembly", "const _p = `${dir}/report-x.json`;"],
+	["template path assembly", "const _p = `${exchangeRoot()}/_probe`;"],
+	["split on path separator", 'const _segs = dir.split("/");'],
+	["split on path separator", "const _segs = dir.split(/[\\\\/]/);"],
+	["endsWith probe-suffix classify", 'const _b = dir.endsWith("/_probe");'],
+	["endsWith probe-suffix classify", 'const _b = dir.endsWith("\\\\_probe");'],
+	["startsWith containment concat", 'const _u = cwd.startsWith(WORKTREE_DIR + "/");'],
+	["startsWith containment concat", "const _u = cwd.startsWith(`${root}/`);"],
+];
+const missedCanaries = PIN_CANARIES
+	.filter(([kind, code]) => !scanCodeForExchangePathOffenders(code).some((o) => o.kind === kind))
+	.map(([kind, code]) => `${kind}: ${code}`);
+check(
+	"T1.9b the pin BITES: every forbidden shape in the canary fixtures is flagged (unit-called scanner)",
+	missedCanaries.length === 0,
+	missedCanaries.join(" | "),
+);
+
+// Precision guards: legitimate non-path shapes nearby must NOT fire (a pin
+// that cries wolf on counters/display rows would be reverted within a week).
+const PIN_CLEAN: ReadonlyArray<string> = [
+	'const _c = `${attempt}/${GRACE_RECHECKS} rechecks`;', // counter display
+	'const _g = `under ${exchangeRoot()}/<task>/ first`;', // guidance placeholder, not assembly
+	'const _d = `${e.worker}/${e.kind}#${e.fingerprint ?? ""}`;', // log display row
+	'const _l = raw.split("\\n");', // line split, not path parsing
+	'const _w = text.split(/\\s+/).filter(Boolean);', // whitespace split
+	'const _at = arg.startsWith("@");', // @-prefix strip
+];
+const falsePositives = PIN_CLEAN
+	.filter((code) => scanCodeForExchangePathOffenders(code).length > 0)
+	.map((code) => `${code} → ${JSON.stringify(scanCodeForExchangePathOffenders(code))}`);
+check(
+	"T1.9c the pin is PRECISE: counter/display/guidance/line-split shapes are not flagged",
+	falsePositives.length === 0,
+	falsePositives.join(" | "),
+);
+
+// The allowlist must stay LIVE (T1.8 convention): the waived shape is really
+// matched raw in its file, and the waiver removes exactly that — an entry
+// whose pattern no longer occurs fails here so stale waivers get re-audited.
+{
+	const rsRaw = scanCodeForExchangePathOffenders(
+		readFileSync(resolve(ROOT, "src/report-schema.ts"), "utf8"),
+	);
+	const waived = rsRaw.filter((o) =>
+		EXCHANGE_PATH_ALLOWLIST.some((a) => a.file === "report-schema.ts" && a.kind === o.kind)
+	);
+	check(
+		"T1.9d the allowlist is LIVE: report-schema.ts's JSON-pointer split matches raw and is fully waived by the named entry",
+		rsRaw.length > 0 && waived.length === rsRaw.length,
+		JSON.stringify({ raw: rsRaw, waived: waived.length }),
+	);
+}
 
 // ---------------------------------------------------------------------------
 // 2. delegate_status tool read-only (section slice: observe.ts SECTION 1/3)
@@ -504,7 +760,9 @@ check("T3.2 legacy herdr shape (tab.id) still parses", legacyTabPlacement.tabId 
 	const confirmPrompts: string[] = [];
 	await commands["delegate-teardown"]?.handler(
 		[],
-		{ ui: { notify: (m: string) => notifications.push(m), confirm: async (_t: string, body: string) => { confirmPrompts.push(body); return true; } } },
+		// hasUI: true — the command's headless guard (pi docs Mode Behavior) must
+		// not refuse the drive; this fake ctx models an interactive session.
+		{ hasUI: true, ui: { notify: (m: string) => notifications.push(m), confirm: async (_t: string, body: string) => { confirmPrompts.push(body); return true; } } },
 	);
 	const allNotifications = notifications.join("\n");
 	check(

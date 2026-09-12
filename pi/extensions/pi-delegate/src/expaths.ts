@@ -37,8 +37,8 @@ import * as nodePath from "node:path";
  *  nodePath.win32 / nodePath.posix in tests). */
 export type PathPlatform = typeof nodePath;
 
-/** Probe-run dir name convention (DESIGN.md §5.1 step 4, §19.4 probe
- *  honesty): probe runs exchange under <exchangeRoot>/_probe — no report is
+/** Probe-run dir name convention: probe runs exchange under
+ *  <exchangeRoot>/_probe — no report is
  *  ever expected there. One name, imported by spawn (dir builder), observe
  *  and index (dir classification). Before the Windows-path fix the literal
  *  was owned by exchange.ts; it moved here so the builder and the

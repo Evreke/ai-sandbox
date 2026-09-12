@@ -27,6 +27,11 @@ spawn-and-baby-sit ritual.
 - **herdr on PATH — a hard requirement.** The extension drives a backend host through the
   `WorkerHost` seam; today the only production backend is herdr. Without the `herdr` CLI
   the tools do not work.
+- **On Windows: herdr for Windows.** The extension's exchange/path layer is
+  Windows-portable in 1.17.0 (platform-aware default exchange root, portable path
+  builders, case/separator-stable brief validation); running the host backend on Windows
+  requires herdr for Windows. Beyond that layer a Windows host backend is not certified —
+  do not read this as "Windows fully supported".
 - **A resolvable tier/provider/model/thinking** — a named tier in
   `~/.pi/agent/pi-delegate.config.json` or explicit per-call params. There is no built-in
   tier; unresolved → `E_TIER`.
@@ -34,7 +39,7 @@ spawn-and-baby-sit ritual.
   layout (`<exchangeRoot>/<task>/brief-<name>.md`). Missing, empty or outside the layout →
   `E_BRIEF`.
 - **The exchange tree conventions** — manifests, reports, mailbox and progress files live
-  next to the brief in the task dir; see [DESIGN.md](./DESIGN.md).
+  next to the brief in the task dir.
 
 Success is defined by the artifact, not by the agent's mood: a `delegate` call succeeds when
 a **validated JSON report** is on disk — never when the agent status says done/idle.
@@ -56,6 +61,8 @@ a **validated JSON report** is on disk — never when the agent status says done
 - **Event-driven watcher.** You are woken only when attention is needed: report ready or
   invalid, mailbox question, worker blocked on an interactive deck, context critical (≥90%),
   worker died without a report, collected-but-still-mounted worker. No `sleep 1500`.
+  The watcher is session-keyed: exactly one mount per session, and a second mount for the
+  same session file is refused rather than silently replaced.
   Delivered facts are durable: a session restart does NOT re-wake you on already-delivered
   facts (one file per session per task directory). Emergency rollback:
   `watch.durableDelivery: false`. One-time note: the first run after upgrading on a
@@ -74,7 +81,14 @@ a **validated JSON report** is on disk — never when the agent status says done
   report, full audit in `teardown.log`.
 - **Honest errors.** Every refusal is a structured code with a recovery hint:
   `E_BRIEF`, `E_NAME`, `E_TIER`, `E_PLACE`, `E_START`, `E_TIMEOUT`, `E_BUDGET`, `E_CONTEXT`,
-  `E_REPORT_MISSING`, `E_REPORT_INVALID`.
+  `E_REPORT_MISSING`, `E_REPORT_INVALID`. Two result classes are control flow, not
+  failures — `E_TIMEOUT` (the detach handoff: the worker keeps running and the watcher
+  wakes you) and the awaiting-answer result (a pending mailbox question) — a deliberate,
+  documented deviation from pi's throw convention (ARCHITECTURE.md, Law 8).
+- **Capped tool output.** Tool returns that carry worker-written content are bounded by
+  pi's truncation helpers: status listings show at most 100 rows (with an "N more omitted"
+  note — the full list stays in the result details), and report summaries / mailbox
+  bodies are truncated with a pointer to where the full copy lives.
 
 ### How it automates the routine
 
@@ -95,10 +109,14 @@ Judgment stays with the model (decomposition, verification, merge); mechanics be
 
 ### Operational notes
 
-- **The exchange root is not a durable store.** The default location is `/tmp/exchange`:
-  it is cleared on reboot, and on a multi-user host it is a shared path (other users can
-  read the manifests; task-slug collisions are possible). The `PI_DELEGATE_EXCHANGE_ROOT`
-  environment variable overrides it.
+- **Exchange root — not a durable store.** The default location is `/tmp/exchange` on
+  Linux/macOS (cleared on reboot) and `%LOCALAPPDATA%\pi\exchange` on Windows (fallback
+  `homedir()\AppData\Local\pi\exchange`); the `PI_DELEGATE_EXCHANGE_ROOT` environment
+  variable overrides it (absolute path). On a multi-user host it is a shared path (other
+  users can read the manifests; task-slug collisions are possible). Brief paths use the
+  native form of the running platform: `/tmp/exchange/<task>/brief-<name>.md` on
+  Linux/macOS,
+  `C:\Users\<you>\AppData\Local\pi\exchange\<task>\brief-<name>.md` on Windows.
 - Collected reports are copied to `~/.pi/agent/delegate-archive/<task>/` (best-effort,
   30-day TTL) — that archive is the durable copy.
 - Watcher wake-ups are scoped to the owning session via ownership metadata and are
@@ -115,12 +133,48 @@ Judgment stays with the model (decomposition, verification, merge); mechanics be
   emit a one-time volley of repeated wake-ups (the store starts empty and is never
   seeded; the volley is bounded by the ownership gate and the 24 h lookback). On a shared
   machine, updated and not-yet-updated sessions behave differently until all are updated.
+- **Windows: real-host QA gate.** A real-Windows E2E run (delegate spawn →
+  report → wake → mailbox, with herdr for Windows) is NOT part of CI — only
+  Windows-shaped path tests (`path.win32` fixtures) run on the POSIX CI. An
+  operator must run this gate on a real Windows host before claiming Windows
+  support beyond the exchange/path layer; until then the honest claim is "the
+  exchange/path layer is Windows-portable; the host backend on Windows
+  requires herdr for Windows".
+
+### Future work
+
+Open items deliberately carried past 1.17.0 — each is a written plan waiting
+for a cycle, not a promise:
+
+- **`fleet.ts` / `herdr/host.ts` decomposition and the `execute()` shrink**
+  (ARCHITECTURE.md Law 5): `fleet.ts` splits into `ui-text.ts`,
+  `worker-view.ts` (the one shared read-model for widget, overlay and status
+  tool), `fleet-widget.ts`, `fleet-overlay.ts`; `herdr/host.ts` splits into
+  `cli.ts`, `socket.ts`, `map.ts`; the remaining delegate-tool phases become
+  injectable state machines. The user-visible surface stays byte-identical.
+- **Pluggable mailbox store** (`ExchangeStore` / `SqliteStore` seam): a
+  DB-backed store that MIRRORS the agent-facing q-/a- files (the wire format
+  stays fs-by-protocol — workers read paths from prompts). Out of the 1.17.0
+  scope: only the Windows path layer landed.
+- **Orchestrator model selection**: the orchestrator IS the pi session, so
+  its model is invisible to pi-delegate — the mechanism must decide what (if
+  anything) to manage: task-manifest model pinning, sub-orchestrator tiers
+  (already covered by tiers today), mismatch policy (warn vs refuse).
+- **Watcher stage D**: a structured result signal beyond "the model writes a
+  file" — the ownership/delivery rules stay unchanged, only the result-plane
+  sensor moves.
+- **Second backend adapter**: a tmux adapter is unblocked by the
+  placementRef-only seam (touch only the `src/herdr/` neighborhood plus one
+  line in `index.ts`). Also open: a full CI run end-to-end on a GitHub
+  runner, and failing legacy no-owner manifests CLOSED once all writers stamp
+  `orchestratorSessionPath`.
+
+- **Report-authoring authority**: the report file becomes a MACHINE artifact — the worker provides protocol inputs (a DONE/FAILED terminal line, an artifacts list, free-text notes) or typed tool params; a deterministic composer/tool guarantees schema validity by construction, and a hand-written report file is inert (never read as the report).
 
 ### Install
 
 Copy or symlink the extension into `~/.pi/agent/extensions/pi-delegate/`, configure model
 tiers in `~/.pi/agent/pi-delegate.config.json` (one line), and start a pi session.
-Full mechanics: [DESIGN.md](./DESIGN.md).
 
 ---
 
@@ -142,13 +196,18 @@ Full mechanics: [DESIGN.md](./DESIGN.md).
 - **herdr на PATH — жёсткое требование.** Расширение управляет backend-хостом через шов
   `WorkerHost`; единственный production-бэкенд сегодня — herdr. Без CLI `herdr`
   инструменты не работают.
+- **На Windows: herdr for Windows.** Exchange/path-слой расширения в 1.17.0 переносим на
+  Windows (платформенный exchange-корень по умолчанию, переносимые сборщики путей,
+  устойчивая к регистру и разделителям валидация брифа); запуск host-бэкенда на Windows
+  требует herdr for Windows. За пределами этого слоя Windows-хост не сертифицирован — не
+  читайте это как «Windows полностью поддерживается».
 - **Разрешимый tier/provider/model/thinking** — именованный тир в
   `~/.pi/agent/pi-delegate.config.json` или явные параметры вызова. Встроенного тира нет;
   не разрешилось → `E_TIER`.
 - **Бриф до вызова** — непустой файл по абсолютному пути внутри exchange layout
   (`<exchangeRoot>/<task>/brief-<имя>.md`). Нет файла, пустой или вне layout → `E_BRIEF`.
 - **Соглашения exchange-дерева** — manifest, отчёты, почтовые и progress-файлы лежат рядом
-  с брифом в каталоге задачи; см. [DESIGN.md](./DESIGN.md).
+  с брифом в каталоге задачи.
 
 Успех определяется артефактом, а не настроением агента: вызов `delegate` успешен, когда на
 диске лежит **валидный JSON-отчёт**, — никогда не тогда, когда статус агента говорит
@@ -172,6 +231,8 @@ done/idle.
 - **Event-driven вотчер.** Будит только когда нужен ход: отчёт готов или бит, вопрос через
   почтовый ящик, воркер завис на интерактивном grill-deck, контекст критический (≥90%),
   воркер умер без отчёта, собранный воркер всё ещё висит. Никаких `sleep 1500`.
+  Вотчер привязан к сессии: ровно один маунт на сессию, повторный маунт для той же
+  сессии отклоняется, а не молча заменяет первый.
 - **Почтовый ящик.** `q-<имя>.json` / `a-<имя>.json` — докидывайте уточнения работающему
   воркеру и отвечайте на его вопросы без пересоздания.
 - **Строгие отчёты.** Критерий завершения — **валидный JSON-отчёт** с evidence
@@ -185,7 +246,15 @@ done/idle.
   отчёта, полный аудит в `teardown.log`.
 - **Честные ошибки.** Каждый отказ — структурный код с подсказкой:
   `E_BRIEF`, `E_NAME`, `E_TIER`, `E_PLACE`, `E_START`, `E_TIMEOUT`, `E_BUDGET`, `E_CONTEXT`,
-  `E_REPORT_MISSING`, `E_REPORT_INVALID`.
+  `E_REPORT_MISSING`, `E_REPORT_INVALID`. Два класса результатов — не сбои, а управление
+  потоком: `E_TIMEOUT` (передача управления: воркер продолжает работать, вотчер вас
+  разбудит) и результат «ожидает ответа» (висит вопрос в почтовом ящике) — это
+  осознанное, документированное отклонение от throw-конвенции pi (ARCHITECTURE.md,
+  закон 8).
+- **Обрезанный вывод инструментов.** Возвраты инструментов, несущие написанный воркером
+  текст, ограничены штатными помощниками pi: в статусных списках не больше 100 строк (с
+  пометкой «N more omitted» — полный список лежит в details результата), а саммари
+  отчётов и тела писем обрезаются с указанием, где лежит полная копия.
 
 ### Как автоматизирует рутину
 
@@ -206,10 +275,14 @@ done/idle.
 
 ### Эксплуатационные заметки
 
-- **Exchange-корень — не durable store.** Путь по умолчанию — `/tmp/exchange`: он
-  очищается при ребуте, а на multi-user хосте это общий путь (другие пользователи могут
-  читать манифесты; возможны коллизии task slug). Переменная окружения
-  `PI_DELEGATE_EXCHANGE_ROOT` переопределяет его.
+- **Exchange-корень — не durable store.** Путь по умолчанию — `/tmp/exchange` на
+  Linux/macOS (очищается при ребуте) и `%LOCALAPPDATA%\pi\exchange` на Windows (fallback
+  `homedir()\AppData\Local\pi\exchange`); переменная окружения
+  `PI_DELEGATE_EXCHANGE_ROOT` переопределяет его (абсолютный путь). На multi-user хосте
+  это общий путь (другие пользователи могут читать манифесты; возможны коллизии task
+  slug). Пути брифов используют нативную форму платформы:
+  `/tmp/exchange/<task>/brief-<имя>.md` на Linux/macOS,
+  `C:\Users\<вы>\AppData\Local\pi\exchange\<task>\brief-<имя>.md` на Windows.
 - Собранные отчёты копируются в `~/.pi/agent/delegate-archive/<task>/` (best-effort,
   TTL 30 дней) — архив и есть долговременная копия.
 - Пробуждения вотчера ограничены сессией-владельцем через метки владения и по умолчанию
@@ -226,12 +299,46 @@ done/idle.
   единоразовый залп повторных пробуждений (хранилище стартует пустым и никогда не
   засевается; залп ограничен гейтом владения и суточным горизонтом). На общей машине
   обновлённые и ещё не обновлённые сессии ведут себя по-разному, пока не обновлены все.
+- **Windows: QA-гейт на реальном хосте.** Реальный Windows E2E (delegate spawn →
+  отчёт → wake → почтовый ящик, с herdr for Windows) в CI НЕ выполняется — на POSIX CI
+  идут только Windows-образные тесты путей (`path.win32` фикстуры). Оператор должен
+  прогнать этот гейт на реальном Windows-хосте, прежде чем заявлять поддержку Windows
+  за пределами exchange/path-слоя; до тех пор честная формулировка — «exchange/path-слой
+  переносим на Windows; host-бэкенд на Windows требует herdr for Windows».
+
+### Планы на будущее
+
+Открытые пункты, сознательно перенесённые за 1.17.0, — каждый это записанный план
+в ожидании цикла, а не обещание:
+
+- **Декомпозиция `fleet.ts` / `herdr/host.ts` и усадка `execute()`**
+  (ARCHITECTURE.md, закон 5): `fleet.ts` распадается на `ui-text.ts`,
+  `worker-view.ts` (единая read-модель для виджета, оверлея и status-инструмента),
+  `fleet-widget.ts`, `fleet-overlay.ts`; `herdr/host.ts` — на `cli.ts`, `socket.ts`,
+  `map.ts`; оставшиеся фазы delegate-инструмента становятся инъекционными машинами
+  состояний. Пользовательская поверхность остаётся байт-в-байт.
+- **Взаимозаменяемое хранилище почтового ящика** (шов `ExchangeStore` /
+  `SqliteStore`): DB-хранилище, которое ЗЕРКАЛИТ агентские q-/a- файлы (проводной
+  формат остаётся fs-by-protocol — воркеры читают пути из промптов). Вне объёма
+  1.17.0: приземлился только Windows path-слой.
+- **Выбор модели оркестратора**: оркестратор — это и есть сессия pi, поэтому его
+  модель невидима для pi-delegate — механизму нужно решить, чем (и нужно ли)
+  управлять: пиннинг модели в манифесте задачи, тиры суб-оркестраторов (сегодня
+  уже покрыты тирами), политика расхождения (warn vs отказ).
+- **Вотчер, этап D**: структурный result-сигнал вместо «модель пишет файл» —
+  правила владения/доставки не меняются, переезжает только датчик result-plane.
+- **Второй backend-адаптер**: tmux-адаптер разблокирован швом placementRef-only
+  (правки только в окрестности `src/herdr/` плюс одна строка в `index.ts`). Также
+  открыто: полный прогон CI end-to-end на GitHub-раннере и перевод legacy-манифестов
+  без владельца на fail-CLOSED, когда все писатели проставляют
+  `orchestratorSessionPath`.
+
+- **Авторитет авторства отчёта**: файл отчёта становится машинным артефактом — воркер даёт протокольные входы (терминальная строка DONE/FAILED, список артефактов, свободная проза) или типизированные параметры инструмента; детерминированный композитор/инструмент гарантирует валидность схемы по построению, а рукописный файл отчёта инертен (как отчёт не читается).
 
 ### Установка
 
 Скопируйте или засимлинкуйте расширение в `~/.pi/agent/extensions/pi-delegate/`, настройте
 тиры моделей в `~/.pi/agent/pi-delegate.config.json` (одна строка) и стартуйте сессию pi.
-Полная механика — в [DESIGN.md](./DESIGN.md).
 
 ---
 

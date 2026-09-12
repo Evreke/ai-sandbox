@@ -16,7 +16,7 @@
  *     level foreign master renders foreign, the worker-level canon wins,
  *     and the legacyFailOpen flag never changes the display. O16 — the
  *     degraded session that the display-only fallback (O5) renders as
- *     "mine" receives NOTHING at the delivery level (guideline §3.6).
+ *     "mine" receives NOTHING at the delivery level (fail-closed).
  */
 
 import { classifyOwnership, OWNERSHIP_GLYPH, foldLiveByOwnership, renderLiveRows } from "../src/fleet.ts";
@@ -91,7 +91,7 @@ const OTHER = "/home/u/.pi/agent/sessions/--home-u-other--/s-other.jsonl";
 	);
 	// Watcher stage A: the display mapping folds the CANONICAL verdict
 	// (src/watch-role.ts), so a manifest-level foreign master renders foreign
-	// (delivery and display cannot disagree — guideline §3.4), and the
+	// (delivery and display cannot disagree — the watch-role.ts role table), and the
 	// legacyFailOpen flag is accepted but INVARIANT for display (a no-owner
 	// row stays unknown whether the delivery edge is open or closed).
 	check(
@@ -118,7 +118,7 @@ const OTHER = "/home/u/.pi/agent/sessions/--home-u-other--/s-other.jsonl";
 // never feeds delivery. The SAME degraded session (no sessionFile) that O5
 // renders as "mine" receives NOTHING at the delivery level — the canonical
 // no-self-id edge is fail-closed unconditionally, with or without the
-// legacyFailOpen flag (guideline §3.6: no configuration escape).
+// legacyFailOpen flag (no configuration escape — ARCHITECTURE Law 8).
 // ---------------------------------------------------------------------------
 
 {
@@ -274,6 +274,66 @@ function fixtureRows(): FleetRow[] {
 		JSON.stringify(clamped),
 	);
 	check("F8 degenerate widths never throw", clampLines(fold.map((f) => f.text), 0).length === 1);
+}
+
+// ---------------------------------------------------------------------------
+// Windows session-path policy (TZ 1.17.0 §3.4) — sameSessionPath helper,
+// routed through the canonical verdicts with an injected platform.
+// ---------------------------------------------------------------------------
+
+import { sameSessionPath, sessionRole, workerAudienceMatch } from "../src/watch-role.ts";
+
+{
+	// W1 win32 unit: casing drift folds → same file.
+	check(
+		"W1a win32: drive/component casing folds to true",
+		sameSessionPath("C:\\Users\\u\\s.jsonl", "c:\\users\\u\\s.jsonl", "win32"),
+	);
+	check(
+		"W1b win32: mixed separators fold to true",
+		sameSessionPath("C:\\Users/u/s.jsonl", "C:\\Users\\u\\s.jsonl", "win32"),
+	);
+	check(
+		"W1c win32: different files stay distinct",
+		!sameSessionPath("C:\\Users\\u\\s.jsonl", "C:\\Users\\u\\t.jsonl", "win32"),
+	);
+	// W2 POSIX exactness regression barrier (TZ acceptance criterion 8):
+	// a case-sensitive FS may legitimately host two paths differing only
+	// by case — no casefolding "just in case" on posix.
+	check(
+		"W2a posix: case-different paths stay distinct",
+		!sameSessionPath("/root/A.json", "/root/a.json", "linux"),
+	);
+	check("W2b posix: identical paths match", sameSessionPath("/root/a.json", "/root/a.json", "linux"));
+	// W3 through the canonical delivery verdict with an injected platform.
+	check(
+		"W3a win32 owner casing drift → mine (TZ criterion 7)",
+		workerAudienceMatch(
+			{ orchestratorSessionPath: "C:\\Users\\u\\s.jsonl" },
+			{ sessionFile: "c:\\users\\u\\s.jsonl" },
+			{ legacyFailOpen: false, platform: "win32" },
+		) === "mine",
+	);
+	check(
+		"W3b posix case-different owner → foreign",
+		workerAudienceMatch(
+			{ orchestratorSessionPath: "/root/A.json" },
+			{ sessionFile: "/root/a.json" },
+			{ legacyFailOpen: false, platform: "linux" },
+		) === "foreign",
+	);
+	// W4 through the mount-side role table (win32 injected).
+	const winManifests = [
+		{ workers: [{ sessionPath: "c:\\users\\u\\s.jsonl", orchestratorSessionPath: "c:\\users\\u\\s.jsonl" }] },
+	];
+	const winRole = sessionRole({ sessionFile: "C:\\Users\\u\\s.jsonl" }, winManifests, { platform: "win32" });
+	check("W4a win32: casing-variant sessionPath → isWorker", winRole.isWorker);
+	check("W4b win32: casing-variant orchestratorSessionPath → ownsChildren", winRole.ownsChildren);
+	// W5 default platform = process.platform (this host is POSIX → exact).
+	check(
+		"W5 default platform on a posix host keeps exactness",
+		!sameSessionPath("/root/A.json", "/root/a.json") && sameSessionPath("/root/a.json", "/root/a.json"),
+	);
 }
 
 // ---------------------------------------------------------------------------

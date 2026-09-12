@@ -42,7 +42,8 @@ import {
 	detectWorkerEvents,
 	type WatchWorker,
 } from "../src/observe.ts";
-import { registerMailboxTool } from "../src/spawn.ts";
+// Wave 3 decomposition: the mailbox tool lives in src/mailbox-tool.ts.
+import { registerMailboxTool } from "../src/mailbox-tool.ts";
 import type { AgentStatusName, Placement, PromptReq, Transport } from "../src/host.ts";
 
 // Fixture hygiene (field lesson 2026-09-10): the exchange root is SANDBOXED
