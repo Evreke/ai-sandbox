@@ -50,6 +50,10 @@ helper, grep pi's exported surface. Concretely binding:
   (it needs SIGTERM→SIGKILL escalation with stdio destruction that `pi.exec`
   does not provide). The exception is documented in the adapter header, which
   is exactly where future re-litigation should find it.
+- Exchange-layer path assembly routes through the single portable builder
+  (`src/expaths.ts`, `node:path`, Windows + POSIX); raw separator-shaped
+  construction (template-literal `/` joins, separator-shaped `split`/`endsWith`)
+  is statically pinned away.
 
 **Enforcement:** `test/static-check.ts` grows banned-pattern pins (hardcoded
 `.pi/agent` joins, `Type.Union([...Type.Literal])` on tool parameters, missing

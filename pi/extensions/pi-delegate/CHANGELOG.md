@@ -36,6 +36,33 @@ The healing release: the four-way 2026-09-11 audit of the 1.16.1 line turned int
 - **Lying contracts corrected** (seam module header, fleet stale fail-open paragraph); six production TypeScript errors resolved; `tsc --noEmit` is now a gate; both commands guard dialog/notify calls with `ctx.hasUI`.
 - **Silent-catch residue surfaced:** archive failures carry a reason, start-failure manifest-rollback failures are logged, audit-append failures are counted. Regression: `test/silent-catch-check.ts`.
 
+### Windows path support
+
+- **Windows default exchange root.** On Windows the default exchange root is now
+  `%LOCALAPPDATA%\pi\exchange` (fallback `homedir()\AppData\Local\pi\exchange`); the
+  `PI_DELEGATE_EXCHANGE_ROOT` environment variable overrides it (absolute path). The
+  POSIX default `/tmp/exchange` is unchanged in this release.
+- **Single portable path builder.** Every exchange-layer path (manifest, brief, report,
+  mailbox, probe dir, teardown log) is assembled through the platform-aware builder
+  `src/expaths.ts` (`node:path`, injectable in tests) — no more mixed-separator paths
+  from raw `/` template literals. POSIX output stays byte-identical to previous
+  releases.
+- **No spurious `E_BRIEF` on Windows.** Brief validation (`ensureExchangeDir`) compares
+  directories case- and separator-stable on Windows (`c:\…` vs `C:\…`, `/` vs `\`);
+  POSIX comparison remains exact.
+- **Windows-correct classification and ownership.** Fleet grouping slugs and probe-dir
+  classification are separator-agnostic; the session-owner compare
+  (`sameSessionPath`, `src/watch-role.ts`) folds case and separators on Windows only —
+  a case-differing POSIX path still reads as foreign.
+- **herdr adapter on Windows.** Worktree containment uses a segment-aware compare;
+  the Windows CLI launch policy is `cmd.exe /d /s /c` with per-argument quoting and
+  `windowsHide`; kill escalation on Windows is `taskkill /pid … /T /F`. The POSIX
+  SIGTERM→SIGKILL escalation is unchanged.
+- **Scope note.** Windows-shaped tests (path.win32 fixtures) run on the POSIX CI; a
+  real-Windows E2E run is not part of CI — it stays an explicit manual QA gate. The
+  exchange/path layer is Windows-portable in 1.17.0; running the host backend on Windows
+  requires herdr for Windows.
+
 ## [Unreleased]
 
 ### Changed

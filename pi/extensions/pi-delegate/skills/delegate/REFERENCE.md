@@ -20,6 +20,10 @@ Clock check: `journalctl --no-pager --since '-5 min' | grep -c 'Clock change'`. 
    - **Headless one-shot** (`pi -p`) — a single artifact from a throwaway probe. Add `--approve` (headless modes skip the trust prompt) and narrow tools (`--tools read,bash`).
 2. Assign tier and budget per worker: execution work ≤ ~150k tokens; repeats ≤ 2 per issue; iterations ≤ 5 for write/review loops.
 3. Create the exchange dir: `mkdir -p /tmp/exchange/{TASK}` (`{TASK}` = short slug).
+   The exchange root is platform-dependent: `/tmp/exchange` on Linux/macOS,
+   `%LOCALAPPDATA%\pi\exchange` on Windows; the `PI_DELEGATE_EXCHANGE_ROOT` environment
+   variable overrides it. Use the native path form of the running platform in every
+   command below — the examples show the POSIX form.
 4. For a fan-out of ≥3 workers, run a smoke test first: one probe worker prompted to reply exactly `OUTPUT: OK` (catches dead panes, wrong flags, overloaded tiers). A probe's reply is the final verdict — a probe never writes a report file.
 
 Completion: every planned worker has a name, tier, budget, and brief path. Names match `[a-z][a-z0-9_-]{0,31}`, unique among live agents.

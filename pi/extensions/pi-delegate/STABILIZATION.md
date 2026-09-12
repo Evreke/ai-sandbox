@@ -191,6 +191,15 @@ unwaived major findings.
   the operator decides when the candidate is good. No tag, no announcement,
   no follow-up release until the operator's explicit go.
 
+### Manual QA gate — Windows host
+
+Real-Windows E2E (delegate spawn → report → wake → mailbox on a Windows machine with
+herdr for Windows) is NOT run on CI — only Windows-shaped path tests (`path.win32`
+fixtures) run on the POSIX CI. An operator must run this gate on a real Windows host
+before claiming Windows support beyond the exchange/path layer; until then the honest
+claim is "the exchange/path layer is Windows-portable; the host backend on Windows
+requires herdr for Windows".
+
 ## Risks and their mitigations
 
 - **Refactor regressions (Wave 3):** verbatim moves only, one wave = one PR =
