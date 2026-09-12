@@ -47,6 +47,13 @@ agent start, prompting, settle observation, strict report collection.
    never merge, never push. Verify before merging; decide merge order yourself.
 6. **Teardown** — `/delegate-teardown` when the task is done. Never leave workspaces behind.
 
+**Two-tier fleets (worker-orchestrators).** If YOU are a worker that spawns its own
+fleet (a tech-lead pattern), end your turn right after the fleet is out — your
+watcher wakes you as each child's report lands, exactly as your own orchestrator's
+watcher does. And never end a turn having taken ZERO actions (no briefs written, no
+spawns): an idle worker with no report and no fleet reads as a failed spawn and will
+be retried.
+
 ## Failure handling
 
 | Tool result | Meaning | Your move |

@@ -57,6 +57,14 @@
  *       compare goes through sameSessionPath — a win32 casing drift keeps a
  *       worker-orchestrator's watcher alive (criterion 7), a posix case
  *       difference still mutes (criterion 8).
+ *   W22 fleet-in-flight (1.17.0): a SETTLED worker-orchestrator with no
+ *       report is NOT worker-dead while its own fleet still has live
+ *       members — ONE fleet-in-flight per live-set shape (fingerprint =
+ *       launch stamp + sorted live child names, so a draining fleet
+ *       re-arms); all children non-live → worker-dead fires again (the
+ *       stuck-TL rule); no children → the pre-existing worker-dead wording;
+ *       a win32 casing drift on the child's orchestratorSessionPath still
+ *       matches through sameSessionPath.
  * Exit 0 only if all checks pass.
  *
  *   W18 Result-plane states (watcher stage C): the
@@ -2516,6 +2524,143 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 		const ev2 = await h2.tick();
 		check("W20.3 no stamp → report-ready still fires (regression)", ev2.some((e) => e.kind === "report-ready") && sent2.length === 1, `${kindsOf(ev2)} sent=${JSON.stringify(sent2)}`);
 		h2.stop();
+	}
+}
+
+// ---------------------------------------------------------------------------
+// W22. fleet-in-flight (1.17.0): a tier-1 worker-orchestrator that ENDED ITS
+// TURN right after spawning its own fleet (per the delegate contract) goes
+// idle with no report — the PARENT's watcher must NOT fire worker-dead while
+// the fleet is alive (the incident: retries → E_NAME collisions → broken
+// integration). The worker-dead branch classifies from the SNAPSHOT's peer
+// entries: children = every OTHER worker whose orchestratorSessionPath is
+// the worker's sessionPath (sameSessionPath — win32 casing drift safe).
+// ---------------------------------------------------------------------------
+
+{
+	const META = "/tmp/sessions/f22-meta.jsonl";
+	const TL = "/tmp/sessions/f22-lead.jsonl";
+	const TL_LAUNCH = new Date(NOW - 10 * 60_000).toISOString(); // mkWorker's startedAt
+
+	const metaDir = taskDir("f22-meta");
+	const tl = mkWorker(metaDir, "tl-lead"); // no report on disk — the incident shape
+	tl.sessionPath = TL;
+	tl.orchestratorSessionPath = META; // the meta session owns the TL (its watcher classifies)
+	const childDir = taskDir("f22-child");
+	const ca = mkWorker(childDir, "mtl-a", { orchestratorSessionPath: TL });
+	const cb = mkWorker(childDir, "mtl-b", { orchestratorSessionPath: TL });
+	const cc = mkWorker(childDir, "mtl-c", { orchestratorSessionPath: TL });
+
+	// (1) TL idle + no report; three live children (in ANOTHER task dir — the
+	//     snapshot scan covers all dirs) → NO worker-dead, EXACTLY ONE
+	//     fleet-in-flight with N=3 and the names in the message. The children
+	//     themselves are foreign to the meta watcher (owned by the TL) → silent.
+	{
+		const snap = snapshotFor([tl, ca, cb, cc], [
+			{ name: "tl-lead", status: "idle" },
+			LIVE("mtl-a"),
+			LIVE("mtl-b"),
+			LIVE("mtl-c"),
+		]);
+		const seen = newSeen();
+		const batch = detectEvents(snap, seen, { nowMs: NOW, selfSessionFile: META });
+		check(
+			"W22.1 idle TL with a live fleet → no worker-dead, exactly ONE fleet-in-flight (N=3, names in the message)",
+			batch.length === 1 &&
+				batch[0]?.kind === "fleet-in-flight" &&
+				batch[0]?.worker === "tl-lead" &&
+				/3 live: mtl-a,mtl-b,mtl-c/.test(batch[0]?.message ?? "") &&
+				!kindsOf(batch).includes("worker-dead"),
+			`${kindsOf(batch)} ${JSON.stringify(batch.map((e) => e.message))}`,
+		);
+		check(
+			"W22.1b the fleet-in-flight fingerprint is the launch stamp @ the sorted live child names",
+			batch[0]?.fingerprint === `${TL_LAUNCH}@mtl-a,mtl-b,mtl-c`,
+			batch[0]?.fingerprint ?? "",
+		);
+		check(
+			"W22.1c the message tells the orchestrator NOT to retry the name",
+			/do NOT retry its name/.test(batch[0]?.message ?? "") && /E_NAME/.test(batch[0]?.message ?? ""),
+			batch[0]?.message ?? "",
+		);
+
+		// (2) Second tick, SAME live set → no duplicate (fingerprint one-shot holds).
+		const again = detectEvents(snap, seen, { nowMs: NOW, selfSessionFile: META });
+		check("W22.2 the same live set on the next tick → no duplicate fleet-in-flight", again.length === 0, `${kindsOf(again)}`);
+
+		// (3) One child drains (herdr no longer knows mtl-c) → live set changed →
+		//     exactly one NEW fleet-in-flight with the updated N (re-arm works).
+		const drainedSnap = snapshotFor([tl, ca, cb, cc], [{ name: "tl-lead", status: "idle" }, LIVE("mtl-a"), LIVE("mtl-b")]);
+		const reFired = detectEvents(drainedSnap, seen, { nowMs: NOW, selfSessionFile: META });
+		check(
+			"W22.3 a drained child changes the live set → exactly one NEW fleet-in-flight with N=2",
+			reFired.length === 1 && reFired[0]?.kind === "fleet-in-flight" && /2 live: mtl-a,mtl-b/.test(reFired[0]?.message ?? ""),
+			`${kindsOf(reFired)} ${JSON.stringify(reFired.map((e) => e.message))}`,
+		);
+	}
+
+	// (4) ALL children non-live → suppression lifts: worker-dead fires for the
+	//     TL (a TL whose whole fleet is gone and which still has no report is
+	//     genuinely stuck — the parent must act).
+	{
+		const stuckSnap = snapshotFor([tl, ca, cb, cc], [{ name: "tl-lead", status: "idle" }]);
+		const dead = detectEvents(stuckSnap, newSeen(), { nowMs: NOW, selfSessionFile: META });
+		check(
+			"W22.4 all children non-live → worker-dead fires for the TL (suppression only while the fleet is alive)",
+			dead.length === 1 && dead[0]?.kind === "worker-dead" && dead[0]?.worker === "tl-lead",
+			`${kindsOf(dead)} ${JSON.stringify(dead.map((e) => e.message))}`,
+		);
+	}
+
+	// (5) TL idle + no report with NO children → the pre-existing worker-dead
+	//     behavior, pinned byte-for-byte in wording shape.
+	{
+		const loneSnap = snapshotFor([tl], [{ name: "tl-lead", status: "idle" }]);
+		const dead = detectEvents(loneSnap, newSeen(), { nowMs: NOW, selfSessionFile: META });
+		check(
+			"W22.5 idle TL, no children → worker-dead with the settled wording (pre-existing behavior)",
+			dead.length === 1 &&
+				dead[0]?.kind === "worker-dead" &&
+				/settled \(idle\) with no report at .+ — it finished without producing the result/.test(dead[0]?.message ?? ""),
+			JSON.stringify(dead.map((e) => e.message)),
+		);
+	}
+
+	// (6) A child entry with a win32-casing-drifted orchestratorSessionPath is
+	//     still the TL's child (sameSessionPath, platform injected) →
+	//     suppression holds; on the posix default the drift is a different
+	//     file → no children → worker-dead fires (the contrast). The TL's own
+	//     owner field and the watcher's self id use one consistent casing so
+	//     the ownership verdict is "mine" under BOTH platforms.
+	{
+		const META2 = "/tmp/sessions/f22-meta2.jsonl";
+		const TL2 = "C:\\SESSIONS\\F22-LEAD.JSONL";
+		const driftDir = taskDir("f22-drift");
+		const tl2 = mkWorker(driftDir, "tl-drift");
+		tl2.sessionPath = TL2;
+		tl2.orchestratorSessionPath = META2;
+		const driftChildDir = taskDir("f22-drift-child");
+		const dc = mkWorker(driftChildDir, "mtl-d", { orchestratorSessionPath: "c:\\sessions\\f22-lead.jsonl" });
+		const driftStatuses = [{ name: "tl-drift", status: "idle" as const }, LIVE("mtl-d")];
+		const winBatch = detectEvents(snapshotFor([tl2, dc], driftStatuses), newSeen(), {
+			nowMs: NOW,
+			selfSessionFile: META2,
+			platform: "win32",
+		});
+		check(
+			"W22.6 win32: casing-drifted child owner still detected as the TL's child → suppression holds (one fleet-in-flight)",
+			winBatch.length === 1 && winBatch[0]?.kind === "fleet-in-flight" && /1 live: mtl-d/.test(winBatch[0]?.message ?? ""),
+			`${kindsOf(winBatch)} ${JSON.stringify(winBatch.map((e) => e.message))}`,
+		);
+		const posixBatch = detectEvents(snapshotFor([tl2, dc], driftStatuses), newSeen(), {
+			nowMs: NOW,
+			selfSessionFile: META2,
+		});
+		check(
+			"W22.6b posix default: the drifted owner is a different file → no children → worker-dead fires",
+			posixBatch.length === 1 && posixBatch[0]?.kind === "worker-dead",
+			`${kindsOf(posixBatch)}`,
+		);
 	}
 }
 

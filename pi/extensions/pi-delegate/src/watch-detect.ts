@@ -86,7 +86,15 @@ export type WatchEventKind =
 	| "grill-deck"
 	| "context-critical"
 	| "worker-dead"
-	| "worker-stale";
+	| "worker-stale"
+	/** fleet-in-flight (1.17.0): the worker SETTLED (done/idle) with no report
+	 *  but its OWN fleet — other snapshot entries it spawned (their
+	 *  orchestratorSessionPath is its sessionPath) — still has live members.
+	 *  This is NOT a failed spawn: the worker is a tier-1 worker-orchestrator
+	 *  whose tier-1 watcher will wake it as its fleet's reports land. Fires
+	 *  once per live-set shape (the fingerprint is the sorted live child
+	 *  names), so a draining fleet re-arms the wake-up honestly. */
+	| "fleet-in-flight";
 
 export interface WatchEvent {
 	worker: string;
@@ -452,6 +460,14 @@ export interface DetectOptions {
 	 *  (mtime + size) moved. Undefined → the uncached parse runs (tests,
 	 *  standalone callers). */
 	sessionToolCallCache?: Map<string, SessionToolCallCacheEntry>;
+	/** fleet-in-flight (1.17.0): the OTHER worker entries of the SAME snapshot
+	 *  (snap.workers — the scan covers ALL task dirs, so children spawned in
+	 *  another task dir are visible too), threaded by detectEvents so the
+	 *  worker-dead branch can see the worker's own fleet. Undefined
+	 *  (standalone detectWorkerEvents calls, tests without the plumbing) →
+	 *  no children → the pre-fleet behavior is byte-identical. Reader-only:
+	 *  detection never mutates the entries. */
+	snapshotWorkers?: WatchWorker[];
 }
 
 function truncate(s: string, max = 220): string {
@@ -499,6 +515,45 @@ function isPlainRecord(v: unknown): v is Record<string, unknown> {
  *  never an empty fingerprint). */
 function deathEpisodeFingerprint(w: WatchWorker): string {
 	return w.startedAtMs !== undefined ? new Date(w.startedAtMs).toISOString() : "unknown-launch";
+}
+
+/**
+ * The worker's OWN fleet as seen in one snapshot (fleet-in-flight, 1.17.0):
+ * every OTHER worker entry whose orchestratorSessionPath names this worker's
+ * session — i.e. the workers THIS worker spawned, possibly in another task
+ * dir (the snapshot scan covers all of them).
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input:
+ *   - w: the worker entry being classified (its sessionPath is the owner key)
+ *   - peers: the other worker entries of the same snapshot (threaded by
+ *     detectEvents from snap.workers; undefined → no fleet — standalone
+ *     callers keep the pre-fleet behavior)
+ *   - platform: optional path-comparison platform, threaded to
+ *     sameSessionPath (win32 casing drift must not break the match);
+ *     default: the ambient process.platform
+ * Output: the matched child entries (may be empty) and their live subset
+ * Guarantees:
+ *   - the worker's own entry never matches itself (identity + owner-field
+	 *     direction: a child's orchestratorSessionPath is the parent's
+	 *     sessionPath, never the reverse)
+ *   - tolerant: non-string/garbage owner fields read as absent; never throws
+ * Raises: never
+ */
+function ownFleetInSnapshot(
+	w: WatchWorker,
+	peers: WatchWorker[] | undefined,
+	platform?: NodeJS.Platform,
+): { children: WatchWorker[]; liveChildren: WatchWorker[] } {
+	if (peers === undefined || w.sessionPath === undefined) return { children: [], liveChildren: [] };
+	const children = peers.filter(
+		(p) =>
+			p !== w &&
+			typeof p.orchestratorSessionPath === "string" &&
+			p.orchestratorSessionPath.length > 0 &&
+			sameSessionPath(p.orchestratorSessionPath, w.sessionPath as string, platform),
+	);
+	return { children, liveChildren: children.filter((c) => c.live) };
 }
 
 /** Episode fingerprint for context-critical (watcher stage B): the same
@@ -690,19 +745,59 @@ export function detectWorkerEvents(w: WatchWorker, opts: DetectOptions = {}): Wa
 		(!w.live || settledWithoutReport) &&
 		(w.startedAtMs === undefined || nowMs - w.startedAtMs >= (opts.deadGraceMs ?? WATCH_DEAD_GRACE_MS))
 	) {
-		const state = !w.live
-			? `has no live host status and no report at ${w.reportPath} — it exited without producing anything`
-			: `settled (${w.status}) with no report at ${w.reportPath} — it finished without producing the result`;
-		events.push(
-			mk(
-				"worker-dead",
-				`${state}. Treat as a failed spawn: read the pane, then a diagnosed retry (never verbatim).`,
-				// Watcher stage B episode rule: the fingerprint is the worker's launch
-				// stamp — a NEW run of the worker (new startedAt) is a new death episode
-				// and wakes again; a herdr status flap within one launch does not.
-				deathEpisodeFingerprint(w),
-			),
-		);
+		// fleet-in-flight (1.17.0): BEFORE firing, ask whether this settled
+		// worker is itself a worker-orchestrator whose fleet is still in
+		// flight. BUG_FIX_CONTEXT: symptom — a tier-1 worker-orchestrator that
+		// ended its turn right after spawning its own fleet (the delegate
+		// contract's own instruction) went idle and the PARENT's watcher fired
+		// worker-dead ("settled with no report"), so the orchestrator retried
+		// and hit E_NAME "name taken by a live agent" collisions, and manually
+		// re-spawned fleet members got a wrong orchestratorSessionPath (the
+		// integration of the campaign broke). Why the old solution did not
+		// work: the worker-dead classification looked ONLY at the worker's own
+		// status — the tier-1 exception existed for MOUNTING but not for the
+		// settle classification. What was done: in the SETTLED shape only (the
+		// message below promises the tier-1 watcher will wake the worker,
+		// which is true only while its pane exists), a live fleet SUPPRESSES
+		// worker-dead and emits ONE fleet-in-flight instead. Every existing
+		// guard of the branch (probe skip, statusesKnown, grace window,
+		// collectedAt independence) is untouched; no children → byte-identical.
+		const fleet = settledWithoutReport
+			? ownFleetInSnapshot(w, opts.snapshotWorkers, opts.platform)
+			: { children: [], liveChildren: [] };
+		if (fleet.liveChildren.length > 0) {
+			const liveNames = fleet.liveChildren.map((c) => c.name).sort().join(",");
+			events.push(
+				mk(
+					"fleet-in-flight",
+					`settled (${w.status}) with no report but its own fleet is in flight ` +
+						`(${fleet.liveChildren.length} live: ${liveNames}) — do NOT retry its name ` +
+						"(E_NAME: the agent is alive); its tier-1 watcher will wake it as its fleet " +
+						"reports land; missing fleet members may be spawned under fresh names",
+					// ONE wake per live-set shape: a draining child (collected/dies)
+					// changes the live set → the fingerprint changes → the event
+					// legitimately re-fires with the updated count (honest
+					// progression, the same re-arm philosophy as worker-stale's
+					// collectedAt), prefixed by the launch stamp so a NEW run of the
+					// worker is a new episode (the worker-dead episode rule).
+					`${deathEpisodeFingerprint(w)}@${liveNames}`,
+				),
+			);
+		} else {
+			const state = !w.live
+				? `has no live host status and no report at ${w.reportPath} — it exited without producing anything`
+				: `settled (${w.status}) with no report at ${w.reportPath} — it finished without producing the result`;
+			events.push(
+				mk(
+					"worker-dead",
+					`${state}. Treat as a failed spawn: read the pane, then a diagnosed retry (never verbatim).`,
+					// Watcher stage B episode rule: the fingerprint is the worker's launch
+					// stamp — a NEW run of the worker (new startedAt) is a new death episode
+					// and wakes again; a herdr status flap within one launch does not.
+					deathEpisodeFingerprint(w),
+				),
+			);
+		}
 	}
 
 	// 6. worker-stale (§22, v1.12.1) — a COLLECTED worker (valid report was
@@ -756,7 +851,14 @@ export function detectEvents(
 	seen: Map<string, DeliveryKey>,
 	opts: DetectOptions = {},
 ): WatchEvent[] {
-	const tickOpts: DetectOptions = { ...opts, statusesKnown: snap.statusesKnown };
+	const tickOpts: DetectOptions = {
+		...opts,
+		statusesKnown: snap.statusesKnown,
+		// fleet-in-flight (1.17.0): the whole snapshot's workers are the peer
+		// pool the worker-dead branch scans for the classified worker's own
+		// live fleet (children may live in another task dir).
+		snapshotWorkers: snap.workers,
+	};
 	const fresh: WatchEvent[] = [];
 	const current = new Set<string>();
 	// Fingerprint observations this tick: `dir#worker#kind` → fingerprint

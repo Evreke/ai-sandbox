@@ -35,6 +35,7 @@ The healing release: the four-way 2026-09-11 audit of the 1.16.1 line turned int
 - **Double-delivery bug class closed:** accept-then-log delivery classification ("accepted by pi" counts as delivered; rollback only for genuine pre-delivery failures — `test/watcher-check.ts` W19) and the watcher-vs-collect `collectedAt` race (report wake dropped when the stamp lands between snapshot and send — W20).
 - **Lying contracts corrected** (seam module header, fleet stale fail-open paragraph); six production TypeScript errors resolved; `tsc --noEmit` is now a gate; both commands guard dialog/notify calls with `ctx.hasUI`.
 - **Silent-catch residue surfaced:** archive failures carry a reason, start-failure manifest-rollback failures are logged, audit-append failures are counted. Regression: `test/silent-catch-check.ts`.
+- **False worker-dead for worker-orchestrators:** a worker that ended its turn while its own fleet was still running was classified "settled with no report", causing retries and E_NAME collisions; now the parent watcher sees the in-flight fleet and gets an honest `fleet-in-flight` state instead. Regression: `test/watcher-check.ts` (new block).
 
 ### Windows path support
 
