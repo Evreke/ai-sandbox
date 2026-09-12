@@ -5,6 +5,18 @@
 > DESIGN.md. Where ARCHITECTURE.md and the prose conventions in this file or in
 > DESIGN.md conflict, ARCHITECTURE.md outranks them.
 
+## Documentation — closed set (operator law)
+
+Documents are read by agents: they cost tokens and rot. The extension's documentation is a CLOSED set — behavior truth lives in code:
+
+- **ZSDoc in code** (MODULE_CONTRACT / FUNCTION_CONTRACT / BUG_FIX_CONTEXT at the point of use) — the primary truth about behavior.
+- **ARCHITECTURE.md** — the strict guideline: binding rules and their enforcement, no behavioral narrative.
+- **README.md** — what the extension is, how to install and configure it, operational notes. Nothing else.
+- **CHANGELOG.md** — release history (Keep a Changelog; released sections immutable).
+- **DESIGN.md** — the single grandfathered artifact: a FROZEN historical design log (banner at top); not maintained.
+
+Everything else is garbage — do NOT create it in this repo: no plans, TL;DRs, acceptance records, session instructions, stage guides, notes or decision archaeology. Agent-to-agent artifacts (briefs, reports, plans) go to the exchange dir, never the repo. Documents carry ONLY current truth and plans: no rejected approaches, no interim states, no who-decided-what — history lives in git commits and CHANGELOG. Do not write rottable status prose into living docs; prefer the code's own state. A new `.md` file requires the operator's explicit decision.
+
 One rule: **"worktree" names the isolation mechanism, "checkout" names the path.** They are complementary, never synonyms — code pairs them deliberately (`Placement.kind: "worktree"` carries a `checkoutPath`).
 
 ## Terms
