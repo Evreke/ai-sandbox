@@ -60,7 +60,7 @@ import {
 	WATCH_DEFAULT_STALE_AFTER_MS,
 } from "./usage.ts";
 import { WATCH_DEAD_GRACE_MS, WATCH_LOOKBACK_MS } from "./watch-config.ts";
-import { sessionRole, workerAudienceMatch } from "./watch-role.ts";
+import { sameSessionPath, sessionRole, workerAudienceMatch } from "./watch-role.ts";
 import {
 	CONTEXT_CRITICAL_PCT,
 	type AgentStatus,
@@ -298,10 +298,13 @@ export function workersFromManifests(
 			// muted (and leaf-suppressed) any new session that merely started
 			// in a checkout where a worker once ran — identity by cwd is
 			// ambiguous (tab workers share the orchestrator's checkout too).
+			// TZ 1.17.0 §3.4: the compare itself is sameSessionPath (posix:
+			// exact `===`, byte-identical to the former raw compare; win32:
+			// casefold + separator fold) — default platform, no plumbing here.
 			const isSelf =
 				self.sessionFile !== undefined &&
 				typeof w.sessionPath === "string" &&
-				w.sessionPath === self.sessionFile;
+				sameSessionPath(w.sessionPath, self.sessionFile);
 			workers.push({
 				name: w.name,
 				dir: manifest.dir,
@@ -436,6 +439,13 @@ export interface DetectOptions {
 	 *  tests; production threads watch.retireTtlMs via startWatcher. Consumed
 	 *  by the retire pass (createWatcher tick), not by detectWorkerEvents. */
 	retireTtlMs?: number;
+	/** TZ 1.17.0 §3.4: optional path-comparison platform for the session-path
+	 *  identity compares (the audience verdict and the watcher's leaf-worker
+	 *  ownership gate). "win32" enables the casefold + separator-fold policy,
+	 *  anything else keeps the POSIX-exact `===`. Default: the ambient
+	 *  process.platform (via sameSessionPath's own default). Additive and
+	 *  optional — existing callers are unchanged; injectable for tests. */
+	platform?: NodeJS.Platform;
 	/** Wave 4 item 5 (reliability finding 10): caller-held (watcher.ts
 	 *  closure) cache for the grill-deck session-tail scan — the up-to-1 MB
 	 *  JSONL tail is re-parsed only when the session file's fingerprint
@@ -528,7 +538,7 @@ export function detectWorkerEvents(w: WatchWorker, opts: DetectOptions = {}): Wa
 		const verdict = workerAudienceMatch(
 			{ orchestratorSessionPath: w.orchestratorSessionPath, masterSessionPath: w.masterSessionPath },
 			{ sessionFile: opts.selfSessionFile },
-			{ legacyFailOpen: opts.legacyFailOpen === true },
+			{ legacyFailOpen: opts.legacyFailOpen === true, platform: opts.platform },
 		);
 		if (verdict === "foreign") return [];
 		if (verdict === "no-self-id") {
