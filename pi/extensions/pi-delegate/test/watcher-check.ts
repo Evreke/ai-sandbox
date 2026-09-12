@@ -53,7 +53,10 @@
  *       the watcher alive for a worktree worker-orchestrator (leafWorker
  *       exemption); the worker-orchestrator mount decision is behaviorally
  *       tested in test/composer-check.ts (the old index.ts static pin is
- *       gone).
+ *       gone). W21.1/W21.2 (TZ 1.17.0 §3.4): the gate's own ownership
+ *       compare goes through sameSessionPath — a win32 casing drift keeps a
+ *       worker-orchestrator's watcher alive (criterion 7), a posix case
+ *       difference still mutes (criterion 8).
  * Exit 0 only if all checks pass.
  *
  *   W18 Result-plane states (watcher stage C, guideline §6.2): the
@@ -1619,7 +1622,81 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 		handle.stop();
 	}
 
-	// (г) Migration stage 3 (audit step 10): the old index.ts STATIC pins
+	// (в2) TZ 1.17.0 §3.4 regression (W21, worker win-session-r2): the leaf-worker gate's
+	// OWN ownership compare (watcher.ts selfOwnsChildren) must go through
+	// sameSessionPath too — a win32 casing drift between the owner writer and
+	// the live self id must NOT mute a worker-orchestrator's own children
+	// (acceptance criterion 7), while a posix case difference still does
+	// (criterion 8). The posix-drift scenario runs FIRST, with the durable
+	// store off, so it cannot be suppressed for the wrong reason by the
+	// win32 run's committed records.
+	{
+		const driftDir = taskDir("f6-win-drift");
+		const driftChild = mkWorker(driftDir, "dev-impl");
+		driftChild.sessionPath = "/tmp/sessions/dev-drift.jsonl";
+		driftChild.orchestratorSessionPath = "C:\\SESSIONS\\LEAD.JSONL"; // same file as driftSelf on win32
+		writeValidReport(driftDir, "dev-impl");
+		const driftSelf = "c:\\sessions\\lead.jsonl";
+		const driftSnap = snapshotFor([driftChild], [LIVE("dev-impl")], { sessionFile: driftSelf, cwd: LEAD_CWD });
+		// The lead's own entry is marked self by workersFromManifests only when
+		// the platform policy already matches; the unit under test here is the
+		// WATCHER gate, so self:true is pinned directly (isSelf itself is
+		// covered by W4/ownership-check on the sameSessionPath level).
+		const driftLeadEntry: WatchWorker = {
+			name: "lead-impl",
+			dir: taskDir("f6-win-drift-lead"),
+			reportPath: reportPathFor(taskDir("f6-win-drift-lead"), "lead-impl"),
+			sessionPath: "C:\\SESSIONS\\LEAD.JSONL",
+			live: false,
+			kind: "worktree",
+			self: true,
+			probe: false,
+		};
+		driftSnap.workers.push(driftLeadEntry);
+		const mkDriftWatcher = (
+			detect: DetectOptions,
+			send: (t: string) => void = () => {},
+			durableDelivery?: boolean,
+		) =>
+			createWatcher({
+				transport: { listStatuses: async () => [] } as unknown as Transport,
+				intervalMs: 3_600_000,
+				send,
+				snapshot: async () => driftSnap,
+				self: { sessionFile: driftSelf, cwd: LEAD_CWD },
+				detect,
+				...(durableDelivery !== undefined ? { durableDelivery } : {}),
+				log: () => {},
+			});
+		// Posix default: the drifted owner path is a DIFFERENT file → the lead
+		// entry stays a leaf → the mute swallows the batch (no delivery).
+		{
+			const handle = mkDriftWatcher({}, () => {}, false);
+			const ev = await handle.tick();
+			check(
+				"W21.1 posix default: casing-drifted owner → leaf mute, no delivery (criterion 8)",
+				ev.length === 0,
+				`${kindsOf(ev)}`,
+			);
+			handle.stop();
+		}
+		// win32 injected: the drift folds → the lead is a worker-orchestrator →
+		// its watcher stays alive and the child's report-ready is delivered.
+		{
+			const sent: string[] = [];
+			const handle = mkDriftWatcher({ platform: "win32" }, (t: string) => {
+				sent.push(t);
+			});
+			const ev = await handle.tick();
+			check(
+				"W21.2 win32: casing-drifted owner still delivers the child's report-ready (criterion 7)",
+				ev.some((e) => e.kind === "report-ready" && e.worker === "dev-impl") && sent.length === 1,
+				`${kindsOf(ev)} ${JSON.stringify(sent)}`,
+			);
+			handle.stop();
+		}
+	}
+
 	// (W16.12/W16.13 — regex scans over index.ts source for the F6 gate) are
 	// GONE — the mount decision is behaviorally tested in test/composer-check.ts
 	// (M1 pure worker silent, M2 worker-orchestrator mounts) against the

@@ -49,6 +49,7 @@ import {
 	type StampLayerCacheEntry,
 } from "./watch-store.ts";
 import { WATCH_DEFAULT_INTERVAL_MS, resolveWatchConfig } from "./watch-config.ts";
+import { sameSessionPath } from "./watch-role.ts";
 // Wave 4 item 5 (reliability finding 10): per-mount caches for the tick's
 // satellite reads — the caller-held closures Law 3 wants (no module globals).
 import { type SessionToolCallCacheEntry } from "./usage.ts";
@@ -298,13 +299,18 @@ export function createWatcher(deps: WatcherDeps): WatcherHandle {
 			// orchestratorSessionPath equals its session file) while its
 			// PARENT's manifest stays silenced by the detectWorkerEvents
 			// ownership gate, so F1 scoping is intact.
+			// TZ 1.17.0 §3.4: this is the fifth session-path identity compare —
+			// routed through the ONE helper (win32: casefold + separator fold),
+			// not a raw `===` (a casing drift would mute a worker-orchestrator's
+			// own children). Platform injectable via DetectOptions for tests.
+			const selfId = detectOpts.selfSessionFile;
 			const selfOwnsChildren =
-				detectOpts.selfSessionFile !== undefined &&
+				selfId !== undefined &&
 				snap.workers.some(
 					(w) =>
 						typeof w.orchestratorSessionPath === "string" &&
 						w.orchestratorSessionPath.length > 0 &&
-						w.orchestratorSessionPath === detectOpts.selfSessionFile,
+						sameSessionPath(w.orchestratorSessionPath, selfId, detectOpts.platform),
 				);
 			leafWorker = snap.workers.some((w) => w.self && w.kind === "worktree") && !selfOwnsChildren;
 		} catch (err) {

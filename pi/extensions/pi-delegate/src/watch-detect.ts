@@ -439,6 +439,13 @@ export interface DetectOptions {
 	 *  tests; production threads watch.retireTtlMs via startWatcher. Consumed
 	 *  by the retire pass (createWatcher tick), not by detectWorkerEvents. */
 	retireTtlMs?: number;
+	/** TZ 1.17.0 §3.4: optional path-comparison platform for the session-path
+	 *  identity compares (the audience verdict and the watcher's leaf-worker
+	 *  ownership gate). "win32" enables the casefold + separator-fold policy,
+	 *  anything else keeps the POSIX-exact `===`. Default: the ambient
+	 *  process.platform (via sameSessionPath's own default). Additive and
+	 *  optional — existing callers are unchanged; injectable for tests. */
+	platform?: NodeJS.Platform;
 	/** Wave 4 item 5 (reliability finding 10): caller-held (watcher.ts
 	 *  closure) cache for the grill-deck session-tail scan — the up-to-1 MB
 	 *  JSONL tail is re-parsed only when the session file's fingerprint
@@ -531,7 +538,7 @@ export function detectWorkerEvents(w: WatchWorker, opts: DetectOptions = {}): Wa
 		const verdict = workerAudienceMatch(
 			{ orchestratorSessionPath: w.orchestratorSessionPath, masterSessionPath: w.masterSessionPath },
 			{ sessionFile: opts.selfSessionFile },
-			{ legacyFailOpen: opts.legacyFailOpen === true },
+			{ legacyFailOpen: opts.legacyFailOpen === true, platform: opts.platform },
 		);
 		if (verdict === "foreign") return [];
 		if (verdict === "no-self-id") {
