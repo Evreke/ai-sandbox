@@ -1,7 +1,7 @@
 /**
  * pi-delegate — watcher composition module (migration stage 3, audit step 10).
  * <p>
- * MODULE_CONTRACT: mounts the event-driven background watcher (DESIGN.md §21)
+ * MODULE_CONTRACT: mounts the event-driven background watcher
  * for one session start. The "worker or orchestrator" decision — which
  * sessions get a watcher — lives HERE and nowhere else: a PURE manifest
  * worker mounts NO watcher (it is someone's fleet row, not an audience), a

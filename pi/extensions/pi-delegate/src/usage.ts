@@ -1,5 +1,5 @@
 /**
- * pi-delegate — gauges (DESIGN.md §20).
+ * pi-delegate — gauges (budget + context).
  * <p>
  * MODULE_CONTRACT: gauge layer — the ONLY place that parses worker session
  * JSONL files and turns them into budget/context numbers (§20 dual gauge),
@@ -208,7 +208,7 @@ export function resolveContextWindow(modelId?: string): number {
 }
 
 /**
- * v1.9 (DESIGN.md §19.1c): resolve candidate pi session JSONL paths for a
+ * v1.9: resolve candidate pi session JSONL paths for a
  * worker that was spawned at startedAtMs with working directory workerCwd.
  *
  * pi stores sessions at
@@ -275,8 +275,8 @@ export function formatGaugeLine(usage: SessionUsage, contextWindow: number): str
 /**
  * Human budget-progress line for the settle heartbeat (v1.9b), e.g.
  * "budget 45% ↓67.5k/150k". Output tokens are the budgeted quantity
- * (DESIGN.md §14/§20). Empty when no cap is set (nothing to progress
- * against) — callers resolve the §14 default themselves for display.
+ * (budgeted quantity: output tokens). Empty when no cap is set (nothing to progress
+ * against) — callers resolve the default budget themselves for display.
  */
 export function formatBudgetLine(usage: SessionUsage, budgetTokens?: number): string {
 	if (budgetTokens === undefined || !Number.isFinite(budgetTokens) || budgetTokens <= 0) return "";

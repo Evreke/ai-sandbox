@@ -1,7 +1,8 @@
 /**
  * pi-delegate — src/mailbox-store.ts (Wave 3a: extracted from src/exchange.ts).
  *
- * MODULE_CONTRACT — the mailbox file lifecycle (DESIGN.md §11–§12, §23).
+ * MODULE_CONTRACT — the mailbox file lifecycle (q-/a-/release- envelopes
+ * next to the brief, plus the retire-ack consume discipline).
  *
  * Purpose: the q-/a-/release-/nudge-failed- envelope files next to the
  * brief — path builders, tolerant readers (readQuestion/readQuestionState
@@ -270,7 +271,7 @@ export const MAILBOX_NUDGE_TIMEOUT_MS = 30_000;
 export const MAILBOX_NUDGE_ATTEMPTS = 3;
 export const MAILBOX_NUDGE_RETRY_DELAY_MS = 500;
 
-/** Nudge text — points the worker at the answer file, per DESIGN.md §12. */
+/** Nudge text — points the worker at the answer file. */
 export const mailboxNudgeText = (name: string): string =>
 	`Mailbox update posted: read a-${name}.json next to your brief and continue accordingly.`;
 

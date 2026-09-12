@@ -1,5 +1,5 @@
 /**
- * T6 — fleet UI contract checks (DESIGN.md §19.4).
+ * T6 — fleet UI contract checks.
  *
  * Run with: bun test/render-ui-check.ts   (from repo root)
  *

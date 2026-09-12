@@ -39,7 +39,7 @@ spawn-and-baby-sit ritual.
   layout (`<exchangeRoot>/<task>/brief-<name>.md`). Missing, empty or outside the layout →
   `E_BRIEF`.
 - **The exchange tree conventions** — manifests, reports, mailbox and progress files live
-  next to the brief in the task dir; see [DESIGN.md](./DESIGN.md).
+  next to the brief in the task dir.
 
 Success is defined by the artifact, not by the agent's mood: a `delegate` call succeeds when
 a **validated JSON report** is on disk — never when the agent status says done/idle.
@@ -175,7 +175,6 @@ for a cycle, not a promise:
 
 Copy or symlink the extension into `~/.pi/agent/extensions/pi-delegate/`, configure model
 tiers in `~/.pi/agent/pi-delegate.config.json` (one line), and start a pi session.
-Full mechanics: [DESIGN.md](./DESIGN.md).
 
 ---
 
@@ -208,7 +207,7 @@ Full mechanics: [DESIGN.md](./DESIGN.md).
 - **Бриф до вызова** — непустой файл по абсолютному пути внутри exchange layout
   (`<exchangeRoot>/<task>/brief-<имя>.md`). Нет файла, пустой или вне layout → `E_BRIEF`.
 - **Соглашения exchange-дерева** — manifest, отчёты, почтовые и progress-файлы лежат рядом
-  с брифом в каталоге задачи; см. [DESIGN.md](./DESIGN.md).
+  с брифом в каталоге задачи.
 
 Успех определяется артефактом, а не настроением агента: вызов `delegate` успешен, когда на
 диске лежит **валидный JSON-отчёт**, — никогда не тогда, когда статус агента говорит
@@ -340,7 +339,6 @@ done/idle.
 
 Скопируйте или засимлинкуйте расширение в `~/.pi/agent/extensions/pi-delegate/`, настройте
 тиры моделей в `~/.pi/agent/pi-delegate.config.json` (одна строка) и стартуйте сессию pi.
-Полная механика — в [DESIGN.md](./DESIGN.md).
 
 ---
 

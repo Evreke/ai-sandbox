@@ -154,7 +154,7 @@ export function registerCommands(pi: import("@earendil-works/pi-coding-agent").E
 
 			// Teardown emptied the fleet: clear the ambient widget + restore the
 			// default footer via the module-level mount registry in fleet.ts
-			// (DESIGN.md §19.4 — the mount registry is documented in report-impl-ui.json).
+			// (the mount registry is documented in report-impl-ui.json).
 			disposeFleetUI();
 			ctx.ui.notify(`Teardown finished:\n${outcomes.join("\n")}`, "info");
 		},

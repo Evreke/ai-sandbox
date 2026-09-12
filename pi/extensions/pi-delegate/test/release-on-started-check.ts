@@ -1,5 +1,5 @@
 /**
- * T-rel — v1.14 early release (watch.releaseOn=started), DESIGN.md §20.5.
+ * T-rel — v1.14 early release (watch.releaseOn=started).
  *
  * Run with: bun test/release-on-started-check.ts   (from repo root)
  *

@@ -56,7 +56,7 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
  * tool boundary); WorkerReport is the schema BOTH the delegate tool
  * (validateReport) and the watcher validate reports against — changing it
  * breaks both sides at once; Transport implementations must serialize
- * mutating ops internally (DESIGN.md §9); REPORT_EXAMPLE is the canonical
+ * mutating ops internally (ARCHITECTURE.md Law 4); REPORT_EXAMPLE is the canonical
  * report shape embedded into every worker prompt; CONTEXT_WINDOWS mirrors
  * pi's model catalog values and must be kept in sync with it manually.
  */
@@ -225,7 +225,7 @@ export interface TeardownReq {
 
 /** Result of a teardown operation (migration stage 1, audit extensibility
  *  defect 1): "teardown of an already-gone placement" is NOT an error — it is
- *  an idempotent success the CALLER can see (DESIGN.md §24.2 invariant 3).
+ *  an idempotent success the CALLER can see.
  *  Before this the seam had no way to say it: the herdr adapter swallowed
  *  not-found on the worktree branch but threw on the tab branch, and the
  *  tool layer re-parsed "not found" out of the error MESSAGE text at every
@@ -248,7 +248,7 @@ export interface TransportCapabilities {
 /**
  * The seam. Every herdr verb the tools need is reachable through these calls.
  * Implementations must serialize mutating operations internally (one mutating
- * herdr op in flight at a time) — see DESIGN.md §9.
+ * herdr op in flight at a time) — ARCHITECTURE.md Law 4.
  */
 export interface Transport {
 	/** The backend name this adapter serves — the exact `placement.backend`
@@ -271,7 +271,7 @@ export interface Transport {
 		 *  so a long blocking wait can stream liveness via onUpdate instead of
 		 *  looking frozen. Throttling is the caller's job; never throws. */
 		onPoll?: (info: { status: AgentStatusName; started: boolean; elapsedMs: number }) => void;
-		/** v1.9 (DESIGN.md §19.1c): caller-owned completion proof, polled in the
+		/** v1.9: caller-owned completion proof, polled in the
 		 *  start-up phase on every slice whose observation cannot prove life
 		 *  (idle/unknown/unresolved — herdr builds that never report working for
 		 *  pi workers would otherwise spin the full budget against a finished
@@ -301,7 +301,7 @@ export interface Transport {
 }
 
 // ---------------------------------------------------------------------------
-// Error taxonomy (DESIGN.md §7) — tool results, never raw throws past the tool
+// Error taxonomy (ARCHITECTURE.md Law 8) — tool results, never raw throws past the tool
 // ---------------------------------------------------------------------------
 
 export type DelegateErrorCode =
@@ -331,13 +331,13 @@ export interface SpawnTier {
 
 export interface DelegateError extends Error {
 	code: DelegateErrorCode;
-	/** Guidance embedded for the orchestrator model (DESIGN.md §7 table). */
+	/** Guidance embedded for the orchestrator model (the GUIDANCE table below). */
 	guidance: string;
 	cause?: unknown;
 }
 
 // ---------------------------------------------------------------------------
-// Budget governor (DESIGN.md §14) — enforced, config defaults, per-session
+// Budget governor — enforced, config defaults, per-session
 // ---------------------------------------------------------------------------
 
 export interface SessionUsage {
@@ -358,7 +358,7 @@ export interface SessionUsage {
  *  burn warning. */
 export const BUDGET_WARN_FRACTION = 0.8;
 
-/** Context-gauge thresholds (DESIGN.md §20) — the operator's restart line.
+/** Context-gauge thresholds — the operator's restart line.
  *  Derived ×100 from BUDGET_WARN_FRACTION (exact in IEEE-754: 0.8*100 === 80). */
 export const CONTEXT_WARN_PCT = BUDGET_WARN_FRACTION * 100;
 export const CONTEXT_CRITICAL_PCT = 90;
@@ -397,7 +397,7 @@ export const DEFAULT_BUDGET_TOKENS = 150_000;
 export const BUDGET_CONFIG_PATH = join(getAgentDir(), "pi-delegate.config.json");
 
 // ---------------------------------------------------------------------------
-// Report contract (DESIGN.md §6) — strict, fixed schema
+// Report contract — strict, fixed schema
 // ---------------------------------------------------------------------------
 
 export interface ReportEvidence {
@@ -418,9 +418,9 @@ export interface WorkerReport {
 /** Name rules from the delegate skill: [a-z][a-z0-9_-]{0,31}, unique among live agents. */
 export const WORKER_NAME_RE = /^[a-z][a-z0-9_-]{0,31}$/;
 
-/** Canonical example report (DESIGN.md §6) — the single source of truth for the
+/** Canonical example report — the single source of truth for the
  *  base report shape. Embedded into every worker prompt via briefPrompt. Since
- *  v1.2 a brief MAY carry a reportSchema fragment (DESIGN.md §16–§17); when
+ *  v1.2 a brief MAY carry a reportSchema fragment; when
  *  present, briefPrompt echoes it on top of this base canon. "worker" is a
  *  placeholder; callers substitute the canonical name. Canon = minimum, not a
  *  whitelist: extra fields stay allowed. */
@@ -441,7 +441,7 @@ export const REPORT_EXAMPLE: WorkerReport = {
 	 *  v1.2: standing mailbox line — questions/answers are files, never panes.
 	 *  Report contract: required fields + canonical example (REPORT_EXAMPLE,
 	 *  worker name substituted). Since v1.2 a brief MAY declare a reportSchema
-	 *  fragment (DESIGN.md §16–§17); when the caller passes one, it is echoed
+	 *  fragment; when the caller passes one, it is echoed
 	 *  verbatim after the base contract so the worker sees the exact schema its
 	 *  report will be validated against at settle. */
 export function briefPrompt(briefPath: string, workerName: string, briefSchema?: Record<string, unknown> | null): string {
@@ -453,7 +453,7 @@ export function briefPrompt(briefPath: string, workerName: string, briefSchema?:
 }
 
 // ---------------------------------------------------------------------------
-// Mailbox envelopes (DESIGN.md §12) — file-based two-way channel
+// Mailbox envelopes — file-based two-way channel
 // ---------------------------------------------------------------------------
 
 /** Worker → orchestrator question (q-<name>.json). */
@@ -486,7 +486,7 @@ export function isQuestionEnvelope(v: unknown): v is QuestionEnvelope {
 }
 
 // ---------------------------------------------------------------------------
-// Progress pings (DESIGN.md §18) — worker → orchestrator liveness events
+// Progress pings — worker → orchestrator liveness events
 // ---------------------------------------------------------------------------
 
 /** One progress ping line in p-<name>.jsonl (append-only). */
@@ -513,7 +513,7 @@ export function isProgressEvent(v: unknown): v is ProgressEvent {
 	);
 }
 
-/** v1.8 (DESIGN.md §19.1b): true when the session JSONL contains at least one
+/** v1.8: true when the session JSONL contains at least one
  *  assistant message — proof the prompt was consumed and the agent replied.
  *  Used to distinguish "idle because never started" from "idle because already
  *  finished" when a watcher attaches after herdr aged done→idle (observed
@@ -608,7 +608,7 @@ export function delegateErrorWithDetail(
 	);
 }
 
-/** Guidance text per DESIGN.md §7 — embedded in every typed error.
+/** Guidance text — embedded in every typed error.
  *  Migration stage 1: EXPORTED as the single writer of the base hint text —
  *  adapters may only append a detail clause (delegateErrorWithDetail); the
  *  single-source pin in test/error-code-check.ts asserts the base phrasing

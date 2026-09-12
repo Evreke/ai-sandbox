@@ -1,9 +1,9 @@
 # pi-delegate — agent glossary
 
 > **Binding constitution.** `ARCHITECTURE.md` (in this directory) binds every
-> agent that touches this extension; the ten laws there are the layer above
-> DESIGN.md. Where ARCHITECTURE.md and the prose conventions in this file or in
-> DESIGN.md conflict, ARCHITECTURE.md outranks them.
+> agent that touches this extension; its ten laws are the binding layer for
+> all work on the codebase. Where ARCHITECTURE.md and the prose conventions in
+> this file conflict, ARCHITECTURE.md outranks them.
 
 ## Documentation — closed set (operator law)
 
@@ -13,9 +13,8 @@ Documents are read by agents: they cost tokens and rot. The extension's document
 - **ARCHITECTURE.md** — the strict guideline: binding rules and their enforcement, no behavioral narrative.
 - **README.md** — what the extension is, how to install and configure it, operational notes. Nothing else.
 - **CHANGELOG.md** — release history (Keep a Changelog; released sections immutable).
-- **DESIGN.md** — the single grandfathered artifact: a FROZEN historical design log (banner at top); not maintained.
 
-Everything else is garbage — do NOT create it in this repo: no plans, TL;DRs, acceptance records, session instructions, stage guides, notes or decision archaeology. Agent-to-agent artifacts (briefs, reports, plans) go to the exchange dir, never the repo. Documents carry ONLY current truth and plans: no rejected approaches, no interim states, no who-decided-what — history lives in git commits and CHANGELOG. Do not write rottable status prose into living docs; prefer the code's own state. A new `.md` file requires the operator's explicit decision.
+Everything else is garbage — do NOT create it in this repo: no plans, TL;DRs, acceptance records, session instructions, stage guides, notes, design logs/chronicles or decision archaeology. Agent-to-agent artifacts (briefs, reports, plans) go to the exchange dir, never the repo. Documents carry ONLY current truth and plans: no rejected approaches, no interim states, no who-decided-what — history lives in git commits and CHANGELOG. Do not write rottable status prose into living docs; prefer the code's own state. A new `.md` file requires the operator's explicit decision.
 
 One rule: **"worktree" names the isolation mechanism, "checkout" names the path.** They are complementary, never synonyms — code pairs them deliberately (`Placement.kind: "worktree"` carries a `checkoutPath`).
 
@@ -27,7 +26,7 @@ One rule: **"worktree" names the isolation mechanism, "checkout" names the path.
 - **checkout / `checkoutPath`** — the directory an agent runs in. A wt-workspace has its own; a `tab` shares the orchestrator's. Never use "checkout" as a name for the placement kind.
 - **repo group** — herdr's UI grouping of workspaces by `repo_key`: one git repo → one tree in the sidebar (master = tree node, wt-workspaces = its leaves). Not parent/child — herdr has no workspace hierarchy; the tree is render-time derivation from `repo_key` + `is_linked_worktree`, and `repo_key` is the ONLY grouping mechanism (operator-verified 2026-09-07).
 - **leaf** — a wt-workspace nested under an orchestrator's worktree (planned; not yet implemented). Nested leaves need `--cwd <master-root> --path <orchestrator-wt>/<name>`. UI-wise every wt-workspace of the repo is already a leaf of the repo tree.
-- **WorkerHost** — the backend-neutral seam every tool talks to; the seam type is `Transport` in `src/host.ts`. **host** — the configured backend implementation, chosen ONCE in `index.ts` from the config's `"host"` key (default `"herdr"`). **backend** — the `placement.backend` tag persisted in manifest records (`"herdr"` / `"fake"`), alongside the legacy id fields. **placementRef** — the opaque, adapter-defined placement handle (`herdr:pane:<id>` / `fake:<n>`): only the owning adapter decodes it; no raw backend id crosses the seam. Behavioral truth lives in the `src/host.ts` and `src/herdr/host.ts` module contracts; DESIGN.md §24 is the decision record.
+- **WorkerHost** — the backend-neutral seam every tool talks to; the seam type is `Transport` in `src/host.ts`. **host** — the configured backend implementation, chosen ONCE in `index.ts` from the config's `"host"` key (default `"herdr"`). **backend** — the `placement.backend` tag persisted in manifest records (`"herdr"` / `"fake"`), alongside the legacy id fields. **placementRef** — the opaque, adapter-defined placement handle (`herdr:pane:<id>` / `fake:<n>`): only the owning adapter decodes it; no raw backend id crosses the seam. Behavioral truth lives in the `src/host.ts` and `src/herdr/host.ts` module contracts.
 
 ## Authority model
 

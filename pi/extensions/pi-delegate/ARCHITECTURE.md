@@ -3,10 +3,11 @@
 > Drafted 2026-09-11 from the four-way healing audit of the 1.16.1 line
 > (pi-compliance, architecture, reliability, release-ops auditors, ~40
 > evidence-backed findings). This document binds every future developer agent
-> — human or machine — that touches this repository. It is the layer above
-> DESIGN.md: DESIGN says how the system is built, this says what we will and
-> will not do to it, and why, so the next generation of agents does not have
-> to rediscover these rules through incidents.
+> — human or machine — that touches this repository. It is the binding
+> guideline: what we will and will not do to the codebase, and why, so the
+> next generation of agents does not have to rediscover these rules through
+> incidents. Behavioral truth lives in the code's own contracts (ZSDoc at
+> the point of use); operational truth lives in README.md.
 
 ## 0. The audit verdict, in one paragraph
 
@@ -170,7 +171,7 @@ only copy.
   parity-wrapper exception in the herdr CLI runner is documented at the site).
 - The deliberate deviation from pi's throw-to-signal-error convention
   (structured results instead of throws, because detach/timeouts are
-  control flow, not failures) is stated in README and DESIGN, including which
+  control flow, not failures) is stated in README, including which
   code classes are control flow and which are genuine failures.
 - Anything that can wake or notify a session defaults to fail-closed
   (ownership gates); anything marked advisory (watcher, fleet UI, archive)
@@ -214,8 +215,8 @@ and self-skipping only with a printed reason.
 - **Audit cadence.** Before every minor release, re-run the four-way audit
   (pi compliance, architecture, reliability, release ops) on the release
   branch. Findings are triaged into the roadmap; none are carried silently.
-- **Documentation is part of the definition of done.** README, DESIGN, and
-  AGENTS.md claims are contracts (Law 2). A behavior change that makes a doc
+- **Documentation is part of the definition of done.** README, CHANGELOG, and
+  law-consistent ZSDoc claims are contracts (Law 2). A behavior change that makes a doc
   claim false is an incomplete change.
 
 ## 3. The frozen surface (restated; never rename)

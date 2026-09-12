@@ -7,7 +7,7 @@
  * commands and the watcher loop).
  * <p>
  * MODULE_CONTRACT: pure value shapes + pure helpers, zero I/O — the
- * structured tool-result contract (DESIGN.md §7: errors are RETURNED as
+ * structured tool-result contract (ARCHITECTURE.md Law 8: errors are RETURNED as
  * failed results with an E_* code, never thrown raw across the tool
  * boundary) plus the error→message/code coercion helpers and the
  * abort-aware sleep. Dependencies: host.ts (DelegateErrorImpl +

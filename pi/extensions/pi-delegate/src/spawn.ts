@@ -1,7 +1,7 @@
 /**
- * pi-delegate — spawn module: everything the orchestrator DOES (DESIGN.md §5.1
- * `delegate` tool, §12 `delegate_mailbox` tool, §16–§18 schema/budget/prompt
- * pipeline, §19 settle/collect, §22 collect-time teardown, §23 release ACK).
+ * pi-delegate — spawn module: everything the orchestrator DOES (the `delegate`
+ * tool, the `delegate_mailbox` tool, the schema/budget/prompt
+ * pipeline, settle/collect, collect-time teardown, the release ACK).
  * <p>
  * MODULE_CONTRACT: orchestrator-side pipeline — worker-name validation, tier/
  * provider/model resolution, dual-gauge budget governor (E_CONTEXT/E_BUDGET),
@@ -32,7 +32,7 @@
  * exchange.ts (manifest/report/mailbox lifecycle + archive), usage.ts
  * (session-JSONL gauges), observe.ts (watch/collect config resolution),
  * fleet.ts (render helpers + idle nudge). Never imports the transport
- * implementation (dependency rule, DESIGN.md §4.1 — the Transport instance is
+ * implementation (dependency rule, ARCHITECTURE.md Law 4 — the Transport instance is
  * injected from index.ts). Import graph: spawn is the root consumer —
  * transport/exchange/fleet/observe are all imported BY this module and none
  * of them import it (DAG holds, no module-eval cycles).
@@ -192,20 +192,20 @@ import {
 
 
 // ===========================================================================
-// SECTION 2/2 — delegate tool (DESIGN.md §5.1, §16–§22)
+// SECTION 2/2 — delegate tool
 // (verbatim move of the old src/tools/delegate.ts; its review-verified header
 // comment is preserved)
 // ===========================================================================
 
 /**
- * pi-delegate — `delegate` tool (DESIGN.md §5.1).
+ * pi-delegate — `delegate` tool.
  *
  * OWNERSHIP: worker B (impl-tools).
  *
  * Spawns one herdr worker, briefs it, and blocks until it settles, then
  * validates the report file. BLOCKING by design; Esc (abort signal) detaches —
  * the worker keeps running and is recoverable via `delegate_status`. Errors are
- * surfaced as structured tool results (DESIGN.md §7), never thrown raw.
+ * surfaced as structured tool results (ARCHITECTURE.md Law 8), never thrown raw.
  *
  * Manifest discipline: the ManifestWorker record is written immediately after
  * place() succeeds and BEFORE startAgent — a failed start still leaves a real
@@ -231,7 +231,7 @@ import {
 export const RETRY_MANDATE =
 	"The retry MUST use a NEW worker name (e.g. <name>-r2) — the original name stays taken by the settled agent.";
 
-/** Interactive-readiness timeout for `agent start` (DESIGN.md §5.1 step 5). */
+/** Interactive-readiness timeout for `agent start`. */
 const START_TIMEOUT_MS = 120_000;
 /** Max wait for prompt *submission* to be accepted (not for settle). */
 const SUBMIT_TIMEOUT_MS = 30_000;
@@ -248,7 +248,7 @@ const WAIT_CAP_MS = 120_000;
 function probeExchangeDir(): string {
 	return probeDirPathFor(exchangeRoot());
 }
-/** Fixed probe prompt (DESIGN.md §5.1 step 4). */
+/** Fixed probe prompt. */
 const PROBE_PROMPT = "Reply with exactly: OUTPUT: OK";
 /** Settle-vs-report race grace window: settle can fire before the report file
  *  hits the disk (or mid-turn idle blip), so a missing/unparseable report is
@@ -333,7 +333,7 @@ async function isParseFailure(path: string): Promise<boolean> {
 	}
 }
 
-/** Fleet journal (DESIGN.md §19.4): best-effort session entry, headless-safe.
+/** Fleet journal: best-effort session entry, headless-safe.
  *  Guarded: only when appendEntry is available on the api object.
  * <p>
  * FUNCTION_CONTRACT:
@@ -540,7 +540,7 @@ function resolveBriefReportSchema(input: SchemaResolutionInput): {
 		// (via pi's CONFIG_DIR_NAME — the literal ".pi" honoring pi's
 		// project-config convention) and ~/.pi/agent/pi-delegate-schemas/
 		// (library type files <name>.json).
-		// Two-tier schema library (DESIGN.md §16): project-local
+		// Two-tier schema library: project-local
 		// <cwd>/.pi/delegate-schemas/ searched FIRST, user-level second.
 		resolved = resolveReportSchema(briefPath, resolve(cwd, CONFIG_DIR_NAME, "delegate-schemas"));
 	} catch (err) {
@@ -581,7 +581,7 @@ function resolveBriefReportSchema(input: SchemaResolutionInput): {
  * Output: none (registers the tool as a side effect)
  * Guarantees:
  *   - execute() NEVER throws past the tool boundary: every failure shape
- *     returns a structured tool result with an E_* code (DESIGN.md §7)
+ *     returns a structured tool result with an E_* code (ARCHITECTURE.md Law 8)
  *   - blocking by design up to the settle gate (or explicit waitMs); Esc/abort
  *     detaches — after the agent exists the worker is NEVER killed
  *   - the report file is the completion criterion; probes are the exception
@@ -634,7 +634,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			RETRY_MANDATE,
 			"delegate mode 'probe' is OPTIONAL (enterprise cost): only for untrusted environments — the first real worker's structured failures (E_PLACE/E_START/E_NAME) are just as cheap a smoke signal. Probes verify the pane reply \"OUTPUT: OK\" by streaming readback.",
 			"delegate probe workers NEVER write a report file — a 'probe OK/FAIL' result is final by itself; never wait for or read a probe's report-<name>.json (only real workers produce reports).",
-			"After delegate returns E_TIMEOUT or a detach, END YOUR TURN: the background watcher (DESIGN.md §21) wakes you when the report lands, a question arrives, grill_deck is invoked, context goes critical, or the worker dies. Never sleep in bash to wait for a worker and never re-call delegate to wait; delegate_status polling is the only in-turn alternative (bash sleep only when the watcher is absent — old extension build).",
+			"After delegate returns E_TIMEOUT or a detach, END YOUR TURN: the background watcher wakes you when the report lands, a question arrives, grill_deck is invoked, context goes critical, or the worker dies. Never sleep in bash to wait for a worker and never re-call delegate to wait; delegate_status polling is the only in-turn alternative (bash sleep only when the watcher is absent — old extension build).",
 		],
 		parameters: delegateParams,
 		renderCall(args, theme: Theme) {
@@ -742,7 +742,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			}
 			const manifestDir = exchangeDir ?? probeExchangeDir();
 
-			// Dual-gauge governor (DESIGN.md §20): refuse to re-spawn a worker whose
+			// Dual-gauge governor: refuse to re-spawn a worker whose
 			// recorded session tripped EITHER gauge — context % (primary, pi's own
 			// formula) or output budget (secondary, when set).
 			const maxPct = params.maxContextPct ?? CONTEXT_WARN_PCT;
@@ -771,7 +771,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				}
 			}
 
-			// v1.5 (DESIGN.md §16–§17): resolve the brief's report schema — inline
+			// v1.5: resolve the brief's report schema — inline
 			// fragment or named library type — once, BEFORE place(): a bad schema must
 			// never waste a worker. On {ok:false} the spawn is rejected with E_BRIEF.
 			// Wave 3 (step 4.5): the phase is a pure function over explicit args
@@ -882,7 +882,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			// manifest-update try, so every result path can carry it).
 			let ownerWarning = "";
 			try {
-				// v1.5 (DESIGN.md §17): record the resolved-schema provenance as a plain
+				// v1.5: record the resolved-schema provenance as a plain
 				// JSON manifest key — ManifestWorker now declares the field (quality fix
 				// A7), so the entry type-checks without a cast.
 				// The E_TIER guard above guarantees provider/model/thinking are defined
@@ -1037,7 +1037,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				);
 			}
 			const canonical = start.name;
-			// Budget accounting source (DESIGN.md §14): the worker's session JSONL
+			// Budget accounting source: the worker's session JSONL
 			// path, captured by the transport from the herdr agent start result
 			// (result.agent.agent_session.value) and recorded in the manifest below.
 			// v1.9: mutable — when herdr exposes no session path (current builds:
@@ -1053,7 +1053,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			// live and the canonical name is known.
 			journal(pi, "spawn", canonical, "started");
 
-			// Tier-mismatch guard (DESIGN.md §19.4): when the brief text declares a
+			// Tier-mismatch guard: when the brief text declares a
 			// tier ("frontier tier"/"flash tier"/"execution tier") and the spawned
 			// model contradicts it, surface a warning on every terminal result.
 			let tierWarning = "";
@@ -1076,7 +1076,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			// report collection use the canonical name + report path. Also records the
 			// session JSONL path (when the transport exposed one) and the resolved
 			// effective budget — the manifest entry is the budget governor's accounting
-			// source (DESIGN.md §14).
+			// source.
 			{
 				const canonicalReportPath = reportPathFor(manifestDir, canonical);
 				try {
@@ -1092,7 +1092,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 									...(sessionPath ? { sessionPath } : {}),
 									budgetTokens: params.budgetTokens,
 									maxContextPct: maxPct,
-									// v1.5 (DESIGN.md §17): record the MERGED FRAGMENT (not just the
+									// v1.5: record the MERGED FRAGMENT (not just the
 									// name chain) so collect failures can quote what the report was
 									// held to. ManifestWorker declares the field (quality fix A7).
 									...(resolvedSchema ? { reportSchemaFragment: resolvedSchema } : {}),
@@ -1128,7 +1128,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			// Raises: never
 			// EXTERNAL_DEPENDENCY: filesystem — the worker's pi session JSONL (via
 			//   parseSessionUsage) for tokens/turns.
-			// Terminal-result gauge accounting (DESIGN.md §20): the DUAL gauge line is
+			// Terminal-result gauge accounting: the DUAL gauge line is
 			// appended to every terminal result text — ctx% primary (pi's formula),
 			// output-budget secondary (when set), turns tripwire — with escalation
 			// warnings at the 80/90 context lines and over-output-budget notice.
@@ -1191,7 +1191,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			//   - fires only when zero workers are working/blocked; any failure
 			//     (herdr unreachable) is swallowed — advisory only
 			// Raises: never
-			// Last-live-worker nudge (DESIGN.md §19.4): when no worker is live
+			// Last-live-worker nudge: when no worker is live
 			// (working/blocked) anymore after this collect, fire notifyFleetIdle with
 			// the task manifest's worker count. Advisory — never affects outcomes.
 			const maybeNotifyFleetIdle = async (): Promise<void> => {
@@ -1227,7 +1227,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			// Raises: never (all sub-steps are guarded)
 			// Success result builder — shared by the normal path, the fallback-path
 			// collect (fix: requested-name report) and the detached-after-settle path.
-			// v1.12.1 lifecycle hygiene (DESIGN.md §22): after a VALID strict collect
+			// v1.12.1 lifecycle hygiene: after a VALID strict collect
 			// (report delivered, collectedAt stamped) the worker is torn down
 			// automatically — the pane/worktree has served its purpose. USER DECISIONS
 			// locked: default ON (collect.teardownAfterCollect), grace 0, only on VALID
@@ -1284,7 +1284,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 						? `worktree, branch ${placement.branch ?? branch}`
 						: "tab (shared checkout)";
 				const b = gaugeSummary();
-				// Archive on successful collect — pass OR fail verdict (DESIGN.md §19.3).
+				// Archive on successful collect — pass OR fail verdict.
 				// Best-effort by contract: null/throw → warning line, never an error.
 				// Wave 4 item 6 (reliability finding 7): the failure REASON is
 				// surfaced in the note ("archive unavailable: <why>") instead of a
@@ -1354,7 +1354,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				}
 				const collectedStampNote = collectedNote ? `\nWarning: ${collectedNote}` : "";
 				journal(pi, "collect", canonical, report.status, archivePath ?? undefined);
-				// Last live worker settled → teardown nudge (DESIGN.md §19.4).
+				// Last live worker settled → teardown nudge.
 				void maybeNotifyFleetIdle();
 				// v1.12.1: the collect is DONE here (report valid, collectedAt
 				// stamped) — the auto-teardown below can only append an advisory
@@ -1416,7 +1416,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			// FUNCTION_CONTRACT:
 			// Input: none (closure: reportPath, canonical name, requested name, briefSchema)
 			// Output: {verdict, usedPath, fallbackUsed} — verdict from
-			//   validateReportAgainstSchema (base ∩ brief fragment, DESIGN.md §11)
+			//   validateReportAgainstSchema (base ∩ brief fragment)
 			// Guarantees:
 			//   - canonical-name report first; when names differ and the canonical
 			//     path does not validate, the requested-name path is tried as fallback
@@ -1430,7 +1430,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				usedPath: string;
 				fallbackUsed: boolean;
 			} => {
-				// v1.2: base ∩ brief-fragment validation (DESIGN.md §11) — the declared
+				// v1.2: base ∩ brief-fragment validation — the declared
 				// schema applies on the first pass and on every grace recheck alike.
 				const verdict = validateReportAgainstSchema(reportPath, canonical, briefSchema);
 				if (verdict.ok || canonical === params.name) {
@@ -1512,7 +1512,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 					{ canonical, placement, stderr: errText(err) },
 				);
 			}
-			// v1.9 (DESIGN.md §19.1c): current herdr builds do not expose the
+			// v1.9: current herdr builds do not expose the
 			// worker's session path (agent get/start carry no agent_session) —
 			// resolve it from pi's session storage so the aged-finish proof, the
 			// dual gauges and probe salvage keep working. Best-effort: no candidate
@@ -1742,7 +1742,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 
 			// --- Probe flow: no report validation; pane status is the verdict.
 			if (isProbe) {
-				// Honest-settle v1.6 (DESIGN.md §19.1, R6 blocker fix): a never-started
+				// Honest-settle v1.6 (R6 blocker fix): a never-started
 				// probe is probe FAIL — never let the pane status produce a spurious
 				// 'probe OK' (the original spurious-pass bug half-survived here).
 				if (settle.kind === "never-started") {
@@ -1950,7 +1950,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			}
 
 			const missing = !(await reportExists(collected.usedPath));
-			// Honest-settle v1.6 (DESIGN.md §19.1): never-started → the prompt was
+			// Honest-settle v1.6: never-started → the prompt was
 			// never consumed and the worker never started — a distinct terminal code
 			// instead of E_REPORT_MISSING. Migration stage 3 (audit step 8): the
 			// outcome is the union KIND from the seam (the flag set is gone).
@@ -1965,7 +1965,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 				: missing
 					? `no report file at ${collected.usedPath} after settle (status: ${settle.status})`
 					: `report at ${collected.usedPath} failed schema validation: ${collected.verdict.error}`;
-			// v1.2 (DESIGN.md §11): distinguish a brief-reportSchema violation — base
+			// v1.2: distinguish a brief-reportSchema violation — base
 			// schema passes but the declared fragment rejects. The fragment error is
 			// already quoted verbatim in `what`; add dedicated guidance.
 			let schemaNote = "";
@@ -1975,7 +1975,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 					schemaNote =
 						"\nThis is a brief-reportSchema violation: the report violates the brief's reportSchema — " +
 						"either the worker or the schema fragment is wrong; compare evidence, then fix the brief or re-brief.";
-					// v1.5 (DESIGN.md §17): the audit trail answers "what schema was this
+					// v1.5: the audit trail answers "what schema was this
 					// report held to" — quote the merged fragment (truncated) + provenance.
 					if (resolvedSchema) {
 						const fragmentJson = JSON.stringify(resolvedSchema);
@@ -1989,7 +1989,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 			}
 			const b = gaugeSummary();
 			// A settle (even a failed one) that empties the fleet still fires the
-			// teardown nudge (DESIGN.md §19.4).
+			// teardown nudge.
 			void maybeNotifyFleetIdle();
 			return fail(
 				code,

@@ -1,6 +1,6 @@
 /**
- * pi-delegate — mailbox-tool: the `delegate_mailbox` tool (DESIGN.md §12,
- * §23) — extracted verbatim from spawn.ts (Wave 3, step 4).
+ * pi-delegate — mailbox-tool: the `delegate_mailbox` tool (two-way mailbox
+ * + retire-ack lifecycle) — extracted verbatim from spawn.ts (Wave 3, step 4).
  *
  * OWNERSHIP: worker B2 (impl-tools2).
  *
@@ -29,8 +29,8 @@
  * (question archive paths), mailbox-store.ts (envelope I/O),
  * manifest-store.ts (task-dir scan), host.ts (WORKER_NAME_RE, briefPrompt,
  * DelegateErrorImpl, the Transport seam).
- * Never imports the transport implementation (dependency rule, DESIGN.md
- * §4.1 — the Transport instance is injected from index.ts).
+ * Never imports the transport implementation (dependency rule, ARCHITECTURE.md
+ * Law 4 — the Transport instance is injected from index.ts).
  */
 
 import { rename, rm } from "node:fs/promises";
@@ -57,13 +57,13 @@ import { resolveWatchConfig } from "./watch-config.ts";
 import { clampLines, renderDelegateLines } from "./fleet.ts";
 import { WORKER_NAME_RE, type QuestionEnvelope, type Transport } from "./host.ts";
 
-// SECTION 1/2 — delegate_mailbox tool (DESIGN.md §12, §23)
+// SECTION 1/2 — delegate_mailbox tool (mailbox + retire ACK)
 // (verbatim move of the old src/tools/mailbox.ts; its review-verified header
 // comment is preserved)
 // ===========================================================================
 
 /**
- * pi-delegate — `delegate_mailbox` tool (DESIGN.md §12).
+ * pi-delegate — `delegate_mailbox` tool (two-way file mailbox).
  *
  * OWNERSHIP: worker B2 (impl-tools2).
  *
@@ -133,7 +133,7 @@ export function registerMailboxTool(pi: import("@earendil-works/pi-coding-agent"
 		name: "delegate_mailbox",
 		label: "Delegate Mailbox",
 		description:
-			"Two-way file mailbox with a delegate worker (DESIGN.md §12). action 'read' shows pending worker " +
+			"Two-way file mailbox with a delegate worker. action 'read' shows pending worker " +
 			"questions (q-<name>.json) without mutating anything; 'answer' posts a-<name>.json with your reply and " +
 			"nudges an idle/blocked worker to continue; 'steer' posts mid-run guidance the same way; " +
 			"'release' (§23) posts release-<name>.json — the retire ACK: the watcher closes the worker's pane " +

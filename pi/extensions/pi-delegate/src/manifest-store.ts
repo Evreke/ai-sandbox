@@ -111,16 +111,16 @@ export interface ManifestWorker {
 	model: string;
 	thinking: string;
 	startedAt: string; // ISO 8601
-	/** Worker session JSONL path (budget accounting, DESIGN.md §14) — captured
+	/** Worker session JSONL path (budget accounting) — captured
 	 *  from the herdr `agent start` result when the transport exposes it. */
 	sessionPath?: string;
 	/** Resolved effective budget for the spawn (per-call > config > default),
 	 *  recorded so delegate_status can display usage against the real budget. */
 	budgetTokens?: number;
-	/** v1.5 (DESIGN.md §17): resolved report-schema provenance chain
+	/** v1.5: resolved report-schema provenance chain
 	 *  ("inline" / library type names, in resolution order). */
 	schemaProvenance?: string[];
-	/** v1.5 (DESIGN.md §17): MERGED report-schema fragment the report was held
+	/** v1.5: MERGED report-schema fragment the report was held
 	 *  to — quoted when collect rejects a report, so failures are auditable. */
 	reportSchemaFragment?: Record<string, unknown>;
 	/** ISO 8601 — set by COLLECT only, on successful report delivery. The

@@ -3,7 +3,7 @@
  *
  * Run with: bun test/retire-check.ts   (from the extension dir)
  *
- * The approved state machine (DESIGN.md §23):
+ * The approved state machine:
  *   RETIRABLE (evaluated by the watcher) = valid report (base + brief
  *   fragment) AND drained mailbox AND herdr status done/idle.
  *   CLOSE on ACK (release-<name>.json) or TTL (watch.retireTtlMs since the

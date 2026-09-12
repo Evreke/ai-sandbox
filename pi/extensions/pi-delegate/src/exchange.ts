@@ -214,7 +214,7 @@ export {
 // ============================================================================
 
 /**
- * pi-delegate — exchange dir conventions and manifest (DESIGN.md §6).
+ * pi-delegate — exchange dir conventions and manifest.
  *
  * OWNERSHIP: contract authored by the tech lead; implementation owned by
  * worker A (impl-transport). Worker B imports but never edits this file.
@@ -558,7 +558,7 @@ export function teardownLogLine(line: string): string {
 
 
 // ---------------------------------------------------------------------------
-// v1.2 contracts — brief-declared schemas + mailbox (DESIGN.md §11–§12).
+// v1.2 contracts — brief-declared schemas + mailbox.
 // Contract authored by the tech lead; implementation owned by worker A2
 // (impl-mailbox). Worker B2 imports but never edits this file.
 // ---------------------------------------------------------------------------
@@ -567,8 +567,8 @@ export function teardownLogLine(line: string): string {
 
 
 // ---------------------------------------------------------------------------
-// v1.5 contracts — schema library/inheritance + progress pings
-// (DESIGN.md §16–§18). Contract authored by the tech lead; implementation
+// v1.5 contracts — schema library/inheritance + progress pings.
+// Contract authored by the tech lead; implementation
 // owned by worker A5 (impl-schemas). Worker B5 imports, never edits.
 // ---------------------------------------------------------------------------
 
