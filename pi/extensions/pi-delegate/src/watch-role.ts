@@ -1,8 +1,10 @@
 /**
  * pi-delegate — canonical ownership verdict for the watcher (stage A).
  * <p>
- * MODULE_CONTRACT: the ONE source of truth for wake-ownership semantics
- * (WATCHER-ARCHITECTURE-GUIDELINE.md §3.4–§3.6). Three consumers fold the
+ * MODULE_CONTRACT: the ONE source of truth for wake-ownership semantics —
+ * the role table and the ownership verdicts live HERE (this module is the
+ * canon; test/ownership-check.ts and test/composer-check.ts pin it). Three
+ * consumers fold the
  * same verdict into their own vocabulary: delivery (observe.ts
  * detectWorkerEvents — deliver only on a proven owner), the mount gate
  * (observe.ts isWorkerSession/ownsChildManifests via sessionRole) and the UI
@@ -11,19 +13,19 @@
  * structurally here — because observe.ts already imports fleet.ts, so
  * fleet.ts cannot import observe.ts (a module cycle breaks the extension
  * loader; field lesson, commit 83ccaab). No herdr-adapter imports
- * (dependency rule, guideline §7.2). No filesystem, no transport, no clock:
+ * (dependency rule, ARCHITECTURE.md Law 6). No filesystem, no transport, no clock:
  * pure functions over plain data, tolerant of garbage fields by design (a
  * manifest is untyped JSON at the edge).
  * Critical invariants:
  *   - delivery is fail-closed: only the verdict "mine" delivers; the
  *     "no-owner" edge may be rolled back ONLY by the explicit
  *     watch.legacyFailOpen flag; the "no-self-id" edge has NO configuration
- *     escape (guideline §3.6) — the flag never reaches it;
- *   - worker-level orchestratorSessionPath is the canon owner field
- *     (guideline §3.2); masterSessionPath is fleet accounting and only a
+ *     escape (fail-closed, ARCHITECTURE.md Law 8) — the flag never reaches it;
+ *   - worker-level orchestratorSessionPath is the canon owner field;
+ *     masterSessionPath is fleet accounting and only a
  *     fallback (the B1 narrowing lives inside the "foreign" verdict);
  *   - this module never WRITES owner fields — ownership is recorded by the
- *     spawn path only (guideline §3.3).
+ *     spawn path only.
  * Windows session-path policy (TZ 1.17.0 §3.4): every session-path identity
  * compare in this module goes through the ONE helper sameSessionPath —
  * byte-identical `===` on POSIX (Linux FS is case-sensitive; casefolding
@@ -39,7 +41,8 @@
  * read as absent), never throws.
  */
 
-/** The four wake-ownership verdicts (guideline §3.5/§3.6 vocabulary). */
+/** The four wake-ownership verdicts (the delivery vocabulary of this
+ *  module). */
 export type AudienceVerdict =
 	/** Proven owner — this session recorded itself as the worker's owner. */
 	| "mine"
@@ -50,13 +53,14 @@ export type AudienceVerdict =
 	 *  when the caller's legacyFailOpen flag is true. */
 	| "no-owner"
 	/** This session's identity is unreadable (no session file path).
-	 *  NEVER delivers — the flag does not control this edge (§3.6). */
+	 *  NEVER delivers — the flag does not control this edge (fail-closed,
+	 *  ARCHITECTURE.md Law 8). */
 	| "no-self-id";
 
 /** The owner-recording fields a manifest may carry (all optional, all
  *  untyped JSON at the edge — non-string garbage reads as absent). */
 export interface OwnerFields {
-	/** Worker-level owner (the canon, guideline §3.2): the spawning
+	/** Worker-level owner (the canon): the spawning
 	 *  orchestrator's session JSONL path, written by spawn at record time. */
 	orchestratorSessionPath?: string;
 	/** Manifest-level fleet owner (F1, written since 1.15.0 by the FIRST
@@ -140,7 +144,7 @@ function nonEmptyString(v: unknown): string | undefined {
 
 /**
  * The canonical wake-ownership verdict for ONE worker entry as seen from ONE
- * session (guideline §3.5/§3.6). Pure, tolerant, no I/O.
+ * session (workerAudienceMatch's four verdicts). Pure, tolerant, no I/O.
  * <p>
  * FUNCTION_CONTRACT:
  * Input:
@@ -159,12 +163,12 @@ function nonEmptyString(v: unknown): string | undefined {
  *     on "mine"; on "no-owner" deliver only when legacyFailOpen is true; on
  *     "foreign" and "no-self-id" NEVER deliver;
  *   - the "no-self-id" edge wins over everything: an unreadable identity can
- *     neither prove nor disprove ownership, and §3.6 gives it no
- *     configuration escape — the flag is deliberately NOT consulted when the
+ *     neither prove nor disprove ownership, and the fail-closed law
+ *     (ARCHITECTURE.md Law 8) gives it no escape — the flag is deliberately NOT consulted when the
  *     self-id is missing (a legacyFailOpen:true session with a degraded id
  *     still delivers nothing);
- *   - worker-level owner wins over master-level (guideline §3.2: the canon
- *     is the worker entry's orchestratorSessionPath; masterSessionPath only
+ *   - worker-level owner wins over master-level (the canon is the worker
+ *     entry's orchestratorSessionPath; masterSessionPath only
  *     narrows when the worker-level field is absent — the B1 fallback);
  *   - pure: no I/O, no globals, tolerant of garbage fields, never throws
  * Raises: never
@@ -198,7 +202,8 @@ export function workerAudienceMatch(
 	return sameSessionPath(owner, selfId, opts.platform) ? "mine" : "foreign";
 }
 
-/** The two mount-side roles of the guideline §3.4 table. */
+/** The two mount-side roles of the wake-ownership role table (this module's
+ *  sessionRole). */
 export interface SessionRole {
 	/** True when this session IS one of the manifest's workers (a fleet row,
 	 *  not an audience): EXACT match between the entry's own `sessionPath`
@@ -209,11 +214,11 @@ export interface SessionRole {
 	 *  poisoned the gate for every future session started in that cwd (an
 	 *  orchestrator silently lost its watcher). A cwd match alone proves
 	 *  nothing; unproven reads as "not a worker" and the session mounts
-	 *  (harmless: delivery stays fail-closed, guideline §3.6). */
+	 *  (harmless: delivery stays fail-closed — ARCHITECTURE.md Law 8). */
 	isWorker: boolean;
 	/** True only when some worker entry names this session's PROVEN
 	 *  sessionFile as its orchestrator — the tier-1 worker-orchestrator
-	 *  exception (guideline §3.4): such a session stays an audience for its
+	 *  exception (the role table's tier-1 case): such a session stays an audience for its
 	 *  own children. Always false for a degraded self-id. */
 	ownsChildren: boolean;
 }
@@ -225,7 +230,7 @@ export interface ManifestLike {
 }
 
 /**
- * The single role-table check (guideline §3.4) both mount gates derive from:
+ * The single role-table check both mount gates derive from:
  * isWorker (pure worker / worker-orchestrator row) and ownsChildren (the
  * tier-1 exception). The table's four roles map onto it as:
  * pure orchestrator = not isWorker; pure worker = isWorker && !ownsChildren;
@@ -284,7 +289,7 @@ export function sessionRole(
 			// future session in that cwd (stage C fix, BUG_FIX_CONTEXT in the
 			// commit message). A degraded self-id (selfId undefined) can match
 			// nothing → "not a worker" → the session mounts (fail-open toward
-			// MOUNTING; delivery stays fail-closed, guideline §3.6).
+			// MOUNTING; delivery stays fail-closed — ARCHITECTURE.md Law 8).
 			if (
 				!isWorker &&
 				selfId !== undefined &&

@@ -238,7 +238,7 @@ export {
  *   - POSIX default /tmp/exchange — byte-for-byte unchanged
  *   - win32 default %LOCALAPPDATA%\pi\exchange (per-user, durable — Windows
  *     has no reboot-cleans-/tmp convention; %TEMP% can carry spaces and
- *     non-ASCII usernames) — design-windows-mailbox.md §3.1
+ *     non-ASCII usernames)
  *   - $PI_DELEGATE_EXCHANGE_ROOT overrides any default — test-fixture
  *     sandboxing: test manifests are written under mkdtemp dirs, NEVER into
  *     the live root (field lesson 2026-09-10: a PoC test manifest in the

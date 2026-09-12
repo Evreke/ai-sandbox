@@ -1,7 +1,7 @@
 /**
  * host-fake-check — PoC end-to-end drive of the WorkerHost seam on the fake
- * (workerhost inversion, design-host-interface.md §7 charter + brief items 3,
- * 4, 6). Run with: bun run test/host-fake-check.ts
+ * (the backend-neutral seam shipped in 1.16.0 — DESIGN.md §24). Run with:
+ * bun run test/host-fake-check.ts
  *
  * Proves (the brief's «Must prove» items 2 and 4):
  *   1. The seam works with an OPAQUE placementRef end-to-end — place →

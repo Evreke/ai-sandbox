@@ -279,7 +279,7 @@ export async function updateWatchStamps(
 }
 
 // ---------------------------------------------------------------------------
-// Durable delivery store (watcher stage B, guideline §5): the delivered-facts
+// Durable delivery store (watcher stage B): the delivered-facts
 // file the watcher commits AFTER a successful wake-up send. One satellite
 // file per task dir per audience session (delivered-<watcherKey>.json,
 // watcherKey = FNV-1a of the audience session's JSONL path — the same
@@ -293,13 +293,13 @@ export async function updateWatchStamps(
 // reads as an EMPTY store (worst case one repeated wake-up, never a throw).
 // Records are only ever ADDED; removal happens exclusively as garbage
 // collection when a worker really disappears from the manifests — never on
-// a skipped observation or a transient read error (guideline §5.6).
+// a skipped observation or a transient read error.
 // ---------------------------------------------------------------------------
 
 /** Schema version of the delivered-facts file (bump on a breaking change). */
 export const DELIVERED_STORE_SCHEMA_VERSION = 1;
 
-/** One committed delivery fact (guideline §5.2 DeliveryRecord). The task dir
+/** One committed delivery fact. The task dir
  *  and the audience are given by the FILE's location (per-task dir, audience
  *  key in the file name) and are not part of the record key. */
 export interface DeliveryRecord {
@@ -471,7 +471,7 @@ export async function appendDeliveredRecords(
  * Garbage collection: remove ALL delivery records of ONE worker from THIS
  * audience's delivered-facts file. Called ONLY when the worker really
  * disappeared from the manifests (an atomic manifest write removed it) —
- * never on a skipped observation or a transient read error (guideline §5.6).
+ * never on a skipped observation or a transient read error.
  * <p>
  * FUNCTION_CONTRACT:
  * Input:

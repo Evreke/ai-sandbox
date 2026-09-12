@@ -152,8 +152,8 @@ export interface OwnershipOptions {
  *
  * Watcher stage A: this is now a DISPLAY MAPPING over the canonical verdict
  * (workerAudienceMatch in src/watch-role.ts) — the UI keeps NO ownership
- * semantics of its own (guideline §3.4: a "UI says foreign but the wake
- * left" mismatch is a defect; §7.1: the display uses the same owner rules
+ * semantics of its own (watch-role.ts role table: a "UI says foreign but
+ * the wake left" mismatch is a defect; the display uses the same owner rules
  * without its own fail-open). Signature note: the canonical verdict reads
  * the manifest-level masterSessionPath too (the B1 fallback) — hence the
  * fourth parameter, which older call sites omit.
@@ -166,7 +166,8 @@ export interface OwnershipOptions {
  *   convenience for the degraded-self-id worktree corner (the mount gate
  *   dropped the same equivalent in the stage C fix — identity by cwd is
  *   ambiguous); it NEVER feeds delivery — a degraded self-id delivers
- *   nothing in observe.ts, unconditionally (guideline §3.6). Tab workers
+ *   nothing in observe.ts, unconditionally (fail-closed — ARCHITECTURE.md
+ *   Law 8). Tab workers
  *   are never matched by cwd → "unknown".
  */
 export function classifyOwnership(

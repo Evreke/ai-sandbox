@@ -1,6 +1,6 @@
 /**
- * host-parity-check — the WorkerHost parity pin (workerhost inversion,
- * design-host-interface.md §5 "new tests the seam needs", brief Verify item).
+ * host-parity-check — the WorkerHost parity pin (the backend-neutral seam
+ * shipped in 1.16.0 — DESIGN.md §24).
  *
  * The SAME place → manifest → teardown flow is driven against BOTH adapters:
  *   - the in-memory fake (src/host/fake.ts) — always runs (CI leg);
