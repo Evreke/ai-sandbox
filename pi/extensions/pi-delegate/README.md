@@ -169,7 +169,7 @@ for a cycle, not a promise:
   runner, and failing legacy no-owner manifests CLOSED once all writers stamp
   `orchestratorSessionPath`.
 
-- **Report-authoring authority** (candidate end-state): the report file becomes a MACHINE artifact — the worker provides protocol inputs (a DONE/FAILED terminal line, an artifacts list, free-text notes) or typed tool params, and a deterministic composer/tool guarantees schema validity by construction; a hand-written report file is inert (never read as the report). Supersedes status-normalization approaches (rejected: an unbounded synonym whitelist). The interim auto fix-nudge self-heal (1.17.0) cuts the retry cost until this lands.
+- **Report-authoring authority**: the report file becomes a MACHINE artifact — the worker provides protocol inputs (a DONE/FAILED terminal line, an artifacts list, free-text notes) or typed tool params; a deterministic composer/tool guarantees schema validity by construction, and a hand-written report file is inert (never read as the report).
 
 ### Install
 
@@ -334,7 +334,7 @@ done/idle.
   без владельца на fail-CLOSED, когда все писатели проставляют
   `orchestratorSessionPath`.
 
-- **Авторитет авторства отчёта** (кандидат в конечное состояние): файл отчёта становится машинным артефактом — воркер даёт протокольные входы (терминальная строка DONE/FAILED, список артефактов, свободная проза) или типизированные параметры инструмента, а детерминированный композитор/инструмент гарантирует валидность схемы по построению; рукописный файл отчёта инертен (как отчёт не читается). Заменяет подходы нормализации статусов (отклонены: неограниченный справочник синонимов). Промежуточное авто-самоисцеление через fix-nudge (1.17.0) снижает стоимость ретрая до реализации этого направления.
+- **Авторитет авторства отчёта**: файл отчёта становится машинным артефактом — воркер даёт протокольные входы (терминальная строка DONE/FAILED, список артефактов, свободная проза) или типизированные параметры инструмента; детерминированный композитор/инструмент гарантирует валидность схемы по построению, а рукописный файл отчёта инертен (как отчёт не читается).
 
 ### Установка
 
