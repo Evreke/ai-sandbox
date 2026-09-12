@@ -25,7 +25,7 @@
  *       MOUNTS a watcher — worker identity is the entry's own sessionPath
  *       only, so a degraded self proves nothing and reads as "not a worker"
  *       (fail-open toward MOUNTING). Its child wakes are still lost, but on
- *       the DELIVERY side (fail-closed, guideline §3.6) — no longer by a
+ *       the DELIVERY side (fail-closed — ARCHITECTURE Law 8) — no longer by a
  *       spurious pure-worker classification.
  *   M8  Stage C regression: a session whose cwd matches a worker entry's
  *       worktree checkoutPath (ownerless historical entry) is NOT a worker
@@ -152,7 +152,7 @@ rmSync(garbageDir, { recursive: true, force: true });
 // getter throws → sessionFile undefined) can match NOTHING: it reads as
 // "not a worker" and MOUNTS a watcher (fail-open toward MOUNTING). Its
 // child wakes are still lost — but now on the DELIVERY side, fail-closed
-// (guideline §3.6: no proven id delivers nothing), never by a wrong
+// (no proven id delivers nothing — fail-closed), never by a wrong
 // mount-side classification. Harmless: a mounted watcher without a proven
 // identity never produces a wrong wake (stage A invariant).
 {

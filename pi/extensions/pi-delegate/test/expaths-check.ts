@@ -1,6 +1,7 @@
 /**
- * Windows-path contract checks for the exchange layer (design-windows-mailbox.md
- * §3.2 — the single path-builder rule). No Windows host needed: every check
+ * Windows-path contract checks for the exchange layer (the single
+ * path-builder rule — src/expaths.ts; Windows path support shipped in
+ * 1.17.0). No Windows host needed: every check
  * feeds synthetic Windows-shaped strings through the builders with the
  * INJECTED platform (node:path.win32) — pure string asserts, valid on any OS.
  *

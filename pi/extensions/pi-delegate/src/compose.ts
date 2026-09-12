@@ -35,8 +35,8 @@
  *     a DEGRADED tier-1 lead (getSessionFile() throws) is no longer
  *     classified a pure worker — it proves nothing, reads as "not a
  *     worker" and MOUNTS a watcher (fail-open toward MOUNTING). Its child
- *     wakes are still lost, but now on the DELIVERY side, where guideline
- *     §3.6 requires the fail-closed edge: a session without a proven
+ *     wakes are still lost, but now on the DELIVERY side, where the
+ *     fail-closed law (ARCHITECTURE.md Law 8) applies: a session without a proven
  *     session id delivers nothing (documented known behavior).
  * Error modes: none of its own — rethrows only what injected collaborators
  * throw (production collaborators never do).
@@ -94,7 +94,8 @@ export interface SessionWatcherResult {
  *     MOUNTS (stage C: worker identity is the entry's own sessionPath only;
  *     a degraded tier-1 lead therefore mounts a watcher, but delivery is
  *     fail-closed so it still wakes for nothing — the child-wake loss moved
- *     from the mount side to the delivery side, where §3.6 requires it)
+ *     from the mount side to the delivery side, where the fail-closed law
+ *     (ARCHITECTURE.md Law 8) requires it)
  *   - injected collaborators default to the production ones (scan via
  *     manifestStore + the Transport's backend name)
  * Output: { mounted, stop } — whether startWatcher ran, plus the mounted
@@ -106,7 +107,7 @@ export interface SessionWatcherResult {
  *     mounted; worker-orchestrator or peer orchestrator or bystander →
  *     mounted (the F6 two-tier contract, in ONE place). Both gates are thin
  *     wrappers over the canonical role table (src/watch-role.ts sessionRole)
- *     — mount and delivery cannot disagree (guideline §3.4: a "UI says
+ *     — mount and delivery cannot disagree (watch-role.ts role table: a "UI says
  *     foreign but the wake left" mismatch is a defect)
  *   - the prune runs exactly once per call, mounted or not
  * Raises:

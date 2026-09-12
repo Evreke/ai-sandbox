@@ -133,6 +133,41 @@ Judgment stays with the model (decomposition, verification, merge); mechanics be
   emit a one-time volley of repeated wake-ups (the store starts empty and is never
   seeded; the volley is bounded by the ownership gate and the 24 h lookback). On a shared
   machine, updated and not-yet-updated sessions behave differently until all are updated.
+- **Windows: real-host QA gate.** A real-Windows E2E run (delegate spawn →
+  report → wake → mailbox, with herdr for Windows) is NOT part of CI — only
+  Windows-shaped path tests (`path.win32` fixtures) run on the POSIX CI. An
+  operator must run this gate on a real Windows host before claiming Windows
+  support beyond the exchange/path layer; until then the honest claim is "the
+  exchange/path layer is Windows-portable; the host backend on Windows
+  requires herdr for Windows".
+
+### Future work
+
+Open items deliberately carried past 1.17.0 — each is a written plan waiting
+for a cycle, not a promise:
+
+- **`fleet.ts` / `herdr/host.ts` decomposition and the `execute()` shrink**
+  (ARCHITECTURE.md Law 5): `fleet.ts` splits into `ui-text.ts`,
+  `worker-view.ts` (the one shared read-model for widget, overlay and status
+  tool), `fleet-widget.ts`, `fleet-overlay.ts`; `herdr/host.ts` splits into
+  `cli.ts`, `socket.ts`, `map.ts`; the remaining delegate-tool phases become
+  injectable state machines. The user-visible surface stays byte-identical.
+- **Pluggable mailbox store** (`ExchangeStore` / `SqliteStore` seam): a
+  DB-backed store that MIRRORS the agent-facing q-/a- files (the wire format
+  stays fs-by-protocol — workers read paths from prompts). Out of the 1.17.0
+  scope: only the Windows path layer landed.
+- **Orchestrator model selection**: the orchestrator IS the pi session, so
+  its model is invisible to pi-delegate — the mechanism must decide what (if
+  anything) to manage: task-manifest model pinning, sub-orchestrator tiers
+  (already covered by tiers today), mismatch policy (warn vs refuse).
+- **Watcher stage D**: a structured result signal beyond "the model writes a
+  file" — the ownership/delivery rules stay unchanged, only the result-plane
+  sensor moves.
+- **Second backend adapter**: a tmux adapter is unblocked by the
+  placementRef-only seam (touch only the `src/herdr/` neighborhood plus one
+  line in `index.ts`). Also open: a full CI run end-to-end on a GitHub
+  runner, and failing legacy no-owner manifests CLOSED once all writers stamp
+  `orchestratorSessionPath`.
 
 ### Install
 
@@ -263,6 +298,39 @@ done/idle.
   единоразовый залп повторных пробуждений (хранилище стартует пустым и никогда не
   засевается; залп ограничен гейтом владения и суточным горизонтом). На общей машине
   обновлённые и ещё не обновлённые сессии ведут себя по-разному, пока не обновлены все.
+- **Windows: QA-гейт на реальном хосте.** Реальный Windows E2E (delegate spawn →
+  отчёт → wake → почтовый ящик, с herdr for Windows) в CI НЕ выполняется — на POSIX CI
+  идут только Windows-образные тесты путей (`path.win32` фикстуры). Оператор должен
+  прогнать этот гейт на реальном Windows-хосте, прежде чем заявлять поддержку Windows
+  за пределами exchange/path-слоя; до тех пор честная формулировка — «exchange/path-слой
+  переносим на Windows; host-бэкенд на Windows требует herdr for Windows».
+
+### Планы на будущее
+
+Открытые пункты, сознательно перенесённые за 1.17.0, — каждый это записанный план
+в ожидании цикла, а не обещание:
+
+- **Декомпозиция `fleet.ts` / `herdr/host.ts` и усадка `execute()`**
+  (ARCHITECTURE.md, закон 5): `fleet.ts` распадается на `ui-text.ts`,
+  `worker-view.ts` (единая read-модель для виджета, оверлея и status-инструмента),
+  `fleet-widget.ts`, `fleet-overlay.ts`; `herdr/host.ts` — на `cli.ts`, `socket.ts`,
+  `map.ts`; оставшиеся фазы delegate-инструмента становятся инъекционными машинами
+  состояний. Пользовательская поверхность остаётся байт-в-байт.
+- **Взаимозаменяемое хранилище почтового ящика** (шов `ExchangeStore` /
+  `SqliteStore`): DB-хранилище, которое ЗЕРКАЛИТ агентские q-/a- файлы (проводной
+  формат остаётся fs-by-protocol — воркеры читают пути из промптов). Вне объёма
+  1.17.0: приземлился только Windows path-слой.
+- **Выбор модели оркестратора**: оркестратор — это и есть сессия pi, поэтому его
+  модель невидима для pi-delegate — механизму нужно решить, чем (и нужно ли)
+  управлять: пиннинг модели в манифесте задачи, тиры суб-оркестраторов (сегодня
+  уже покрыты тирами), политика расхождения (warn vs отказ).
+- **Вотчер, этап D**: структурный result-сигнал вместо «модель пишет файл» —
+  правила владения/доставки не меняются, переезжает только датчик result-plane.
+- **Второй backend-адаптер**: tmux-адаптер разблокирован швом placementRef-only
+  (правки только в окрестности `src/herdr/` плюс одна строка в `index.ts`). Также
+  открыто: полный прогон CI end-to-end на GitHub-раннере и перевод legacy-манифестов
+  без владельца на fail-CLOSED, когда все писатели проставляют
+  `orchestratorSessionPath`.
 
 ### Установка
 

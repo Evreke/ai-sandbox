@@ -5,8 +5,8 @@
  * req/result types, the E_* error taxonomy (incl. DelegateErrorImpl/GUIDANCE),
  * the report/mailbox envelope contracts and their guards, the worker-name rule,
  * briefPrompt, the budget/context gauge constants, and sessionHasReply (the
- * aged-finish session-JSONL proof — backend-neutral, see research note in
- * design-host-interface.md §1a).
+ * aged-finish session-JSONL proof — backend-neutral: it reads the worker's
+ * pi session JSONL, never the host backend).
  *
  * Dependencies: node builtins (fs, path) + pi's getAgentDir()/CONFIG_DIR_NAME
  * from @earendil-works/pi-coding-agent (the platform package — Law 1: import,

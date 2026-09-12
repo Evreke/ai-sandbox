@@ -77,22 +77,22 @@ export function formatEventBatch(events: WatchEvent[]): string {
 }
 
 /**
- * Audit line for a REAL send (guideline §9.1, DESIGN.md §21 delivery).
+ * Audit line for a REAL send (DESIGN.md §21 delivery).
  * <p>
  * The durable delivery store answers "what did this audience already hear";
  * this line answers the incident question the store cannot: WHAT EXACTLY was
  * considered delivered at what moment — the recovery trail after a send pi
  * may have swallowed asynchronously. One line per BATCH (not per event — the
- * watcher log already carries a lot of service noise, §9.1 forbids spamming
- * it). The line states the send FACT and the batch CONTENT: for every event
+ * watcher log already carries a lot of service noise — it is an audit trail,
+ * never spammed). The line states the send FACT and the batch CONTENT: for every event
  * its task dir, worker name, event kind and fingerprint — the same four
  * components the dedup key is built from, so a post-incident reader can
  * re-derive exactly which key was committed.
  * <p>
  * The word "sent" (never "fail"/"error") is deliberate: the production sink
  * (makeWatcherLogSink) surfaces only error-shaped lines to the pane, so a
- * routine success lands in the audit FILE only — §9.1 ("routine success
- * deliver must not spam the TUI; the audit file — yes").
+ * routine success lands in the audit FILE only (routine deliver must not
+ * spam the TUI; the audit file — yes).
  * <p>
  * FUNCTION_CONTRACT:
  * Input: events — the events of one batch that was really sent (silent mode
@@ -159,7 +159,7 @@ import { errText } from "./tool-result.ts";
  * Build the poller. Never throws; every cycle is wrapped so a bad manifest, an
  * unreachable herdr or a throwing sink only costs that cycle.
  * <p>
- * FUNCTION_CONTRACT (the tick, guideline §5.3 — exact order):
+ * FUNCTION_CONTRACT (the tick — exact order):
  *   1. snapshot; 2. retire pass (before delivery); 3. detection with the
  *   memory cache; 4. self-event filter + leaf-worker check BEFORE any
  *   durable write (a leaf worker never writes to disk); 5. canonical keys
@@ -222,7 +222,7 @@ export function createWatcher(deps: WatcherDeps): WatcherHandle {
 					reason === "no-owner"
 						? `skipped delivery worker=${worker} — no owner (legacy manifest; watch.legacyFailOpen is false)`
 						: reason === "corrupt-question"
-							? `result-plane worker=${worker} — corrupt q-file: ${detail ?? "unreadable"} (guideline §6.2.5: audited, not masked as a report event)`
+							? `result-plane worker=${worker} — corrupt q-file: ${detail ?? "unreadable"} (audited, not masked as a report event)`
 							: `skipped delivery worker=${worker} — no self id (E_WATCH_NO_SELF_ID)`,
 				)),
 	};
@@ -321,7 +321,7 @@ export function createWatcher(deps: WatcherDeps): WatcherHandle {
 		// so a gone worker's records leave the store even on a quiet tick.
 		if (durableEnabled && snapOrNull !== null) await garbageCollect(snapOrNull);
 		if (leafWorker || events.length === 0) return [];
-		// Watcher stage B, §5.3 step 6: drop events whose delivery key is
+		// Watcher stage B, tick step 6: drop events whose delivery key is
 		// already committed to THIS audience's durable store (e.g. after a
 		// session restart, where the memory cache starts empty). Dropped keys
 		// STAY in memory and are never rolled back.
@@ -404,7 +404,7 @@ export function createWatcher(deps: WatcherDeps): WatcherHandle {
 			log("delivery sink is silent (no usable pi.sendUserMessage) — wake-up suppressed in memory, nothing committed to the durable store");
 			return events;
 		}
-		// Guideline §9.1 / DESIGN.md §21 delivery: every REAL send is recorded as
+		// DESIGN.md §21 delivery: every REAL send is recorded as
 		// ONE audit line per batch with the batch content (dir :: worker/kind#fp
 		// per event) — the recovery trail after an incident. Written at the send
 		// SUCCESS, before the durable commit: the line describes the FACT OF
@@ -412,7 +412,7 @@ export function createWatcher(deps: WatcherDeps): WatcherHandle {
 		// line below then names the same batch). Silent mode and a failed send
 		// returned above with their own lines — never a third line here.
 		log(formatWakeUpAuditLine(events));
-		// §5.3 step 9 — commit AFTER the successful send, one atomic merge per
+		// tick step 9 — commit AFTER the successful send, one atomic merge per
 		// task dir (a batch may span dirs: atomicity holds WITHIN each dir's
 		// file; a partial commit between dirs is possible and documented). A
 		// failed commit is NOT a failed delivery: the send happened, so the
@@ -516,7 +516,8 @@ export function stopWatcher(): void {
 	}
 }
 
-/** Structured send outcome (watcher stage B, guideline §5): the INTERNAL
+/** Structured send outcome (watcher stage B; the durable store canon is
+ *  src/watch-store.ts): the INTERNAL
  *  contract of the delivery sink. `mode: "silent"` means the build has no
  *  usable `pi.sendUserMessage` (headless/old pi) — the tick treats it as
  *  "not a delivery": nothing is committed to the durable store and the

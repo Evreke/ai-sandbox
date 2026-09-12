@@ -1,5 +1,14 @@
 # DESIGN — `pi-delegate` extension v1
 
+> **HISTORICAL DESIGN LOG (v1 → v1.17.0) — not maintained as current truth.**
+> This document is the chronological record of design decisions (each version
+> section = what was decided and why at that time). It is FROZEN: no new
+> sections, no edits beyond pointer fixes. Current truth lives in the code
+> itself (MODULE_CONTRACT/FUNCTION_CONTRACT JSDoc at the point of use), in
+> ARCHITECTURE.md (the binding laws + threat appendix), and in README.md
+> (operational behavior). Code comments citing "DESIGN §N" point at the
+> decision record below — read it as history, not as a spec.
+
 Status: **APPROVED 2026-09-05** · Owner: root tech lead (pi orchestrator) · Date: 2026-09-05
 
 > **Document status** (2026-09-12): the module map (§4.1) is verified against the
@@ -151,7 +160,7 @@ pi-delegate/
 │   └── expaths.ts            # portable (Windows + POSIX) path builders for the exchange
 │                             #   layer; node:path only, never imports another src/ module
 └── test/                     # QA harness (regression checks per field incident; see
-                              #   docs/THREATS.md for the threat catalog)
+                              #   the threat catalog in ARCHITECTURE.md)
 ```
 
 Each module is the single owner of the invariants named in its MODULE_CONTRACT header and
@@ -884,7 +893,7 @@ workers' session JSONL (usage gauges + a tail-window tool-call scan).
 | `mailbox-question` | `q-<name>.json` holds a valid envelope | question text + options + "answer via `delegate_mailbox` (action 'answer')" |
 | `grill-deck` | worker's session JSONL contains a `grill_deck` toolCall | "blocked on an interactive deck in its OWN pane — only a human there can answer (or steer it to the mailbox)" |
 | `context-critical` | `contextPct ≥ CONTEXT_CRITICAL_PCT` (90) vs `resolveContextWindow(model)` | pct + "steer it to wrap up now / plan a fresh-name retry" |
-| `worker-dead` | the worker's episode ended with NO report on disk: herdr no longer knows the agent (gone from the host), or the worker settled (done/idle in herdr) without ever writing one (watcher stage C — guideline §6.2.1) | "no report — exited/finished without producing anything — read the pane, then diagnosed retry" |
+| `worker-dead` | the worker's episode ended with NO report on disk: herdr no longer knows the agent (gone from the host), or the worker settled (done/idle in herdr) without ever writing one (watcher stage C) | "no report — exited/finished without producing anything — read the pane, then diagnosed retry" |
 | `worker-stale` (v1.12.1, §22) | manifest `collectedAt` older than `watch.staleAfterMs` AND the worker still live in herdr | "collected N min ago and still mounted — tear it down (/delegate-teardown) or keep" |
 
 **Dedup (watcher stage B — memory is a cache, disk is the truth).** Every kind
@@ -913,7 +922,7 @@ status flap or a transient read error. One `sendUserMessage` per **batch**
 the episode rules for the gauge/absence kinds — live in the delivered-store
 subsection below. See §21.1b for the durable store itself.
 
-**Result-plane states (watcher stage C — guideline §6.2, all pinned by
+**Result-plane states (watcher stage C, all pinned by
 W3/W4/W7/W18).** The result plane (the `report-*.json` / `q-*.json` files the
 WORKER is supposed to write) is an unreliable sensor by nature: absence or
 corruption of these files is a valid worker outcome, never a delivery (router)
@@ -924,7 +933,7 @@ failure. Every state is therefore explicit and observable:
    grace) → the `worker-dead` wake names the missing report and the failed-spawn
    move. This branch is deliberately NOT silenced by the `collectedAt` stamp:
    it is about an absent report, while `collectedAt` suppresses only the
-   report-branch wake-ups (guideline §6.2.1).
+   report-branch wake-ups.
 2. **A report that exists but fails validation** → `report-invalid`, with the
    validation error quoted — a distinct kind and message, never rendered as a
    delivery failure.
@@ -936,7 +945,7 @@ failure. Every state is therefore explicit and observable:
    masked as `report-ready`. A mid-write torn read reads as corrupt and
    self-heals on a later tick.
 
-No state above loosens ownership or delivery (guideline §6.3): a missing or
+No state above loosens ownership or delivery: a missing or
 broken result file never widens the audience, and fixing the model's report
 habits lives in the spawn flow, not here.
 
@@ -979,7 +988,7 @@ swallows asynchronous send failures, so "no synchronous exception" is the only
 honest signal — therefore every real send is also recorded as a line in the
 watcher audit log with the batch content (the recovery trail after an
 incident). The audit line is ONE PER BATCH, never one per event (the log
-carries a lot of service noise; guideline §9.1 forbids spamming it), and names
+carries a lot of service noise; the log is an audit trail and is never spammed), and names
 the send fact plus every event's four key components — task dir, worker, event
 kind and fingerprint (`<dir> :: <worker>/<kind>#<fingerprint>`, comma-
 separated) — so a post-incident reader can re-derive exactly which dedup keys
@@ -1032,7 +1041,7 @@ none of them can corrupt a spawn or a collect result). One fix shape each:
   `orchestratorSessionPath` (live `getSessionFile()` getter) and
   `detectWorkerEvents` silences workers owned by another session.
   **Watcher stage A — delivery is FAIL-CLOSED** (normative source:
-  WATCHER-ARCHITECTURE-GUIDELINE.md §3.5/§3.6): the old fail-open on legacy
+  src/watch-role.ts): the old fail-open on legacy
   manifests (no owner field anywhere) and degraded self-ids is GONE. One
   canonical verdict (`workerAudienceMatch` in src/watch-role.ts — a leaf
   module with zero production imports, shared by delivery, the mount gate
@@ -1041,7 +1050,7 @@ none of them can corrupt a spawn or a collect result). One fix shape each:
   config rollback `watch.legacyFailOpen: true` (default false — UNSAFE on a
   multi-session machine: bystander wakes return); a degraded self-id
   delivers NOTHING unconditionally — that edge has no configuration escape
-  (§3.6), and every skip is auditable in `~/.pi/agent/delegate-watch.log`
+  (fail-closed, ARCHITECTURE.md Law 8), and every skip is auditable in `~/.pi/agent/delegate-watch.log`
   (reason: no owner, or no self id). The spawn side signals a degraded
   write: a manifest entry recorded WITHOUT an owner path returns an
   explicit warning to the orchestrator and an audit line (full fail-spawn
@@ -1054,7 +1063,7 @@ none of them can corrupt a spawn or a collect result). One fix shape each:
   about delivered reports (fresh sessions no longer re-wake on earlier
   sessions' 14 stale reports); `pruneArchive` gives the archive a 30-day TTL.
 
-  **The role table (guideline §3.4, mandatory in code AND design) — one
+  **The role table (mandatory in code AND design) — one
   table implemented by `sessionRole` (src/watch-role.ts) and folded by the mount
   gate (src/compose.ts), delivery (src/watch-detect.ts detectWorkerEvents)
   and the UI (src/fleet.ts classifyOwnership):**
@@ -1099,7 +1108,7 @@ none of them can corrupt a spawn or a collect result). One fix shape each:
   watcher (it can no longer be classified a pure worker by its cwd) and
   loses its child wakes on the DELIVERY side instead (a documented known
   behavior, pinned in test/composer-check.ts, check M7).
-### 21.1b The durable delivered-facts store (watcher stage B, guideline §5)
+### 21.1b The durable delivered-facts store (watcher stage B)
 
 Before stage B the dedup lived only in the memory of ONE watcher mount: a
 session restart forgot everything, and on the same files on disk the events
@@ -1126,7 +1135,7 @@ algorithm, commits) lives in `src/watch-detect.ts`; the file I/O lives in
 `{ worker, kind, fingerprint, deliveredAt (ISO), deliveryMode }`. The task
 dir and the audience are given by the FILE's location, not by key components.
 
-**Tick order (normative, guideline §5.3).** 1) snapshot; 2) the retire pass
+**Tick order (normative).** 1) snapshot; 2) the retire pass
 (before delivery); 3) detection against the memory cache; 4) the self-event
 filter and the leaf-worker check happen BEFORE any durable write — a leaf
 worker session writes NOTHING to disk; 5) canonical keys for the batch;
@@ -1154,7 +1163,7 @@ a partially committed batch may repeat for the failed dirs only.
 
 **No seeding on the first tick with an empty store.** Seeding would GUESS
 what was delivered — an ad-hoc marker without the general key schema
-(forbidden by guideline §5.2), and a skipped wake-up is exactly the failure
+(forbidden — one key schema for every kind), and a skipped wake-up is exactly the failure
 class this module exists to prevent. The one-time volley of repeated
 wake-ups after upgrading on a RESUMED session is bounded by the stage-A
 ownership gate (a brand-new session owns nothing → no volley at all) and the
@@ -1169,7 +1178,7 @@ pre-stage-B memory-only dedup without shipping a new version. A non-boolean
 value warns once and stays true. No paths in the config: the location is
 convention (like the retire stamps).
 
-**Fingerprint rules per kind (guideline §5.4 — every kind MUST have a
+**Fingerprint rules per kind (every kind MUST have a
 documented rule; episode kinds fingerprint by an episode id, never by an
 empty constant):**
 
@@ -1184,7 +1193,7 @@ empty constant):**
 | `worker-dead` | EPISODE: worker launch stamp (`startedAt`); a manifest without a parseable stamp degrades to a stable constant (one wake per dedup lifetime for that edge) | One wake per launch: a herdr status flap within one launch does NOT re-fire; a NEW run (new `startedAt`) is a new death episode. Watcher stage C: the episode covers both missing-report shapes (gone from the host, settled without a report) — the same launch, the same episode |
 | `worker-stale` | the `collectedAt` value | A re-collect writes a new stamp → a new fingerprint |
 
-**collectedAt vs the store (guideline §5.5) — two different facts, one rule.**
+**collectedAt vs the store — two different facts, one rule.**
 `collectedAt` means "the collect tool ACCEPTED the report" (a product fact,
 written by collect into the manifest); the delivered store means "the wake-up
 was REALLY SENT to this audience" (a watcher fact, written only by the
@@ -1600,7 +1609,7 @@ stage-3 merge this section is folded into the corresponding sections above.
 
 # layout v3 — the healing split (2026-09-12)
 
-The Wave 3 decomposition (STABILIZATION.md) executed Law 5 on the three god-modules of
+The Wave 3 decomposition executed Law 5 on the three god-modules of
 layout v2. Verbatim moves only; the user-visible surface (tool names, parameter shapes,
 `/delegate-*` command names, manifest kinds, journal events, E_* codes) never moved.
 Where everything lives (§4.1 is the canonical map; this header is the narrative):
@@ -1627,7 +1636,7 @@ Where everything lives (§4.1 is the canonical map; this header is the narrative
   `grace.ts` (the settle→collect state machine) and `mailbox-tool.ts` (the
   delegate_mailbox tool). Only the two execute() phases that read no closure state
   (tier resolution, schema resolution) are lifted as pure functions — the full
-  execute() shrink is the post-release backlog (ROADMAP.md).
+  execute() shrink is the post-release backlog (README "Future work").
 - **Dedup clusters.** `fs-probe.ts` is the one tolerant filesystem-probe
   implementation; `text-cap.ts` is the Law 1 truncation duty (§5.4).
 - **Unchanged from layout v2:** fleet.ts, usage.ts, lifecycle.ts, the host.ts seam,

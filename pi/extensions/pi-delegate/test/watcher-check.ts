@@ -22,7 +22,7 @@
  *       W7  worker-dead + every suppression (live, herdr unreachable, report on
  *           disk, placement grace, probe run); since watcher stage C the branch
  *           is ALSO the explicit missing-report state for a SETTLED worker
- *           (done/idle, still live) — guideline §6.2.1.
+ *           (done/idle, still live).
  *   W8  Dedup: fires once per worker+kind+fingerprint; a condition that stops
  *       being true resets its key; a rewritten report / re-asked question is a
  *       NEW fact and re-fires; a worker that leaves the manifests is forgotten.
@@ -59,7 +59,7 @@
  *       difference still mutes (criterion 8).
  * Exit 0 only if all checks pass.
  *
- *   W18 Result-plane states (watcher stage C, guideline §6.2): the
+ *   W18 Result-plane states (watcher stage C): the
  *       missing-report wake is delivered and durably committed; the branch is
  *       not gated on collectedAt; a corrupt q-file is audited with its cause
  *       (zero wake-ups, zero records) and never masked as report-ready.
@@ -422,7 +422,7 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 	);
 	writeFileSync(questionPathFor(dir, "w-question"), "{not json");
 	check("W4.3 corrupt q-file → no question event, never a throw", !kindsOf(eventsFor(w)).includes("mailbox-question"));
-	// Watcher stage C (guideline §6.2.5): the corrupt q-file is a result-plane
+	// Watcher stage C: the corrupt q-file is a result-plane
 	// fact — audited with the cause, never masked as a report event.
 	{
 		const skips: Array<{ worker: string; reason: string; detail?: string }> = [];
@@ -517,7 +517,7 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 		dead?.message ?? "",
 	);
 	check("W7.2 live worker → no worker-dead", !kindsOf(eventsFor(w, { statuses: [LIVE("w-dead")] })).includes("worker-dead"));
-	// Watcher stage C (guideline §6.2.1): a SETTLED worker (done/idle, still
+	// Watcher stage C: a SETTLED worker (done/idle, still
 	// known to herdr) without a report is the explicit missing-report state —
 	// the same worker-dead branch, not silence.
 	const settled = eventsFor(w, { statuses: [{ name: "w-dead", status: "idle" }] }).find((e) => e.kind === "worker-dead");
@@ -559,7 +559,7 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 }
 
 // ---------------------------------------------------------------------------
-// W18. Result-plane states (watcher stage C, guideline §6.2): a missing
+// W18. Result-plane states (watcher stage C): a missing
 // report, an invalid report and a corrupt q-file are VALID worker outcomes
 // from the sensor's point of view — explicit, observable, and distinct from
 // a router/delivery failure. The missing-report state lives in the
@@ -603,8 +603,8 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 		h.stop();
 	}
 
-	// (2) The missing-report branch is NOT gated on collectedAt (guideline
-	// §6.2.1): the branch is about an ABSENT report; the collect stamp
+	// (2) The missing-report branch is NOT gated on collectedAt: the branch is
+	// about an ABSENT report; the collect stamp
 	// silences only the report branches.
 	{
 		const dir = taskDir("stagec-collected-missing");
@@ -1135,8 +1135,8 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 	// the skip is auditable via the onSkip hook. The explicit
 	// watch.legacyFailOpen:true rollback restores the old delivery — which is
 	// unsafe on a machine with several sessions. A degraded self-id is a
-	// DIFFERENT edge: it delivers NOTHING with or without the flag (guideline
-	// §3.6 — no configuration escape).
+	// DIFFERENT edge: it delivers NOTHING with or without the flag (no
+	// configuration escape — ARCHITECTURE Law 8).
 	const wLegacy = mkWorker(odir, "w-legacy");
 	writeValidReport(odir, "w-legacy");
 	{
@@ -1161,7 +1161,7 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 		);
 	}
 	check(
-		"W14.13 degraded self (no sessionFile) delivers NOTHING — fail-closed with AND without the flag (guideline §3.6)",
+		"W14.13 degraded self (no sessionFile) delivers NOTHING — fail-closed with AND without the flag (ARCHITECTURE Law 8)",
 		eventsFor(wReport, { statuses: [LIVE("w-own-report")], selfSessionFile: undefined }).length === 0 &&
 			eventsFor(wReport, { statuses: [LIVE("w-own-report")], selfSessionFile: undefined, legacyFailOpen: true }).length === 0,
 	);
@@ -1263,7 +1263,7 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 		})(),
 	);
 	check(
-		"W14.22 degraded self (no sessionFile) + foreign masterSessionPath → delivers NOTHING, flag or not (§3.6: no configuration escape)",
+		"W14.22 degraded self (no sessionFile) + foreign masterSessionPath → delivers NOTHING, flag or not (no configuration escape — ARCHITECTURE Law 8)",
 		detectWorkerEvents(masterSnap(wMasterForeign, ORCH_A).workers[0]!, { nowMs: NOW }).length === 0 &&
 			detectWorkerEvents(masterSnap(wMasterForeign, ORCH_A).workers[0]!, { nowMs: NOW, legacyFailOpen: true }).length === 0,
 	);
@@ -1796,7 +1796,7 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 	);
 
 	// Gauge/absence kinds now carry EPISODE fingerprints (watcher stage B,
-	// guideline §5.4): worker-dead fingerprints by the manifest launch stamp.
+	// worker-dead fingerprints by the manifest launch stamp.
 	// The reset rule is therefore the uniform fingerprinted one — a herdr
 	// status flap WITHIN one launch (dead → alive → dead again, same
 	// startedAt) is the SAME death episode and does not re-fire; a NEW run of
@@ -1837,7 +1837,7 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 
 
 // ---------------------------------------------------------------------------
-// W17. Durable delivery store (watcher stage B, guideline §5): the memory
+// W17. Durable delivery store (watcher stage B): the memory
 // dedup is a CACHE of the per-task delivered-facts file — a commit happens
 // ONLY after a successful send, a failed send never touches the disk, a
 // failed commit is not a failed delivery, records are garbage-collected
@@ -2283,7 +2283,7 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 		h.stop();
 	}
 
-	// (9) Audit line for a REAL send (guideline §9.1, DESIGN.md §21 delivery): a
+	// (9) Audit line for a REAL send (DESIGN.md §21 delivery): a
 	// successful send writes exactly ONE watcher-log line per batch naming the
 	// send fact and the batch content (dir :: worker/kind#fingerprint per event)
 	// — the recovery trail after an incident. Negative parts: silent mode and a

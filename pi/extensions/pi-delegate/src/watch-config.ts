@@ -101,9 +101,9 @@ export interface WatchConfig {
 	 *  this true — which is UNSAFE on a machine with several sessions
 	 *  (bystander wakes return). This flag NEVER touches the missing self-id
 	 *  edge: a session whose identity is unreadable delivers nothing with or
-	 *  without the flag (guideline §3.6 — no configuration escape). */
+	 *  without the flag (no configuration escape — ARCHITECTURE.md Law 8). */
 	legacyFailOpen: boolean;
-	/** Watcher stage B (guideline §5, default TRUE): commit delivered-facts
+	/** Watcher stage B (default TRUE): commit delivered-facts
 	 *  records to the durable per-task store after a successful send, so the
 	 *  dedup survives a session restart. false is the emergency rollback to
 	 *  the pre-stage-B memory-only dedup (repeated wake-ups after a restart

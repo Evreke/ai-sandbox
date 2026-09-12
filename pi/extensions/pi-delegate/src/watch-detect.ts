@@ -203,7 +203,7 @@ export interface SelfIdentity {
  * worker session mounts no watcher — it is someone's fleet row, not an
  * audience. Watcher stage A: this gate is now a THIN WRAPPER over the
  * canonical role table (sessionRole in src/watch-role.ts — one table shared
- * by the mount gate and delivery, guideline §3.4). Stage C fix: worker
+ * by the mount gate and delivery — one table). Stage C fix: worker
  * identity is proven ONLY by the entry's OWN sessionPath
  * (`sessionPath === self.sessionFile`); the former checkoutPath === cwd
  * branch is REMOVED as ambiguous by construction — tab workers ALWAYS share
@@ -403,8 +403,8 @@ export interface DetectOptions {
 	 *  WatcherDeps.self). A worker whose proven owner differs belongs to
 	 *  another session → zero events for it. Watcher stage A — FAIL-CLOSED:
 	 *  undefined (degraded self-id) → ZERO events for EVERY worker, with or
-	 *  without legacyFailOpen (guideline §3.6 gives this edge no
-	 *  configuration escape); each skip is auditable via onSkip (reason
+	 *  without legacyFailOpen (no configuration escape — ARCHITECTURE.md
+	 *  Law 8); each skip is auditable via onSkip (reason
 	 *  "no-self-id"). */
 	selfSessionFile?: string;
 	/** Watcher stage A: rollback for the "no owner field anywhere on the
@@ -414,13 +414,13 @@ export interface DetectOptions {
 	 *  extends to the "no self-id" edge: a degraded identity delivers nothing
 	 *  with or without this flag. */
 	legacyFailOpen?: boolean;
-	/** Audit hook (watcher stage A, guideline §9): called once per SKIPPED
+	/** Audit hook (watcher stage A): called once per SKIPPED
 	 *  delivery with the skip reason — "no-owner" (legacy manifest without any
 	 *  owner field, skipped because legacyFailOpen is false) or "no-self-id"
 	 *  (this session's identity is unreadable; skipped unconditionally) — and,
 	 *  since watcher stage C, once per RESULT-PLANE ANOMALY that produces no
 	 *  event of its own: "corrupt-question" (a q-<name>.json file exists but
-	 *  fails envelope validation — guideline §6.2.5: audited with the cause,
+	 *  fails envelope validation — audited with the cause,
 	 *  never masked as a report event; fires every tick while the file stays
 	 *  corrupt, the same cadence as the ownership skips). Foreign-owner
 	 *  routing is NOT reported (it is the correct normal path, not a degraded
@@ -492,7 +492,7 @@ function isPlainRecord(v: unknown): v is Record<string, unknown> {
 	return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-/** Episode fingerprint for worker-dead (watcher stage B, guideline §5.4):
+/** Episode fingerprint for worker-dead (watcher stage B):
  *  the manifest launch stamp — a new run is a new death episode. A manifest
  *  without a parseable startedAt degrades to a stable per-entry constant
  *  (one wake per dedup lifetime for that edge — documented degradation,
@@ -501,8 +501,8 @@ function deathEpisodeFingerprint(w: WatchWorker): string {
 	return w.startedAtMs !== undefined ? new Date(w.startedAtMs).toISOString() : "unknown-launch";
 }
 
-/** Episode fingerprint for context-critical (watcher stage B, guideline
- *  §5.4): the same launch stamp + the threshold — at most one context wake
+/** Episode fingerprint for context-critical (watcher stage B): the same
+ *  launch stamp + the threshold — at most one context wake
  *  per worker launch per threshold. */
 function contextEpisodeFingerprint(w: WatchWorker, threshold: number): string {
 	return `${deathEpisodeFingerprint(w)}@${threshold}`;
@@ -518,7 +518,7 @@ export function detectWorkerEvents(w: WatchWorker, opts: DetectOptions = {}): Wa
 	//    deliver ONLY on a proven owner match ("mine"). A legacy manifest with
 	//    no owner field anywhere delivers only when legacyFailOpen is
 	//    explicitly true; a degraded self-id (no session file) delivers NEVER —
-	//    that edge is not flag-controlled (guideline §3.6). The old B1
+	//    that edge is not flag-controlled (ARCHITECTURE.md Law 8). The old B1
 	//    narrowing (a manifest-level masterSessionPath of a known foreign
 	//    owner silences a bystander) lives INSIDE the "foreign" verdict and
 	//    keeps working with the flag on.
@@ -596,7 +596,7 @@ export function detectWorkerEvents(w: WatchWorker, opts: DetectOptions = {}): Wa
 
 	// 2. mailbox-question (§12) — fingerprinted by the envelope ts, so a worker
 	//    that asks AGAIN after an answer wakes the orchestrator again.
-	//    Watcher stage C (guideline §6.2.5): a q-file that EXISTS but fails
+	//    Watcher stage C: a q-file that EXISTS but fails
 	//    envelope validation is a RESULT-PLANE fact, not silence — it is
 	//    audited with the cause via onSkip ("corrupt-question") and never
 	//    masked as a report event. Absent stays the normal no-question state.
@@ -673,7 +673,7 @@ export function detectWorkerEvents(w: WatchWorker, opts: DetectOptions = {}): Wa
 	// 5. worker-dead — the worker's EPISODE ended WITHOUT a report: herdr no
 	//    longer knows the agent (gone from the host), or the worker SETTLED
 	//    (done/idle) without ever writing one. Both shapes are the explicit
-	//    §6.2.1 "report missing" state (watcher stage C — a settled worker with
+	//    explicit "report missing" state (watcher stage C — a settled worker with
 	//    no report used to be silent), they are the same failed-spawn move for
 	//    the orchestrator, and they carry the same launch-stamp episode
 	//    fingerprint (stage B). Skipped when herdr is unreachable (statuses
@@ -681,7 +681,7 @@ export function detectWorkerEvents(w: WatchWorker, opts: DetectOptions = {}): Wa
 	//    placement grace window (herdr may not have registered the agent yet).
 	//    NOT gated on collectedAt: this branch is about an ABSENT report —
 	//    unlike the report-ready/invalid branches, collect's stamp does not
-	//    suppress it (guideline §6.2.1).
+	//    suppress it.
 	const settledWithoutReport = w.status === "done" || w.status === "idle";
 	if (
 		!w.probe &&

@@ -16,7 +16,7 @@
  *     level foreign master renders foreign, the worker-level canon wins,
  *     and the legacyFailOpen flag never changes the display. O16 — the
  *     degraded session that the display-only fallback (O5) renders as
- *     "mine" receives NOTHING at the delivery level (guideline §3.6).
+ *     "mine" receives NOTHING at the delivery level (fail-closed).
  */
 
 import { classifyOwnership, OWNERSHIP_GLYPH, foldLiveByOwnership, renderLiveRows } from "../src/fleet.ts";
@@ -91,7 +91,7 @@ const OTHER = "/home/u/.pi/agent/sessions/--home-u-other--/s-other.jsonl";
 	);
 	// Watcher stage A: the display mapping folds the CANONICAL verdict
 	// (src/watch-role.ts), so a manifest-level foreign master renders foreign
-	// (delivery and display cannot disagree — guideline §3.4), and the
+	// (delivery and display cannot disagree — the watch-role.ts role table), and the
 	// legacyFailOpen flag is accepted but INVARIANT for display (a no-owner
 	// row stays unknown whether the delivery edge is open or closed).
 	check(
@@ -118,7 +118,7 @@ const OTHER = "/home/u/.pi/agent/sessions/--home-u-other--/s-other.jsonl";
 // never feeds delivery. The SAME degraded session (no sessionFile) that O5
 // renders as "mine" receives NOTHING at the delivery level — the canonical
 // no-self-id edge is fail-closed unconditionally, with or without the
-// legacyFailOpen flag (guideline §3.6: no configuration escape).
+// legacyFailOpen flag (no configuration escape — ARCHITECTURE Law 8).
 // ---------------------------------------------------------------------------
 
 {

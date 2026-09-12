@@ -147,8 +147,8 @@ export function writeRelease(path: string): Promise<void> {
 	});
 }
 
-/** Outcome of reading a q-<name>.json mailbox file (watcher stage C,
- *  guideline §6.2.5): ABSENT is the normal no-question state; INVALID is a
+/** Outcome of reading a q-<name>.json mailbox file (watcher stage C
+ *  result-plane rule): ABSENT is the normal no-question state; INVALID is a
  *  file that EXISTS but is corrupt JSON or not a valid question envelope —
  *  a result-plane fact that must be auditable with its cause, never silently
  *  equated with "no question"; VALID carries the parsed envelope. */

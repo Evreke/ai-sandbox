@@ -2,14 +2,14 @@
  * pi-delegate — observe FACADE (Wave 3 decomposition, steps 1–5 done): this
  * module no longer owns code — it re-exports the public surface of the
  * extracted observation modules so existing import sites keep resolving
- * unchanged for ONE release, per the plan (STABILIZATION.md Wave 3 item 3;
- * ARCHITECTURE.md Law 5). After the release window the remaining import
+ * unchanged for ONE release, per the decomposition plan (ARCHITECTURE.md
+ * Law 5). After the release window the remaining import
  * sites (index.ts, compose.ts today; the check suite pins) flip to the new
  * modules directly and this file retires.
  * Re-audit note (2026-09-12): no production importer remains — index.ts and
  * compose.ts already import the extracted modules directly; only the check
  * suite pins still resolve through this facade. Retirement is scheduled for
- * the next cycle (ROADMAP.md post-release backlog).
+ * the next cycle (README "Future work").
  *
  * Where everything lives now:
  *   - watch-config.ts  — the tolerant watch/collect config resolution

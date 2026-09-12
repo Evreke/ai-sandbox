@@ -388,7 +388,7 @@ function liveSessionFile(ctx: {
 	}
 }
 
-// Watcher stage A (guideline §9): best-effort line into the watcher's audit
+// Watcher stage A: best-effort line into the watcher's audit
 // file. Wave 3 decomposition (step 5): the spawn-side watcher-audit append is
 // the ONE shared ISO-stamped sink — watcher.ts appendWatcherAudit (spawn's
 // private implementation of the append was deleted; audit finding 7).
@@ -406,7 +406,7 @@ import { appendWatcherAudit } from "./watcher.ts";
 // exact decision logic, E_* texts and details payloads verbatim; only the
 // phase boundary becomes a discriminated result the closure returns (E_TIER/
 // E_BRIEF) or consumes. The remaining execute() closure shrink is the
-// written next-cycle plan (STABILIZATION.md Wave 3 item 4).
+// written next-cycle plan (README "Future work").
 // ===========================================================================
 
 /** Explicit inputs of the tier-resolution phase (no closure state). */
@@ -900,7 +900,7 @@ export function registerDelegateTool(pi: import("@earendil-works/pi-coding-agent
 					manifestStore.read(manifestDir)?.workers ?? [],
 				);
 				const orchestratorSessionPath = liveSessionFile(ctx);
-				// Watcher stage A (guideline §3.3): a spawn that could NOT read its
+				// Watcher stage A: a spawn that could NOT read its
 				// session id must not go out silently — the delivery default is now
 				// fail-closed, so this worker's orchestrator would never be woken.
 				// Full fail-spawn is a separate decision (not this PR); per §3.3's
