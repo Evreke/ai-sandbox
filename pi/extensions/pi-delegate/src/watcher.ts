@@ -16,10 +16,12 @@
  * Dependencies: watch-detect.ts (snapshot/detection/event model),
  * watch-retire.ts (§23 pass inside the tick), watch-store.ts (the durable
  * delivered-facts store + watcher key), watch-config.ts (resolved config),
- * host.ts (the Transport seam). Never imports the transport implementation
- * (dependency rule, DESIGN.md §4.1 — the Transport instance is injected
- * from index.ts). Never imports observe.ts (Law 6 pin — observe remains
- * only a facade over this module for one release).
+ * mailbox-store.ts (the ONE steer-posting core — the report-invalid auto
+ * fix nudge shares it with the delegate_mailbox tool, Law 9), host.ts (the
+ * Transport seam). Never imports the transport implementation (dependency
+ * rule, DESIGN.md §4.1 — the Transport instance is injected from index.ts).
+ * Never imports observe.ts (Law 6 pin — observe remains only a facade over
+ * this module for one release).
  */
 
 import { statSync } from "node:fs";
@@ -53,6 +55,7 @@ import { sameSessionPath } from "./watch-role.ts";
 // Wave 4 item 5 (reliability finding 10): per-mount caches for the tick's
 // satellite reads — the caller-held closures Law 3 wants (no module globals).
 import { type SessionToolCallCacheEntry } from "./usage.ts";
+import { postSteerAndNudge } from "./mailbox-store.ts";
 import type { Transport } from "./host.ts";
 
 // ---------------------------------------------------------------------------
@@ -227,7 +230,104 @@ export function createWatcher(deps: WatcherDeps): WatcherHandle {
 				)),
 	};
 
-	/** THIS audience's committed records for one task dir — mtime-cached. */
+	/**
+ * Automatic self-heal nudge (fix-report-heal, 2026-09-12): for every
+ * report-invalid event ACCEPTED for delivery whose worker is still live, post
+ * a mailbox steer telling the worker to rewrite its report IN PLACE — the
+ * cheap fix the guidance names, performed automatically instead of spending a
+ * full re-spawn on one wrong field.
+ * <p>
+ * Exactly-once is inherited for free from the delivery dedup: the event's
+ * fingerprint is the report's mtime, so this runs once per report VERSION —
+ * a worker that rewrites and is STILL invalid gets a fresh mtime → a fresh
+ * nudge; a fixed report → report-ready, no nudge. The wake itself stays
+ * fail-closed: the orchestrator STILL receives the report-invalid event (the
+ * nudge is a CONCURRENT self-heal, never a replacement); its message gains
+ * the suffix "— an automatic fix nudge was posted to the live worker" once
+ * the steer envelope is durably posted.
+ * <p>
+ * Placement note: this runs BEFORE the batch send so the suffix can reach the
+ * wake text. If the send then fails, the batch's dedup keys roll back and the
+ * next tick re-fires the event → the steer is posted AGAIN (an extra a-file
+ * rewrite with identical text, one extra pane prompt). Accepted residual: the
+ * alternative (nudge after send) cannot carry the suffix in the delivered
+ * message, and a duplicate steer is advisory noise, not a lost or wrong fix.
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input:
+ *   - events — the accepted batch of one tick (post-dedup, post-collected)
+ *   - workers — the tick snapshot's worker entries (live/reportPath source)
+ *   - transport — the injected Transport seam held by this watcher mount
+ *   - log — the advisory log sink
+ * Output: none (mutates `events` messages in place when the nudge posted)
+ * Guarantees:
+ *   - only report-invalid events for LIVE workers (w.live — herdr still knows
+ *     the pane; a vanished agent cannot be nudged) trigger a steer
+ *   - the steer goes through postSteerAndNudge — the ONE posting core shared
+ *     with the delegate_mailbox tool (Law 9); its failure path is the
+ *     EXISTING nudge-failed marker machinery, never a new channel
+ *   - fully advisory: any throw is logged and never affects the tick's
+ *     delivery or its durable commit
+ * Residual (accepted): the pane-nudge phase (bounded retries) is awaited
+ *   before the batch send, so a broken herdr socket delays this tick's wake
+ *   by up to the nudge budget (~3 × MAILBOX_NUDGE_TIMEOUT_MS). The alternative
+ *   — detaching the nudge — cannot put the suffix into the delivered wake
+ *   text deterministically; a delayed advisory wake beats a lying one.
+ * Raises: never (per-event failures are caught and logged)
+ */
+async function autoHealNudge(
+	events: WatchEvent[],
+	workers: WatchSnapshot["workers"],
+	transport: Transport,
+	log: (m: string) => void,
+): Promise<void> {
+	for (const e of events) {
+		if (e.kind !== "report-invalid") continue;
+		const w = workers.find((x) => x.dir === e.dir && x.name === e.worker);
+		if (!w?.live) continue;
+		try {
+			// The suffix is appended inside afterPost — synchronously with the
+			// envelope post, deterministically BEFORE the batch send below.
+			const res = await postSteerAndNudge(transport, e.worker, e.dir, steerText(w, e), {
+				afterPost: async () => {
+					e.message += " — an automatic fix nudge was posted to the live worker";
+					log(`auto fix nudge posted for ${e.worker} (${e.dir}): steer envelope on disk`);
+				},
+			});
+			log(
+				`auto fix nudge for ${e.worker} (${e.dir}): steer at ${res.answerPath}` +
+					(res.nudged ? ", pane nudged" : res.note),
+			);
+		} catch (err) {
+			log(`auto fix nudge FAILED for ${e.worker} (${e.dir}) (${errText(err)}) — guidance-only delivery`);
+		}
+	}
+}
+
+/**
+ * The self-heal steer text (fix-report-heal): names the report path, the full
+ * untruncated validator error (carried on the event as `detail`) and the
+ * in-place fix mandate — change only what the error names, never redo the
+ * work, stay idle afterwards (the watcher re-detects the rewritten report by
+ * its new mtime and fires report-ready on its own).
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input: the snapshot worker entry (reportPath) + the report-invalid event
+ * Output: the steer body for the a-<name>.json envelope
+ * Guarantees: pure formatting; a missing `detail` degrades to a generic
+ *   mandate (never throws, never names a wrong path)
+ * Raises: never
+ */
+function steerText(w: { reportPath?: string }, e: WatchEvent): string {
+	const error = e.detail ?? "the report does not satisfy the report contract";
+	return (
+		`Your report at ${w.reportPath ?? "<unknown path>"} failed schema validation: ${error}. ` +
+		"Fix the report file IN PLACE (same path, same schema — change only what the error names; " +
+		"do not redo the work) and stay idle."
+	);
+}
+
+/** THIS audience's committed records for one task dir — mtime-cached. */
 	const storeRecordsFor = (dir: string): Record<string, DeliveryRecord> => {
 		let mtimeMs = -1;
 		try {
@@ -357,6 +457,13 @@ export function createWatcher(deps: WatcherDeps): WatcherHandle {
 			return !becameCollectedOnDisk(e.dir, e.worker);
 		});
 		if (events.length === 0) return [];
+		// Automatic self-heal (fix-report-heal): the batch is now FULLY accepted
+		// for delivery (memory dedup + durable store + collectedAt suppression
+		// all passed) — nudge live workers whose report failed validation to fix
+		// it in place, and mark the nudged events' messages. Runs (and is
+		// awaited) before the send so the suffix reaches the wake text;
+		// advisory — see autoHealNudge's contract.
+		await autoHealNudge(events, snapOrNull?.workers ?? [], deps.transport, log);
 		// ONE send per batch, INSIDE the error guard, its outcome AWAITED (the
 		// pre-stage-B code ignored the returned value — a silent no-op sender
 		// was indistinguishable from success, and a future async failure would

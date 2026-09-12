@@ -110,6 +110,14 @@ export interface WatchEvent {
 	 *  worker-stale fingerprints by collectedAt: a RE-COLLECT writes a new
 	 *  stamp, which re-arms the wake-up (§22). */
 	fingerprint?: string;
+	/** Optional UNTRUNCATED machine-relevant payload detail, kept out of the
+	 *  human message on purpose (the message truncates via truncate()). Set
+	 *  for report-invalid with the full validator error — the watcher's
+	 *  automatic fix nudge (watcher.ts) embeds it verbatim into the
+	 *  a-<name>.json steer so the worker learns exactly what to fix without
+	 *  the orchestrator re-reading the report. Additive, internal shape;
+	 *  consumers must treat it as optional. */
+	detail?: string;
 }
 
 /** One parsed delivery key — the CANONICAL in-memory shape of a dedup key
@@ -637,15 +645,25 @@ export function detectWorkerEvents(w: WatchWorker, opts: DetectOptions = {}): Wa
 				),
 			);
 		} else if (!verdict.error.includes("not readable")) {
-			// readable-but-invalid is a DISTINCT message: the move is diagnose, not verify
-			events.push(
-				mk(
-					"report-invalid",
+			// readable-but-invalid is a DISTINCT message: the move is diagnose, not
+			// verify — and the ACTIONS are ordered cheapest-first (fix-report-heal,
+			// 2026-09-12): an in-place report rewrite by the still-reachable worker
+			// costs one steer; a full re-spawn is the LAST resort, never the
+			// default. The validator error is stated twice by design — once as the
+			// diagnosis, once inside the steer instruction — and carried untruncated
+			// in `detail` for the watcher's automatic fix nudge.
+			events.push({
+				worker: w.name,
+				dir: w.dir,
+				kind: "report-invalid",
+				message:
 					`report at ${w.reportPath} exists but fails validation: ${truncate(verdict.error, 160)} — ` +
-						"read the pane, find the root cause, then a diagnosed retry (never verbatim)",
-					`${reportMtime}`,
-				),
-			);
+					"cheapest fix first: if the worker may still be reachable, steer it (delegate_mailbox action 'steer') " +
+					`to rewrite the report file IN PLACE fixing exactly this: ${truncate(verdict.error, 160)}; ` +
+					"full re-spawn (diagnosed, never verbatim) only if the worker is gone or ignores the fix.",
+				fingerprint: `${reportMtime}`,
+				detail: verdict.error,
+			});
 		}
 	}
 

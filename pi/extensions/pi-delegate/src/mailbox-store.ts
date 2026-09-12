@@ -9,10 +9,17 @@
  * writeRelease) and the envelope types (NudgeFailedEnvelope,
  * ReleaseEnvelope, QuestionRead).
  *
+ * Since fix-report-heal (2026-09-12) this module ALSO owns the ONE
+ * steer-posting core (postSteerAndNudge): envelope build + post + pane nudge
+ * with retries + the nudge-failed marker machinery — shared verbatim by the
+ * delegate_mailbox tool (mailbox-tool.ts) and the watcher's automatic
+ * report-invalid fix nudge (watcher.ts). Law 9: no duplicated posting logic.
+ *
  * Dependencies: @earendil-works/pi-coding-agent (withFileMutationQueue),
- * node builtins, ./host.ts (envelope types + guards ONLY — never the herdr
- * implementation), ./expaths.ts (the ONE path builder), ./manifest-store.ts
- * (the ONE atomic writer).
+ * node builtins, ./host.ts (envelope types + guards + the Transport SEAM
+ * type ONLY — never the herdr implementation), ./expaths.ts (the ONE path
+ * builder), ./manifest-store.ts (the ONE atomic writer), ./tool-result.ts
+ * (errText/sleep helpers).
  *
  * Critical invariants OWNED here:
  *   - mailbox path conventions: q-/a-/release-/nudge-failed- files live
@@ -22,13 +29,17 @@
  *     exception since Wave 4 item 3 (Law 7): writers stamp an optional
  *     `schemaVersion: 1`; readers tolerate absent and reject wrong).
  *   - every write is atomic (tmp+rename via atomicWriteFileSync) and
- *     serialized via withFileMutationQueue on the target path.
+ *     serialized via withFileMutationQueue on the target path; the ONE
+ *     exception is the nudge-failed marker, whose best-effort plain write
+ *     predates this module and whose tolerant reader makes a torn read
+ *     degrade to "no marker" (documented at the write site).
  *
  * All bodies are byte-verbatim moves from src/exchange.ts (Wave 3a).
  */
 
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { mkdirSync, readFileSync } from "node:fs";
+import { rm, stat, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import {
 	answerPathFor as buildAnswerPath,
@@ -40,8 +51,10 @@ import {
 	isQuestionEnvelope,
 	type AnswerEnvelope,
 	type QuestionEnvelope,
+	type Transport,
 } from "./host.ts";
 import { atomicWriteFileSync, EXCHANGE_SCHEMA_VERSION, isSupportedSchemaVersion } from "./manifest-store.ts";
+import { errText, sleep } from "./tool-result.ts";
 
 
 /** Mailbox paths, next to the brief (built by src/expaths.ts). */
@@ -239,12 +252,178 @@ export function writeAnswer(path: string, answer: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// The ONE steer-posting core (fix-report-heal, 2026-09-12): envelope build +
+// post + pane nudge with retries — shared by the delegate_mailbox tool
+// (orchestrator-driven answer/steer) and the watcher's automatic fix nudge
+// (report-invalid self-heal). Law 9: ONE artifact, ONE implementation — both
+// callers go through this function; neither re-implements posting.
+// ---------------------------------------------------------------------------
+
+/** Max wait for a nudge prompt *submission* to be accepted (not for settle). */
+export const MAILBOX_NUDGE_TIMEOUT_MS = 30_000;
+/** F6 nudge resilience: total submitPrompt attempts (1 initial + 2 retries) and
+ *  the backoff between them. Bounded by design — worst case
+ *  ~3×MAILBOX_NUDGE_TIMEOUT_MS + 2 delays, and each attempt stays under the
+ *  MAILBOX_NUDGE_TIMEOUT_MS cap. A transient `herdr socket: connection_closed`
+ *  must not leave the worker asleep on the first failure (2026-09-10 field
+ *  report). */
+export const MAILBOX_NUDGE_ATTEMPTS = 3;
+export const MAILBOX_NUDGE_RETRY_DELAY_MS = 500;
+
+/** Nudge text — points the worker at the answer file, per DESIGN.md §12. */
+export const mailboxNudgeText = (name: string): string =>
+	`Mailbox update posted: read a-${name}.json next to your brief and continue accordingly.`;
+
+/** Outcome of postSteerAndNudge — everything the callers render or log. */
+export interface SteerPostResult {
+	/** The a-<name>.json path the steer envelope was posted to. */
+	answerPath: string;
+	/** True when the pane nudge prompt was accepted (after retries). */
+	nudged: boolean;
+	/** Human-readable nudge-outcome note ("" when the plain "Nudge prompt
+	 *  sent" note applies — the caller appends its own wake sentence). */
+	note: string;
+}
+
+/**
+ * Post a steer envelope to a worker's mailbox and nudge its pane — THE one
+ * posting core shared by the delegate_mailbox answer/steer actions and the
+ * watcher's automatic report-invalid fix nudge.
+ * <p>
+ * FUNCTION_CONTRACT:
+ * Input:
+ *   - transport: the injected Transport seam (getStatus + submitPrompt only;
+ *     never the herdr implementation)
+ *   - name: canonical worker name; dir: the worker's task dir; text: the
+ *     steer/answer body written into the envelope
+ *   - opts.afterPost: optional hook run AFTER the envelope is durably posted
+ *     and BEFORE the pane nudge (the mailbox tool consumes the pending
+ *     question there — the archive must not race the nudged turn). Failures
+ *     of the hook are the hook's own problem: they propagate to the caller.
+ * Output: the posted path, whether the pane nudge was accepted, and the
+ *   human-readable nudge-outcome note
+ * Guarantees:
+ *   - the a-<name>.json envelope is posted atomically (writeAnswer — the ONE
+ *     atomic fsync+rename writer) BEFORE any nudge attempt
+ *   - the pane nudge fires only for idle/blocked/done workers — never
+ *     interrupts a working turn; unknown status → honest note, no nudge
+ *   - F6 nudge resilience: submitPrompt is retried (MAILBOX_NUDGE_ATTEMPTS
+ *     total); on repeated failure a nudge-failed-<name>.json marker is
+ *     written best-effort (the watcher's EXISTING failure channel — no new
+ *     one), and a SUBSEQUENT successful nudge deletes any stale marker
+ *   - never throws for nudge/marker outcomes (they land in `note`); throws
+ *     ONLY for the envelope write failure (the caller decides: the tool
+ *     answers E_BRIEF, the watcher logs advisory)
+ * Raises:
+ *   - filesystem errors from writeAnswer (propagated to the caller)
+ * EXTERNAL_DEPENDENCY: exchange dir on disk (/tmp/exchange/<task>/a-<name>.json
+ *   and nudge-failed-<name>.json); herdr pane IPC via the injected transport.
+ */
+export async function postSteerAndNudge(
+	transport: Transport,
+	name: string,
+	dir: string,
+	text: string,
+	opts: { afterPost?: () => Promise<void> } = {},
+): Promise<SteerPostResult> {
+	const answerPath = answerPathFor(dir, name);
+	// EXTERNAL_DEPENDENCY: exchange dir on disk — answer file at
+	// /tmp/exchange/<task>/a-<name>.json (atomic write inside mailbox-store).
+	await writeAnswer(answerPath, text);
+	if (opts.afterPost) await opts.afterPost();
+
+	// Nudge idle/blocked/done workers — a working agent must not be
+	// interrupted mid-turn. A done agent IS woken: submitPrompt starts a new
+	// turn on the existing pane and that turn reads the answer file (§12
+	// promises a nudge for answer/steer with no status restriction). Unknown
+	// status → honest warning instead of a silent success.
+	//
+	// F6 nudge resilience: submitPrompt is retried with a short backoff
+	// (MAILBOX_NUDGE_ATTEMPTS total, each attempt under MAILBOX_NUDGE_TIMEOUT_MS)
+	// — a transient `connection_closed` from the herdr socket must not leave
+	// the worker asleep on the first failure. On REPEATED failure a watcher-
+	// visible marker (nudge-failed-<name>.json) is written into the worker's
+	// exchange dir, so the orchestrator's watcher delivers the wake-up on the
+	// next tick instead of the socket; on a SUBSEQUENT successful nudge any
+	// stale marker is deleted (the §23 retire-ack consume discipline — a
+	// leftover marker must not fire for a fresh same-name retry).
+	let nudged = false;
+	let note = "";
+	try {
+		const status = (await transport.getStatus(name))?.status ?? "unknown";
+		if (status === "idle" || status === "blocked" || status === "done") {
+			// EXTERNAL_DEPENDENCY: herdr pane IPC via the injected transport
+			// (submitPrompt types into the worker's live pane; 30 s accept cap).
+			let lastErr: unknown = null;
+			for (let attempt = 1; attempt <= MAILBOX_NUDGE_ATTEMPTS; attempt++) {
+				try {
+					await transport.submitPrompt({
+						name,
+						text: mailboxNudgeText(name),
+						timeoutMs: MAILBOX_NUDGE_TIMEOUT_MS,
+					});
+					nudged = true;
+					break;
+				} catch (err) {
+					lastErr = err;
+					if (attempt < MAILBOX_NUDGE_ATTEMPTS) await sleep(MAILBOX_NUDGE_RETRY_DELAY_MS);
+				}
+			}
+			if (nudged) {
+				// Consume any stale nudge-failed marker (advisory, best-effort —
+				// mirrors the release-ACK consume in observe.ts retirePass).
+				try {
+					await rm(nudgeFailedPathFor(dir, name), { force: true });
+				} catch {
+					// marker cleanup is advisory — the next successful nudge retries
+					// and the marker's own ts fingerprint keeps old events deduped
+				}
+				if (status === "done") {
+					note = " Worker had finished (status done) — re-prompted; the new turn reads a-" + name + ".json.";
+				}
+			} else {
+				const markerPath = nudgeFailedPathFor(dir, name);
+				const ts = new Date().toISOString();
+				try {
+					// Best-effort plain write (not atomic): the watcher's marker
+					// reader is tolerant — a torn read degrades to "no marker" and
+					// the next failed answer/steer re-writes it.
+					await writeFile(
+						markerPath,
+						`${JSON.stringify({ schemaVersion: EXCHANGE_SCHEMA_VERSION, name, ts, error: errText(lastErr) }, null, "\t")}\n`,
+					);
+					note =
+						` Nudge prompt failed after ${MAILBOX_NUDGE_ATTEMPTS} attempts (${errText(lastErr)}) — the answer IS posted at a-${name}.json ` +
+						`and a nudge-failed marker was written (${markerPath}): the watcher delivers the wake-up on its next tick. ` +
+						"If it does not, re-prompt the pane manually or retry the steer.";
+				} catch (markerErr) {
+					note =
+						` Nudge prompt failed after ${MAILBOX_NUDGE_ATTEMPTS} attempts (${errText(lastErr)}) — the answer file IS posted ` +
+						`(marker write also failed: ${errText(markerErr)}); check the pane via delegate_status and nudge manually if needed.`;
+				}
+			}
+		} else if (status === "unknown") {
+			note =
+				` Worker status is unknown — the answer IS posted but may never be read; verify the pane via delegate_status and nudge or re-spawn the worker manually if it does not pick the mail up.`;
+		} else {
+			note =
+				` Worker status is ${status} — no nudge sent to avoid interrupting the running turn; the worker reads a-${name}.json between steps when its brief says steering is expected.`;
+		}
+	} catch (err) {
+		note =
+			` Nudge prompt failed (${errText(err)}) — the answer file IS posted; check the pane via delegate_status and nudge manually if needed.`;
+	}
+	// The getStatus/submitPrompt block above never throws on its own paths —
+	// this outer catch covers unexpected shape changes; retry/marker logic
+	// lives INSIDE the idle/blocked/done branch (F6).
+	return { answerPath, nudged, note };
+}
+
+// ---------------------------------------------------------------------------
 // Mailbox mtime state (Wave 3 step 5 — audit finding 7: ONE implementation
 // of the "which side is newer" read shared by the status tool's markers and
 // the fleet overlay's mail-state cell)
 // ---------------------------------------------------------------------------
-
-import { stat } from "node:fs/promises";
 
 /** The mailbox's mtime-layer state, read-only and tolerant.
  * <p>

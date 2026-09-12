@@ -65,6 +65,17 @@
  *       stuck-TL rule); no children → the pre-existing worker-dead wording;
  *       a win32 casing drift on the child's orchestratorSessionPath still
  *       matches through sameSessionPath.
+ *   W23 auto fix-nudge (fix-report-heal, 2026-09-12): a schema-violating
+ *       report is self-healed, not re-spawned — a LIVE worker gets an
+ *       automatic mailbox steer (a-<name>.json with the validator error +
+ *       the IN PLACE fix mandate) and the event message gains the
+ *       auto-nudge suffix; dedup holds (one nudge per report mtime); a
+ *       rewritten report → report-ready, no second nudge; a NOT-live worker
+ *       gets guidance only (no a-file, no suffix); a failed pane nudge lands
+ *       in the EXISTING nudge-failed marker machinery (real marker file →
+ *       nudge-failed event on a later tick); the report-invalid guidance is
+ *       cheapest-first (steer before re-spawn) in both live and non-live
+ *       shapes.
  * Exit 0 only if all checks pass.
  *
  *   W18 Result-plane states (watcher stage C): the
@@ -73,7 +84,7 @@
  *       (zero wake-ups, zero records) and never masked as report-ready.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
@@ -117,7 +128,8 @@ import {
 	type ManifestWorker,
 } from "../src/exchange.ts";
 import { countSessionToolCall, sessionToolCallNames } from "../src/usage.ts";
-import type { AgentStatus, Transport } from "../src/host.ts";
+import { answerPathFor, nudgeFailedPathFor } from "../src/mailbox-store.ts";
+import type { AgentStatus, PromptReq, Transport } from "../src/host.ts";
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = "") {
@@ -2662,6 +2674,208 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 			`${kindsOf(posixBatch)}`,
 		);
 	}
+}
+
+// ---------------------------------------------------------------------------
+// W23. Auto fix-nudge for schema-violating reports (fix-report-heal, 2026-09-12)
+// ---------------------------------------------------------------------------
+
+{
+	const dir = taskDir("heal");
+	const NAME = "w-heal";
+	const w = mkWorker(dir, NAME);
+	const p = reportPathFor(dir, NAME);
+	// The EXACT incident shape (dice-two, 2026-09-12): a flash-class report
+	// with the conversational "done" instead of the contract's "pass".
+	const writeDoneReport = () => {
+		writeFileSync(p, JSON.stringify({ worker: NAME, status: "done", summary: "s", artifacts: [], evidence: [{ claim: "c", file: "f.ts:1" }] }));
+		utimesSync(p, new Date(NOW), new Date(NOW));
+	};
+	writeDoneReport();
+	const aPath = answerPathFor(dir, NAME);
+
+	const prompts: string[] = [];
+	let nudgeAlwaysFails = false;
+	const status: AgentStatus = { name: NAME, status: "idle" };
+	const transport = {
+		backendName: () => "herdr",
+		listStatuses: async () => [status],
+		getStatus: async () => status,
+		submitPrompt: async (req: PromptReq) => {
+			if (nudgeAlwaysFails) throw new Error("herdr socket: connection_closed: server closed the connection");
+			prompts.push(req.text);
+		},
+	} as unknown as Transport;
+
+	const snap = snapshotFor([w], [status]);
+	const sent: string[] = [];
+	const h = createWatcher({
+		transport,
+		intervalMs: 3_600_000, // hand-driven ticks only
+		send: (t: string) => {
+			sent.push(t);
+		},
+		snapshot: async () => snap,
+		self: { sessionFile: TEST_SELF },
+		detect: { legacyFailOpen: true },
+		log: () => {},
+	});
+
+	// (1) LIVE worker + invalid report → a-file posted with the validator
+	//     error text; the wake message carries the auto-nudge suffix.
+	const batch = await h.tick();
+	const invalid = batch.find((e) => e.kind === "report-invalid");
+	check("W23.1 report-invalid fires for the live worker", invalid !== undefined, kindsOf(batch));
+	let aEnv: { from?: string; answer?: string } = {};
+	try {
+		aEnv = JSON.parse(readFileSync(aPath, "utf8")) as { from?: string; answer?: string };
+	} catch {
+		// leave empty — the check below reports it
+	}
+	check(
+		"W23.1b the a-file steer names the validator error + the IN PLACE fix mandate",
+		aEnv.from === "orchestrator" &&
+			/must be "pass" or "fail", got: "done"/.test(aEnv.answer ?? "") &&
+			/Fix the report file IN PLACE/.test(aEnv.answer ?? "") &&
+			/stay idle/.test(aEnv.answer ?? ""),
+		aEnv.answer ?? "NO a-FILE",
+	);
+	check(
+		"W23.1c the delivered wake carries the auto-nudge suffix",
+		sent.length === 1 && sent[0].includes("an automatic fix nudge was posted to the live worker"),
+		sent[0] ?? "NOTHING SENT",
+	);
+	check("W23.1d the pane nudge fired (idle worker is nudgeable)", prompts.length === 1, JSON.stringify(prompts));
+
+	// (2) Second tick, same report mtime → NO second a-file write (dedup via
+	//     the mtime fingerprint holds), no second nudge.
+	const aMtime1 = statSync(aPath).mtimeMs;
+	const batch2 = await h.tick();
+	const aMtime2 = statSync(aPath).mtimeMs;
+	check(
+		"W23.2 same report mtime → no re-fire, no second steer write, no second nudge",
+		batch2.length === 0 && aMtime1 === aMtime2 && prompts.length === 1,
+		`${kindsOf(batch2)} mtime ${aMtime1}→${aMtime2} prompts=${prompts.length}`,
+	);
+
+	// (3) The worker rewrites the report with "pass" (new mtime) →
+	//     report-ready fires, no new nudge.
+	writeFileSync(p, JSON.stringify({ worker: NAME, status: "pass", summary: "s", artifacts: [], evidence: [{ claim: "c", file: "f.ts:1" }] }));
+	utimesSync(p, new Date(NOW + 60_000), new Date(NOW + 60_000));
+	const batch3 = await h.tick();
+	const aMtime3 = statSync(aPath).mtimeMs;
+	check(
+		"W23.3 fixed report → report-ready, no new steer write, no new nudge",
+		batch3.length === 1 && batch3[0]?.kind === "report-ready" && aMtime3 === aMtime2 && prompts.length === 1,
+		`${kindsOf(batch3)} mtime ${aMtime3} prompts=${prompts.length}`,
+	);
+	check(
+		"W23.3b report-ready never carries the auto-nudge suffix",
+		batch3.length === 1 && !batch3[0]!.message.includes("automatic fix nudge"),
+		batch3[0]?.message ?? "",
+	);
+	h.stop();
+
+	// (4) Worker NOT live (herdr does not know it) → no a-file posted; the
+	//     message has NO auto-nudge suffix (guidance-only) — and the guidance
+	//     is cheapest-first in BOTH shapes (W23.6 wording pin rides here).
+	const dir4 = taskDir("heal-gone");
+	const gone = mkWorker(dir4, "w-heal-gone");
+	writeFileSync(
+		reportPathFor(dir4, "w-heal-gone"),
+		JSON.stringify({ worker: "w-heal-gone", status: "done", summary: "s", artifacts: [], evidence: [{ claim: "c", file: "f.ts:1" }] }),
+	);
+	utimesSync(reportPathFor(dir4, "w-heal-gone"), new Date(NOW), new Date(NOW));
+	const goneSnap = snapshotFor([gone], NO_STATUS); // herdr does not know the worker
+	const sent4: string[] = [];
+	const h4 = createWatcher({
+		transport: { backendName: () => "herdr", listStatuses: async () => [] } as unknown as Transport,
+		intervalMs: 3_600_000,
+		send: (t: string) => {
+			sent4.push(t);
+		},
+		snapshot: async () => goneSnap,
+		self: { sessionFile: TEST_SELF },
+		detect: { legacyFailOpen: true },
+		log: () => {},
+	});
+	const batch4 = await h4.tick();
+	const goneInvalid = batch4.find((e) => e.kind === "report-invalid");
+	check(
+		"W23.4 not-live worker → report-invalid fires WITHOUT the suffix, no a-file",
+		goneInvalid !== undefined &&
+			!goneInvalid!.message.includes("automatic fix nudge") &&
+			!existsSync(answerPathFor(dir4, "w-heal-gone")),
+		`${kindsOf(batch4)} ${(goneInvalid?.message ?? "").slice(-80)}`,
+	);
+	check(
+		"W23.6 the guidance is cheapest-first: steer-in-place before re-spawn, diagnosed fallback kept",
+		!!goneInvalid &&
+			goneInvalid.message.includes("cheapest fix first") &&
+			goneInvalid.message.includes("delegate_mailbox action 'steer'") &&
+			goneInvalid.message.includes("IN PLACE") &&
+			goneInvalid.message.includes("full re-spawn (diagnosed, never verbatim) only if the worker is gone or ignores the fix"),
+		goneInvalid?.message ?? "",
+	);
+	check(
+		"W23.6b the live shape carries the same cheapest-first guidance",
+		!!invalid && invalid.message.includes("cheapest fix first") && invalid.message.includes("diagnosed, never verbatim"),
+		invalid?.message ?? "",
+	);
+	h4.stop();
+
+	// (5) The steer-post PANE failure lands in the EXISTING nudge-failed
+	//     marker machinery — real marker file, real detection (no mocks).
+	const dir5 = taskDir("heal-fail");
+	const failing = mkWorker(dir5, "w-heal-fail");
+	writeFileSync(
+		reportPathFor(dir5, "w-heal-fail"),
+		JSON.stringify({ worker: "w-heal-fail", status: "done", summary: "s", artifacts: [], evidence: [{ claim: "c", file: "f.ts:1" }] }),
+	);
+	utimesSync(reportPathFor(dir5, "w-heal-fail"), new Date(NOW), new Date(NOW));
+	nudgeAlwaysFails = true;
+	const failStatus: AgentStatus = { name: "w-heal-fail", status: "idle" };
+	const failSnap = snapshotFor([failing], [failStatus]);
+	const sent5: string[] = [];
+	const h5 = createWatcher({
+		transport: {
+			backendName: () => "herdr",
+			listStatuses: async () => [failStatus],
+			getStatus: async () => failStatus,
+			submitPrompt: async () => {
+				throw new Error("herdr socket: connection_closed: server closed the connection");
+			},
+		} as unknown as Transport,
+		intervalMs: 3_600_000,
+		send: (t: string) => {
+			sent5.push(t);
+		},
+		snapshot: async () => failSnap,
+		self: { sessionFile: TEST_SELF },
+		detect: { legacyFailOpen: true },
+		log: () => {},
+	});
+	const batch5 = await h5.tick();
+	const markerPath = nudgeFailedPathFor(dir5, "w-heal-fail");
+	check(
+		"W23.5 nudge failure → the steer envelope IS posted and the EXISTING nudge-failed marker is written",
+		existsSync(markerPath) && existsSync(answerPathFor(dir5, "w-heal-fail")) && batch5.some((e) => e.kind === "report-invalid"),
+		`marker=${existsSync(markerPath)} kinds=${kindsOf(batch5)}`,
+	);
+	const marker = JSON.parse(readFileSync(markerPath, "utf8")) as { name?: string; error?: string };
+	check(
+		"W23.5b the marker names the worker and the socket error (envelope shape intact)",
+		marker.name === "w-heal-fail" && /connection_closed/.test(marker.error ?? ""),
+		JSON.stringify(marker),
+	);
+	// The next tick picks the marker up through the REAL detection path.
+	const batch5b = await h5.tick();
+	check(
+		"W23.5c the next tick fires the nudge-failed event from the marker (integration, not a mock)",
+		batch5b.some((e) => e.kind === "nudge-failed") && !batch5b.some((e) => e.kind === "report-invalid"),
+		kindsOf(batch5b),
+	);
+	h5.stop();
 }
 
 rmSync(FIX, { recursive: true, force: true });
