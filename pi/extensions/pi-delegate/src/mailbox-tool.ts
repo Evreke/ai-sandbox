@@ -15,8 +15,9 @@
  * write q-<name>.json when blocked and poll a-<name>.json for answers.
  * <p>
  * MODULE_CONTRACT: registers the `delegate_mailbox` tool (exact name, exact
- * parameter shape — frozen surface) plus the NUDGE_* constants (the pane
- * nudge budget + text). Answer/steer post the a-file BEFORE nudging; the
+ * parameter shape — frozen surface). Answer/steer post the a-file BEFORE
+ * nudging THROUGH THE ONE posting core (postSteerAndNudge in mailbox-store.ts
+ * — Law 9, shared with the watcher's automatic fix nudge); the
  * stale question is archived so it can never re-fire AWAITING_ANSWER; nudge
  * failures do not fail the action (the answer file is already posted) — on
  * repeated failure a watcher-visible nudge-failed-<name>.json marker is
@@ -32,23 +33,23 @@
  * §4.1 — the Transport instance is injected from index.ts).
  */
 
-import { rename, rm, writeFile } from "node:fs/promises";
+import { rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { exchangeRoot } from "./exchange.ts";
 import { questionArchivePathFor } from "./expaths.ts";
-import { EXCHANGE_SCHEMA_VERSION, manifestStore } from "./manifest-store.ts";
+import { manifestStore } from "./manifest-store.ts";
 import {
 	answerPathFor,
-	nudgeFailedPathFor,
+	postSteerAndNudge,
 	questionPathFor,
 	readQuestion,
 	releasePathFor,
-	writeAnswer,
 	writeRelease,
 } from "./mailbox-store.ts";
-import { errText, fail, sleep, textResult, type ToolResult } from "./tool-result.ts";
+import type { SteerPostResult } from "./mailbox-store.ts";
+import { errText, fail, textResult, type ToolResult } from "./tool-result.ts";
 // Wave 4 item 2 (Law 1 truncation duty): worker-written question text is
 // capped in the rendered result via pi's own truncation helpers.
 import { capWorkerText } from "./text-cap.ts";
@@ -78,19 +79,6 @@ import { WORKER_NAME_RE, type QuestionEnvelope, type Transport } from "./host.ts
  * transport IMPLEMENTATION directly (herdr CLI lives behind
  * createHerdrTransport, bound once in index.ts).
  */
-
-/** Max wait for a nudge prompt *submission* to be accepted (not for settle). */
-const NUDGE_TIMEOUT_MS = 30_000;
-/** F6 nudge resilience: total submitPrompt attempts (1 initial + 2 retries) and
- *  the backoff between them. Bounded by design — worst case ~3×NUDGE_TIMEOUT_MS
- *  + 2 delays, and each attempt stays under the NUDGE_TIMEOUT_MS cap. A
- *  transient `herdr socket: connection_closed` must not leave the worker asleep
- *  on the first failure (2026-09-10 field report). */
-const NUDGE_ATTEMPTS = 3;
-const NUDGE_RETRY_DELAY_MS = 500;
-/** Nudge text — points the worker at the answer file, per DESIGN.md §12. */
-const NUDGE_TEXT = (name: string) =>
-	`Mailbox update posted: read a-${name}.json next to your brief and continue accordingly.`;
 
 // Wave 3 decomposition (step 4): the tool-result vocabulary moved verbatim
 // to src/tool-result.ts — the structural kill of the byte-identical
@@ -294,10 +282,41 @@ export function registerMailboxTool(pi: import("@earendil-works/pi-coding-agent"
 			}
 
 			const answerPath = answerPathFor(dir, params.name);
+			// EXTERNAL_DEPENDENCY: exchange dir on disk — answer file at
+			// /tmp/exchange/<task>/a-<name>.json (atomic write inside mailbox-store.ts).
+			// The ONE posting core (postSteerAndNudge) writes the envelope, then runs
+			// the afterPost hook, then nudges the pane — posting and nudging are no
+			// longer duplicated here (Law 9; shared with the watcher auto-nudge).
+			let steer: SteerPostResult;
+			let archiveNote = "";
 			try {
-				// EXTERNAL_DEPENDENCY: exchange dir on disk — answer file at
-				// /tmp/exchange/<task>/a-<name>.json (atomic write inside exchange.ts).
-				await writeAnswer(answerPath, params.text);
+				steer = await postSteerAndNudge(transport, params.name, dir, params.text, {
+					// afterPost — runs AFTER the envelope is durably posted and BEFORE
+					// the pane nudge.
+					//
+					// EXTERNAL_DEPENDENCY: fs rename inside the exchange dir
+					// (/tmp/exchange/<task>/q-<name>.json → q-<name>.answered-<ts>.json).
+					// Archive the question right after the answer lands: q-<name>.json
+					// must not survive a successful answer, or a later run for the same
+					// worker name would re-fire AWAITING_ANSWER with the stale question
+					// (review fix). Best-effort: a missing q-file is normal for 'steer';
+					// any other rename failure is noted but does not fail the action —
+					// the answer file is already posted.
+					afterPost: async () => {
+						try {
+							await rename(
+								questionPathFor(dir, params.name),
+								questionArchivePathFor(dir, params.name, Date.now()),
+							);
+							archiveNote = " Pending question archived.";
+						} catch (err) {
+							if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+								archiveNote =
+									` Question archive failed (${errText(err)}) — delete q-${params.name}.json manually, otherwise a later run may re-fire AWAITING_ANSWER with the stale question.`;
+							}
+						}
+					},
+				});
 			} catch (err) {
 				return fail(
 					"E_BRIEF",
@@ -306,117 +325,11 @@ export function registerMailboxTool(pi: import("@earendil-works/pi-coding-agent"
 				);
 			}
 
-			// EXTERNAL_DEPENDENCY: fs rename inside the exchange dir
-			// (/tmp/exchange/<task>/q-<name>.json → q-<name>.answered-<ts>.json).
-			// Archive the question right after the answer lands: q-<name>.json must not
-			// survive a successful answer, or a later run for the same worker name would
-			// re-fire AWAITING_ANSWER with the stale question (review fix). Best-effort:
-			// a missing q-file is normal for 'steer'; any other rename failure is noted
-			// but does not fail the action — the answer file is already posted.
-			let archiveNote = "";
-			try {
-				await rename(
-					questionPathFor(dir, params.name),
-					questionArchivePathFor(dir, params.name, Date.now()),
-				);
-				archiveNote = " Pending question archived.";
-			} catch (err) {
-				if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
-					archiveNote =
-						` Question archive failed (${errText(err)}) — delete q-${params.name}.json manually, otherwise a later run may re-fire AWAITING_ANSWER with the stale question.`;
-				}
-			}
-
-			// Nudge idle/blocked/done workers — a working agent must not be
-			// interrupted mid-turn. A done agent IS woken: submitPrompt starts a new
-			// turn on the existing pane and that turn reads the answer file (§12
-			// promises a nudge for answer/steer with no status restriction). Unknown
-			// status → honest warning instead of a silent success.
-			//
-			// F6 nudge resilience: submitPrompt is retried with a short backoff
-			// (NUDGE_ATTEMPTS total, each attempt under NUDGE_TIMEOUT_MS) — a
-			// transient `connection_closed` from the herdr socket must not leave the
-			// worker asleep on the first failure. On REPEATED failure a watcher-
-			// visible marker (nudge-failed-<name>.json) is written into the worker's
-			// exchange dir, so the orchestrator's watcher delivers the wake-up on the
-			// next tick instead of the socket; on a SUBSEQUENT successful nudge any
-			// stale marker is deleted (the §23 retire-ack consume discipline — a
-			// leftover marker must not fire for a fresh same-name retry).
-			let nudged = false;
-			let nudgeNote = "";
-			try {
-				const status = (await transport.getStatus(params.name))?.status ?? "unknown";
-				if (status === "idle" || status === "blocked" || status === "done") {
-					// EXTERNAL_DEPENDENCY: herdr pane IPC via the injected transport
-					// (submitPrompt types into the worker's live pane; 30 s accept cap).
-					let lastErr: unknown = null;
-					for (let attempt = 1; attempt <= NUDGE_ATTEMPTS; attempt++) {
-						try {
-							await transport.submitPrompt({
-								name: params.name,
-								text: NUDGE_TEXT(params.name),
-								timeoutMs: NUDGE_TIMEOUT_MS,
-							});
-							nudged = true;
-							break;
-						} catch (err) {
-							lastErr = err;
-							if (attempt < NUDGE_ATTEMPTS) await sleep(NUDGE_RETRY_DELAY_MS);
-						}
-					}
-					if (nudged) {
-						// Consume any stale nudge-failed marker (advisory, best-effort —
-						// mirrors the release-ACK consume in observe.ts retirePass).
-						try {
-							await rm(nudgeFailedPathFor(dir, params.name), { force: true });
-						} catch {
-							// marker cleanup is advisory — the next successful nudge retries
-							// and the marker's own ts fingerprint keeps old events deduped
-						}
-						if (status === "done") {
-							nudgeNote = " Worker had finished (status done) — re-prompted; the new turn reads a-" + params.name + ".json.";
-						}
-					} else {
-						const markerPath = nudgeFailedPathFor(dir, params.name);
-						const ts = new Date().toISOString();
-						try {
-							// Best-effort plain write (not atomic): the watcher's marker
-							// reader is tolerant — a torn read degrades to "no marker" and
-							// this handler re-writes it on the next failed answer/steer.
-							await writeFile(
-								markerPath,
-								`${JSON.stringify({ schemaVersion: EXCHANGE_SCHEMA_VERSION, name: params.name, ts, error: errText(lastErr) }, null, "\t")}\n`,
-							);
-							nudgeNote =
-								` Nudge prompt failed after ${NUDGE_ATTEMPTS} attempts (${errText(lastErr)}) — the answer IS posted at a-${params.name}.json ` +
-								`and a nudge-failed marker was written (${markerPath}): the watcher delivers the wake-up on its next tick. ` +
-								"If it does not, re-prompt the pane manually or retry the steer.";
-						} catch (markerErr) {
-							nudgeNote =
-								` Nudge prompt failed after ${NUDGE_ATTEMPTS} attempts (${errText(lastErr)}) — the answer file IS posted ` +
-								`(marker write also failed: ${errText(markerErr)}); check the pane via delegate_status and nudge manually if needed.`;
-						}
-					}
-				} else if (status === "unknown") {
-					nudgeNote =
-						` Worker status is unknown — the answer IS posted but may never be read; verify the pane via delegate_status and nudge or re-spawn the worker manually if it does not pick the mail up.`;
-				} else {
-					nudgeNote =
-						` Worker status is ${status} — no nudge sent to avoid interrupting the running turn; the worker reads a-${params.name}.json between steps when its brief says steering is expected.`;
-				}
-			} catch (err) {
-				nudgeNote =
-					` Nudge prompt failed (${errText(err)}) — the answer file IS posted; check the pane via delegate_status and nudge manually if needed.`;
-			}
-			// The getStatus/submitPrompt block above never throws on its own paths —
-			// this outer catch covers unexpected shape changes; retry/marker logic
-			// lives INSIDE the idle/blocked/done branch (F6).
-
 			return textResult(
-				`${params.action === "steer" ? "Steering" : "Answer"} posted to ${answerPath} for worker ${params.name}.` +
-					(nudged ? ` Nudge prompt sent — the worker will read a-${params.name}.json and continue.` : nudgeNote) +
+				`${params.action === "steer" ? "Steering" : "Answer"} posted to ${steer.answerPath} for worker ${params.name}.` +
+					(steer.nudged ? ` Nudge prompt sent — the worker will read a-${params.name}.json and continue.` : steer.note) +
 					archiveNote,
-				{ action: params.action, name: params.name, dir, answerPath, nudged },
+				{ action: params.action, name: params.name, dir, answerPath: steer.answerPath, nudged: steer.nudged },
 			);
 		},
 	});
