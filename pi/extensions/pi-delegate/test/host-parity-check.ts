@@ -25,6 +25,7 @@ import { promisify } from "node:util";
 import { readManifest, updateManifest, type ManifestWorker } from "../src/exchange.ts";
 import { FakeWorkerHost } from "../src/host/fake.ts";
 import { createHerdrTransport } from "../src/herdr/host.ts";
+import { installSignalCleanup, sweepStaleHerdrFixtures } from "./herdr-hygiene-fixture.ts";
 import type { Placement, Transport } from "../src/host.ts";
 
 const execFileP = promisify(execFile);
@@ -50,6 +51,56 @@ try {
 // Shared fixture: one throwaway repo + one sandboxed exchange dir per leg
 // (fixture hygiene: NEVER the live /tmp/exchange root — $PI_DELEGATE_EXCHANGE_
 // ROOT override, see exchange.ts exchangeRoot()).
+
+// --- stale-fixture sweep + SIGTERM-safe cleanup (herdr-hygiene-fixture) -----
+// The herdr leg places REAL herdr worktrees from a throwaway
+// host-parity-repo-herdr-* repo. Sweep LEFTOVER state from previous
+// killed/crashed runs BEFORE creating any new fixture, and arm the bounded
+// signal handler so THIS run's cleanup also fires on the runner's
+// `timeout 30` SIGTERM (finally never runs on signal death). The fake leg
+// leaves no herdr state — the sweep prefix covers only the HERDR leg's repo
+// prefix (driveParityFlow label "herdr" → mkdtemp prefix
+// "host-parity-repo-herdr-").
+{
+	const swept = await sweepStaleHerdrFixtures(["host-parity-repo-herdr-"]);
+	console.log(`swept stale host-parity-repo-herdr-* fixtures: closed ${swept.closed.length} / failed ${swept.failed.length}`);
+}
+
+// Module-scope handles for the signal-handler cleanup (the herdr leg's
+// try/finally body, extracted): the cwd restore target and the throwaway
+// root-cwd dir it created. Undefined until the herdr leg starts.
+let parityPrevCwd: string | undefined;
+let parityRootCwd: string | undefined;
+
+// Idempotent module-scope cleanup — the signal handler (installSignalCleanup
+// below) and the herdr leg's `finally` both call this; the guard makes double
+// invocation harmless.
+let parityCleaned = false;
+async function cleanupAll() {
+	if (parityCleaned) return;
+	parityCleaned = true;
+	// Each step individually guarded: a signal may arrive before the herdr leg
+	// ever ran (both handles still undefined) — partial cleanup beats none.
+	if (parityPrevCwd !== undefined) {
+		try { process.chdir(parityPrevCwd); } catch { /* cwd already gone */ }
+	}
+	if (parityRootCwd !== undefined) {
+		try { rmSync(parityRootCwd, { recursive: true, force: true }); } catch { /* already gone */ }
+		parityRootCwd = undefined;
+	}
+	// Fixture sweep: every `herdr worktree create` against the fixture repo
+	// ALSO creates a repo-level shell workspace whose checkout_path IS the
+	// /tmp host-parity-repo-herdr-* repo itself (is_linked_worktree: false);
+	// the flow's teardown never touches that shell, and on a mid-run signal
+	// the branch worktree workspace leaks too — once driveParityFlow's
+	// finally rm's the repo dir (or a signal kills the process before it),
+	// the shells become "(deleted)" ghost tabs (the 2026-09 incident shape).
+	// The sweep closes them best-effort on BOTH the normal and the signal path.
+	await sweepStaleHerdrFixtures(["host-parity-repo-herdr-"]);
+	try { rmSync(EXCHANGE_SANDBOX, { recursive: true, force: true }); } catch { /* already gone */ }
+}
+installSignalCleanup(cleanupAll);
+
 const EXCHANGE_SANDBOX = mkdtempSync(join(tmpdir(), "host-parity-exchange-"));
 process.env.PI_DELEGATE_EXCHANGE_ROOT = EXCHANGE_SANDBOX;
 
@@ -217,10 +268,12 @@ if (!herdrAvailable) {
 	// Authority model (design §4.3): worktree placement is ROOT-only — the
 	// authority derives from process.cwd() vs the herdr worktree root. This
 	// test itself may RUN inside a worktree (agent worktree), so the herdr leg
-	// chdirs out for the placement ops and restores afterwards.
-	const prevCwd = process.cwd();
-	const rootCwd = mkdtempSync(join(tmpdir(), "host-parity-cwd-"));
-	process.chdir(rootCwd);
+	// chdirs out for the placement ops and restores afterwards. The handles
+	// are module-scope so the signal-handler cleanup (cleanupAll) can reach
+	// them on a mid-run SIGTERM.
+	parityPrevCwd = process.cwd();
+	parityRootCwd = mkdtempSync(join(tmpdir(), "host-parity-cwd-"));
+	process.chdir(parityRootCwd);
 	try {
 		const herdrHost2 = createHerdrTransport();
 		const h = await driveParityFlow(herdrHost2, "herdr", "worktree");
@@ -253,14 +306,31 @@ check(
 	const withIds = statuses.filter((s) => (s as { paneId?: unknown }).paneId !== undefined || (s as { tabId?: unknown }).tabId !== undefined);
 	check("P5.herdr listStatuses leaks no backend ids (read model = name/status/placementRef)", withIds.length === 0, JSON.stringify(withIds[0]));
 	} finally {
-		process.chdir(prevCwd);
-		rmSync(rootCwd, { recursive: true, force: true });
+		await cleanupAll();
 	}
 }
 
 // --- self cleanup -----------------------------------------------------------
 
+// The herdr leg's cleanupAll() already removed EXCHANGE_SANDBOX on the normal
+// path; this idempotent rm covers the herdr-less path (cleanupAll only runs
+// there via a signal).
 rmSync(EXCHANGE_SANDBOX, { recursive: true, force: true });
+
+// P.H — herdr state self-clean (regression pin for the run-checks `timeout`
+// leak, 2026-09 incident: 32 ghost workspaces + 332 orphan dirs). Re-runs the
+// sweep's list step after the run: if the herdr leg left any
+// 'host-parity-repo-herdr-' workspace behind (or a previous run's leftover
+// could not be cleaned), the sweep reports it via closed/failed and this
+// check FAILS the test.
+{
+	const selfClean = await sweepStaleHerdrFixtures(["host-parity-repo-herdr-"]);
+	check(
+		"P.H herdr state self-clean: no 'host-parity-repo-herdr-' workspaces remain after the run",
+		selfClean.closed.length === 0 && selfClean.failed.length === 0,
+		JSON.stringify(selfClean),
+	);
+}
 
 if (failures > 0) {
 	console.error(`\n${failures} HOST-PARITY CHECK(S) FAILED`);
