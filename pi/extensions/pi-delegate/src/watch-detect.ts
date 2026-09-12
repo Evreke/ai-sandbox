@@ -1,6 +1,6 @@
 /**
  * pi-delegate — watch-detect: the watcher's EVENT MODEL + SNAPSHOT + DETECTION
- * (DESIGN.md §21, §22) — extracted verbatim from observe.ts (Wave 3, audit
+ * — extracted verbatim from observe.ts (Wave 3, audit
  * Law 5: modules are responsibilities). This module answers "what is the
  * fleet doing and what events fire"; the tick loop, delivery and §23 retire
  * live in watcher.ts / watch-retire.ts / status-tool.ts.
@@ -28,8 +28,8 @@
  *     are auditable (onSkip).
  *   - every read tolerant: garbage manifests/statuses degrade to fewer
  *     events, never a throw (advisory by contract).
- * Never imports the transport implementation (dependency rule, DESIGN.md
- * §4.1 — the Transport instance is injected from index.ts).
+ * Never imports the transport implementation (dependency rule, ARCHITECTURE.md
+ * Law 4 — the Transport instance is injected from index.ts).
  */
 
 import {

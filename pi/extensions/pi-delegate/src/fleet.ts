@@ -1,6 +1,7 @@
 /**
  * pi-delegate — fleet UI module: everything the extension renders about the
- * worker fleet (DESIGN.md §15 overlay, §19.4 ambient widget), plus the two
+ * worker fleet (the /delegate-fleet overlay and the ambient live-rows
+ * widget), plus the two
  * things the UI layers share: worker ownership classification and width-safe
  * text primitives.
  * <p>
@@ -93,7 +94,7 @@ import {
  * pi-delegate — worker ownership classification (fleet-UX wave 2, stage 1).
  *
  * Mirror of the watcher's ownership rule (observe.ts isSelf /
- * detectWorkerEvents, DESIGN.md §21.1 F1): a worker is MINE iff the manifest's
+ * detectWorkerEvents): a worker is MINE iff the manifest's
  * `orchestratorSessionPath` equals THIS session's JSONL path. Legacy manifests
  * carry no such field → ownership UNKNOWN.
  *
@@ -283,7 +284,7 @@ export function clampLines(lines: string[], width?: number): string[] {
 // ===========================================================================
 
 /**
- * pi-delegate — ambient fleet UI (DESIGN.md §19.4).
+ * pi-delegate — ambient fleet UI.
  *
  * OWNERSHIP: contracts authored by the tech lead; implementation owned by
  * worker B6 (impl-ui). All functions MUST be inert when the context has no UI.
@@ -298,8 +299,8 @@ export function clampLines(lines: string[], width?: number): string[] {
  *   registerTool renderCall/renderResult          — themed transcript rendering
  *
  * Design choice (documented in report-impl-ui.json): the refresh interval is
- * NOT cleared when the live set goes empty (only on dispose) — DESIGN.md §19.4
- * says "timer cleared on empty", but that would freeze the widget forever after
+ * NOT cleared when the live set goes empty (only on dispose) — clearing the
+ * timer on empty would freeze the widget forever after
  * the first idle window (nothing would ever re-mount it when a new worker
  * spawns). Keeping the 2 s tick costs one cheap getRows() poll and lets the
  * widget reappear on the next spawn; the WIDGET is cleared on empty, the
@@ -593,7 +594,7 @@ function wrapLine(text: string, width = 100): string[] {
 
 /**
  * Render one delegate-family tool result as themed lines for the transcript.
- * Rules (DESIGN.md §19.4): status-colored badge; E_* code as error/warning;
+ * Rules: status-colored badge; E_* code as error/warning;
  * ONE-line verdict headline; herdr internals (terminal_id/pane_id/… patterns)
  * NEVER in the headline — caller still puts them in details. Returns lines.
  */
@@ -643,7 +644,7 @@ export function renderDelegateLines(
 // ===========================================================================
 
 /**
- * pi-delegate — `/delegate-fleet` mission-control overlay (DESIGN.md §15).
+ * pi-delegate — `/delegate-fleet` mission-control overlay.
  *
  * OWNERSHIP: worker F2 (impl-fleet); stage 2 (tree + fold) on top.
  *
@@ -1720,7 +1721,7 @@ export async function openFleetOverlay(ctx: ExtensionCommandContext, deps: Fleet
 // ===========================================================================
 
 /**
- * pi-delegate — worker view aggregation (DESIGN.md §5.2).
+ * pi-delegate — worker view aggregation.
  *
  * OWNERSHIP: worker B (impl-tools).
  *

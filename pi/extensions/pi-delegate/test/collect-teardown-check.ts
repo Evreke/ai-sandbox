@@ -1,5 +1,5 @@
 /**
- * Collect-teardown matrix (v1.12.1, DESIGN.md §22) — teardown-after-collect.
+ * Collect-teardown matrix (v1.12.1) — teardown-after-collect.
  *
  * Run with: bun test/collect-teardown-check.ts   (from extensions/pi-delegate)
  *

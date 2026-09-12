@@ -306,7 +306,8 @@ export interface DeliveryRecord {
 	worker: string;
 	kind: string;
 	/** Canonical fingerprint (episode identifier for gauge/absence kinds —
-	 *  never an empty constant; see the fingerprint table in DESIGN.md). */
+	 *  never an empty constant; the spelling lives in this module's
+	 *  fingerprint helpers). */
 	fingerprint: string;
 	/** ISO 8601 — when the successful send was committed. */
 	deliveredAt: string;

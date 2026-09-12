@@ -1,6 +1,6 @@
 /**
  * host-fake-check — PoC end-to-end drive of the WorkerHost seam on the fake
- * (the backend-neutral seam shipped in 1.16.0 — DESIGN.md §24). Run with:
+ * (the backend-neutral seam shipped in 1.16.0). Run with:
  * bun run test/host-fake-check.ts
  *
  * Proves (the brief's «Must prove» items 2 and 4):

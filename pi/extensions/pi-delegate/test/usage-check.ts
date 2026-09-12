@@ -1,5 +1,5 @@
 /**
- * A8 — Gauge unit checks (DESIGN.md §20, v1.7 dual-gauge contract).
+ * A8 — Gauge unit checks (v1.7 dual-gauge contract).
  *
  * Run with: bun test/usage-check.ts   (from repo root)
  *

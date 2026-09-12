@@ -1,5 +1,5 @@
 /**
- * T2 — Transport contract tests against REAL herdr (DESIGN.md §8).
+ * T2 — Transport contract tests against REAL herdr.
  *
  * Run with: bun test/transport-contract.ts   (from repo root; NOT inside a herdr worktree cwd)
  *

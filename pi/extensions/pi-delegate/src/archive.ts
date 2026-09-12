@@ -1,6 +1,6 @@
 
 /**
- * pi-delegate — report archive (DESIGN.md §19.3).
+ * pi-delegate — report archive.
  *
  * MODULE_CONTRACT — the durable report archive.
  *

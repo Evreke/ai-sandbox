@@ -42,7 +42,7 @@ function isNonEmptyString(v: unknown): v is string {
 }
 
 /**
- * Strict collect (DESIGN.md §6): file must exist, parse as JSON, and satisfy
+ * Strict collect (the WorkerReport contract): file must exist, parse as JSON, and satisfy
  * the WorkerReport schema — worker === canonical name, status ∈ {pass, fail},
  * non-empty summary, artifacts/evidence arrays present.
  */
@@ -201,14 +201,14 @@ export function validateReportAgainstSchema(
 /**
  * Resolve the report schema for a brief. Returns the resolved JSON-Schema
  * fragment plus its provenance chain, or a rejection reason.
- * Semantics (DESIGN.md §16 + §11 backward compat): reportSchema ABSENT →
+ * Semantics: reportSchema ABSENT →
  * {ok:true, schema:null, provenance:[]} — base-only validation; schema-less
  * briefs remain valid. Inline object wins (provenance ["inline"]); a string
  * value names a library type; "$extends" chains merge parent-under-child
  * (properties union, required union, other keywords child-wins). Unknown
  * name / cycle / depth overflow / invalid JSON / non-object → {ok:false}.
  *
- * Contract (DESIGN.md §16, two-tier): when projectSchemaDir is provided it is
+ * Contract (two-tier library): when projectSchemaDir is provided it is
  * searched FIRST, before the user-level library ~/.pi/agent/pi-delegate-schemas/
  * — project overrides user (first match wins). The CALLER supplies the project
  * root (the orchestrator's cwd + ".pi/delegate-schemas"), because the brief path
@@ -222,7 +222,7 @@ export function resolveReportSchema(
 	return resolveReportSchemaInDir(briefPath, undefined, projectSchemaDir);
 }
 
-/** User-level schema library dir (DESIGN.md §16): under pi's agent dir
+/** User-level schema library dir: under pi's agent dir
  *  (getAgentDir() — honors PI_CODING_AGENT_DIR, default ~/.pi/agent).
  *  Module-level constant computed from the pi export at module load. */
 const USER_SCHEMA_DIR = join(getAgentDir(), "pi-delegate-schemas");
@@ -254,7 +254,7 @@ export function resolveReportSchemaInDir(briefPath: string, schemaDir?: string, 
 	try {
 		frontmatter = parseFrontmatter(content).frontmatter;
 	} catch {
-		// Backward compat (DESIGN.md §11): no frontmatter at all → base-only.
+		// Backward compat: no frontmatter at all → base-only.
 		return { ok: true, schema: null, provenance: [] };
 	}
 	if (typeof frontmatter !== "object" || frontmatter === null || Array.isArray(frontmatter)) {
@@ -262,7 +262,7 @@ export function resolveReportSchemaInDir(briefPath: string, schemaDir?: string, 
 	}
 	const declared = (frontmatter as Record<string, unknown>).reportSchema;
 
-	// Two-tier library search (DESIGN.md §16): project-local dir first, then
+	// Two-tier library search: project-local dir first, then
 	// user-level (or the schemaDir test seam). First match wins.
 	const load = (name: string) => {
 		if (projectSchemaDir !== undefined) {
@@ -283,7 +283,7 @@ export function resolveReportSchemaInDir(briefPath: string, schemaDir?: string, 
 		return resolveExtendsChain(declared, loaded.schema, load);
 	}
 
-	// reportSchema absent (or not object/string) → base-only (DESIGN.md §11).
+	// reportSchema absent (or not object/string) → base-only.
 	return { ok: true, schema: null, provenance: [] };
 }
 

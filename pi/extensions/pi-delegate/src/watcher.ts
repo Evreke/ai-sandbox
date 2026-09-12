@@ -1,6 +1,6 @@
 /**
  * pi-delegate — watcher: the event-driven background watcher LOOP + delivery
- * + the mount lifecycle registry (DESIGN.md §21) — extracted verbatim from
+ * + the mount lifecycle registry — extracted verbatim from
  * observe.ts (Wave 3, audit Law 5: modules are responsibilities).
  * <p>
  * MODULE_CONTRACT: builds and runs the poller (createWatcher — one tick =
@@ -19,7 +19,8 @@
  * mailbox-store.ts (the ONE steer-posting core — the report-invalid auto
  * fix nudge shares it with the delegate_mailbox tool, Law 9), host.ts (the
  * Transport seam). Never imports the transport implementation (dependency
- * rule, DESIGN.md §4.1 — the Transport instance is injected from index.ts).
+ * rule, ARCHITECTURE.md Law 4 — the Transport instance is injected from
+ * index.ts).
  * Never imports observe.ts (Law 6 pin — observe remains only a facade over
  * this module for one release).
  */
@@ -80,7 +81,7 @@ export function formatEventBatch(events: WatchEvent[]): string {
 }
 
 /**
- * Audit line for a REAL send (DESIGN.md §21 delivery).
+ * Audit line for a REAL send (watcher delivery).
  * <p>
  * The durable delivery store answers "what did this audience already hear";
  * this line answers the incident question the store cannot: WHAT EXACTLY was
@@ -511,7 +512,7 @@ function steerText(w: { reportPath?: string }, e: WatchEvent): string {
 			log("delivery sink is silent (no usable pi.sendUserMessage) — wake-up suppressed in memory, nothing committed to the durable store");
 			return events;
 		}
-		// DESIGN.md §21 delivery: every REAL send is recorded as
+		// Watcher delivery: every REAL send is recorded as
 		// ONE audit line per batch with the batch content (dir :: worker/kind#fp
 		// per event) — the recovery trail after an incident. Written at the send
 		// SUCCESS, before the durable commit: the line describes the FACT OF
@@ -785,7 +786,7 @@ export function makeWatcherLogSink(): (m: string) => void {
 }
 
 /**
- * Start the watcher for this session (DESIGN.md §21: headless-safe — NO
+ * Start the watcher for this session (headless-safe — NO
  * ctx.hasUI guard). Returns the dispose fn.
  * <p>
  * FUNCTION_CONTRACT:

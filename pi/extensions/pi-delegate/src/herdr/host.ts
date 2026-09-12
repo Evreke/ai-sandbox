@@ -65,26 +65,26 @@ import {
 // ============================================================================
 
 /**
- * pi-delegate — herdr transport (DESIGN.md §4.2, §4.3).
+ * pi-delegate — herdr transport.
  *
  * Thin implementation of the `Transport` seam on top of the herdr CLI.
  * Every call shells out via `node:child_process.execFile` with array args —
  * never shell strings. All *mutating* herdr ops (place / start / prompt /
  * teardown) are serialized through one internal promise queue so two
  * concurrent delegate calls can never run a mutating herdr op in parallel
- * (DESIGN.md §9: parallel mutating ops hang the pane process group).
+ * (ARCHITECTURE.md Law 4: parallel mutating ops hang the pane process group).
  *
  * herdr CLI convention (verified 2026-09-05): commands print a JSON line
  * `{"id":"...","result":{...}}` on stdout; we parse the last line and use
  * `.result`. Non-zero exit → typed DelegateError with the error-code mapping
- * from DESIGN.md §7.
+ * from the E_* taxonomy (host.ts).
  */
 
 
 /** Worktree checkout dir — sessions cwd'd under (or exactly at) it are sub-orchestrators.
  *  Resolved at RUNTIME via os.homedir(): a hardcoded /root path breaks every
  *  non-root user (boundary checks below would never recognize their
- *  sub-orchestrator sessions). Matches DESIGN.md's documented `~/.herdr/worktrees/`. */
+ *  sub-orchestrator sessions). Matches the documented `~/.herdr/worktrees/` convention. */
 const WORKTREE_DIR = join(homedir(), ".herdr", "worktrees");
 
 /** Env var carrying the herdr workspace id of the current session's pane. */
@@ -182,7 +182,7 @@ const WAIT_SLEEP_MS = 1_000;
 const SETTLED: readonly AgentStatusName[] = ["idle", "done", "blocked"];
 
 /** Statuses that count as "the agent actually started" for the start-up phase
- *  of waitSettle() (DESIGN.md §19.1): working/blocked/done. `done` also proves
+ *  of waitSettle(): working/blocked/done. `done` also proves
  *  the prompt was consumed — a worker that starts AND finishes within one wait
  *  slice must NOT be misclassified neverStarted (R6 finding, live-reproduced
  *  by transport-contract T2.2e); done additionally means finished, so the
@@ -1138,7 +1138,7 @@ export class HerdrTransport implements Transport {
 		 *  instead of blocking the rest of the settle gate. Never set for probes. */
 		releaseOnStarted?: boolean;
 	}): Promise<SettleResult> {
-		// BUG_FIX_CONTEXT (D3, DESIGN.md §19.1) — two-phase state machine against
+		// BUG_FIX_CONTEXT (D3) — two-phase state machine against
 		// the settle-before-start race: the first `agent wait --until idle…` slice
 		// can match BEFORE the prompt is consumed (agent still idle) → instant
 		// false settle (field report: six fan-out workers all "settled idle" at
@@ -1155,9 +1155,9 @@ export class HerdrTransport implements Transport {
 		// Phase SETTLED (after the first such observation): current behavior —
 		// idle/done/blocked settle; slices + reconcile; abort → detach.
 		//
-		// BUG_FIX_CONTEXT (v1.8, DESIGN.md §19.1b) — the aged-finish blind spot
-		// (live-reproduced; full record: DESIGN.md §19.1b — the CHANGELOG starts
-		// at v1.11.0, so §19.1b is the audit trail): herdr ages done→idle within
+		// BUG_FIX_CONTEXT (v1.8) — the aged-finish blind spot
+		// (live-reproduced; full record: git history — the CHANGELOG starts
+		// at v1.11.0, so this fix predates it): herdr ages done→idle within
 		// minutes, so a watcher that attaches late — fast flash probes,
 		// abort/detach recovery, slow start — can NEVER observe working/done and
 		// spins the FULL timeout against a visibly finished worker, then
@@ -1174,7 +1174,7 @@ export class HerdrTransport implements Transport {
 		let sessionLookupDone = false;
 		while (Date.now() < deadline) {
 			if (req.signal?.aborted) {
-				// Abort detaches the wait, never the worker (DESIGN.md §5.1).
+				// Abort detaches the wait, never the worker.
 				const s = await this.getStatus(req.name).catch(() => null);
 				return { kind: "detached", status: s?.status ?? last };
 			}
@@ -1426,7 +1426,7 @@ export class HerdrTransport implements Transport {
 			};
 		} catch (err) {
 			const msg = (err as Error).message ?? "";
-			// BUG_FIX_CONTEXT (D4, DESIGN.md §19.2): this herdr build does NOT
+			// BUG_FIX_CONTEXT (D4): this herdr build does NOT
 			// auto-uniquify. Two failure shapes say the same fact — structured
 			// `agent_name_taken` and plain text "…<name>: name taken by a live agent
 			// (candidates: …)". Symptom: the plain-text shape surfaced as a generic
@@ -1611,8 +1611,8 @@ export class HerdrTransport implements Transport {
 			// not-found-shaped close is the structured alreadyGone signal — the
 			// placement is verifiably absent, an idempotent no-op, not an error.
 			if (/not[\s_-]?found/i.test(msg)) return { alreadyGone: true };
-			// Genuine close failure → E_TEARDOWN (was a borrowed E_PLACE; DESIGN.md
-			// §7 backlog item closed in step 2).
+			// Genuine close failure → E_TEARDOWN (was a borrowed E_PLACE; fixed in
+			// the error-taxonomy cleanup step).
 			throw delegateError(
 				"E_TEARDOWN",
 				`herdr tab close ${tabId} failed: ${msg}`,

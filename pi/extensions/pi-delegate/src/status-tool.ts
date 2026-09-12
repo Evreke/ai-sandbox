@@ -1,12 +1,12 @@
 /**
- * pi-delegate — status-tool: the `delegate_status` tool (DESIGN.md §5.2) —
+ * pi-delegate — status-tool: the `delegate_status` tool —
  * extracted verbatim from observe.ts (Wave 3, audit Law 5: modules are
  * responsibilities).
  *
  * OWNERSHIP: worker B (impl-tools).
  *
  * READ-ONLY by contract: observes workers from manifests + live herdr statuses.
- * Contains no mutating calls (verified in review — DESIGN.md §8).
+ * Contains no mutating calls (verified in review).
  * <p>
  * MODULE_CONTRACT: registers the `delegate_status` tool (exact name, exact
  * parameter shape) plus its read-only render helpers — the fleet-usage line
@@ -17,7 +17,7 @@
  * hint), manifest-store.ts, mailbox-store.ts (marker mtimes), usage.ts (the
  * ONLY session-JSONL parser — one-parser law), host.ts (the Transport seam),
  * typebox. Never imports the transport implementation (dependency rule,
- * DESIGN.md §4.1 — the Transport instance is injected from index.ts).
+ * ARCHITECTURE.md Law 4 — the Transport instance is injected from index.ts).
  * Critical invariants (moved verbatim from observe.ts):
  *   - F1 fleet usage: the aggregate line comes from aggregateTaskUsage
  *     WITHOUT persist — delegate_status stays read-only by contract; missing/
@@ -49,15 +49,15 @@ import { CONTEXT_TURNS_WARN, type Transport } from "./host.ts";
 // ===========================================================================
 
 /**
- * pi-delegate — `delegate_status` tool (DESIGN.md §5.2).
+ * pi-delegate — `delegate_status` tool.
  *
  * OWNERSHIP: worker B (impl-tools).
  *
  * READ-ONLY by contract: observes workers from manifests + live herdr statuses.
- * Contains no mutating calls (verified in review — DESIGN.md §8).
+ * Contains no mutating calls (verified in review).
  */
 
-/** Budget governor display data (DESIGN.md §14), read-only: name → session
+/** Budget governor display data, read-only: name → session
  *  JSONL path and recorded effective budget from every manifest, plus the
  *  resolved default budget for workers without a recorded one. Migration
  *  stage 3 (audit step 9): the scan takes the active backend name from the
@@ -85,7 +85,7 @@ function formatElapsed(ms: number): string {
 	return `${m}m${String(s % 60).padStart(2, "0")}s`;
 }
 
-/** v1.2 mailbox markers (DESIGN.md §12), read-only: q-file exists → "Q?";
+/** v1.2 mailbox markers, read-only: q-file exists → "Q?";
  *  a-file exists and is newer than the question → "A→" (answered/steered). */
 async function mailboxMarkers(dir: string, name: string): Promise<string> {
 	// EXTERNAL_DEPENDENCY: mailbox files at /tmp/exchange/<task>/q-<name>.json
@@ -97,7 +97,7 @@ async function mailboxMarkers(dir: string, name: string): Promise<string> {
 		.join(" ");
 }
 
-/** v1.5 progress ping display (DESIGN.md §18), read-only: last valid ping in
+/** v1.5 progress ping display, read-only: last valid ping in
  *  p-<name>.jsonl → " p:<phase>[ <pct>%] (<age>s)"; absent/unreadable → "".
  *  Advisory: never throws past the tool (read failures swallowed). */
 async function pingMarker(dir: string, name: string): Promise<string> {
@@ -114,8 +114,8 @@ async function pingMarker(dir: string, name: string): Promise<string> {
 }
 
 /** Probe runs place under /tmp/exchange/_probe — no report is expected there,
- *  so a missing report must render `report —`, never `report✗` (DESIGN.md
- *  §19.4 probe honesty). */
+ *  so a missing report must render `report —`, never `report✗` (probe
+ *  honesty). */
 function isProbeView(v: WorkerView): boolean {
 	return isProbeDir(v.dir);
 }
@@ -174,7 +174,7 @@ export function formatFleetUsageLine(task: string, snap: TaskUsageSnapshot, desc
 	);
 }
 
-/** Resume hint (DESIGN.md §19.3/§19.4): live fleet empty + non-empty archive
+/** Resume hint: live fleet empty + non-empty archive
  *  → point at the last archived tasks. Advisory: read failures swallowed. */
 async function resumeHint(): Promise<string> {
 	try {
@@ -211,7 +211,7 @@ export function registerStatusTool(pi: import("@earendil-works/pi-coding-agent")
 			"Pass name for one worker; omit to see all known workers (from manifests + the live host). Never mutates anything.",
 		promptSnippet: "Read-only status of delegate workers (never mutates)",
 		promptGuidelines: [
-			"Use delegate_status to check a specific worker after a timed-out or detached delegate call instead of repeating delegate — but do NOT poll it in a loop: the background watcher (DESIGN.md §21) wakes you on report-ready / mailbox-question / grill-deck / context-critical / worker-dead.",
+			"Use delegate_status to check a specific worker after a timed-out or detached delegate call instead of repeating delegate — but do NOT poll it in a loop: the background watcher wakes you on report-ready / mailbox-question / grill-deck / context-critical / worker-dead.",
 			"When delegate_status shows a worker as blocked, read the worker's pane and either answer the worker's question or send a re-brief.",
 		],
 		parameters: Type.Object({
@@ -264,10 +264,10 @@ export function registerStatusTool(pi: import("@earendil-works/pi-coding-agent")
 				shown.map(async (v: WorkerView) => {
 					const mailbox = await mailboxMarkers(v.dir, v.name);
 					const mailboxPart = mailbox ? ` ${mailbox}` : "";
-					// v1.5 (DESIGN.md §18): last progress ping when present, e.g.
+					// v1.5: last progress ping when present, e.g.
 					// " p:implementing 40% (12s)"; absent → nothing (backward compatible).
 					const pingPart = await pingMarker(v.dir, v.name);
-					// Dual gauge (DESIGN.md §20): parse the recorded session JSONL when the
+					// Dual gauge: parse the recorded session JSONL when the
 					// manifest holds a session path → "ctx P% ↑Xk ↓Yk" — context % primary
 					// (pi's own formula), tokens display-only. Tolerant; no path → no column.
 					const sessionPath = sessionPathByName.get(v.name);

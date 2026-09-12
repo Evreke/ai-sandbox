@@ -1,5 +1,5 @@
 /**
- * T-watch — event-driven background watcher checks (DESIGN.md §21).
+ * T-watch — event-driven background watcher checks.
  *
  * Run with: bun test/watcher-check.ts   (from the extension dir)
  *
@@ -2303,7 +2303,7 @@ const ownStore = (dir: string, sessionFile: string = TEST_SELF) =>
 		h.stop();
 	}
 
-	// (9) Audit line for a REAL send (DESIGN.md §21 delivery): a
+	// (9) Audit line for a REAL send (watcher delivery): a
 	// successful send writes exactly ONE watcher-log line per batch naming the
 	// send fact and the batch content (dir :: worker/kind#fingerprint per event)
 	// — the recovery trail after an incident. Negative parts: silent mode and a

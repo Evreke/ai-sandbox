@@ -1,5 +1,5 @@
 /**
- * T1 — Static/design conformance checks (DESIGN.md §8).
+ * T1 — Static/design conformance checks.
  *
  * Run with: bun test/static-check.ts   (from repo root)
  *

@@ -1,5 +1,5 @@
 /**
- * A6 (impl-settle) — unit-ish checks for DESIGN.md §19.1 (D3 two-phase
+ * A6 (impl-settle) — unit-ish checks for the two-phase waitSettle (D3
  * waitSettle), §19.2 (D4 second name-taken shape) and §19.3 (archive).
  *
  * Run with: bun test/settle-archive.ts   (from repo root)
@@ -88,7 +88,7 @@ function scriptStartFailure(stderr: string) {
 
 try {
 	// -------------------------------------------------------------------------
-	// D3 — two-phase waitSettle (DESIGN.md §19.1)
+	// D3 — two-phase waitSettle
 	// -------------------------------------------------------------------------
 	const t = createHerdrTransport();
 
@@ -165,7 +165,7 @@ try {
 	}
 
 	// -------------------------------------------------------------------------
-	// D3.7+ — v1.8 aged-finish fix (DESIGN.md §19.1b): herdr ages done→idle
+	// D3.7+ — v1.8 aged-finish fix: herdr ages done→idle
 	// within minutes (live-reproduced 2026-09-05: probe, probe-retry,
 	// fresh-probe-x all flipped), so a late watcher sees only idle and can never
 	// observe working/done — it spun the FULL timeout, then false-reported
@@ -387,7 +387,7 @@ try {
 	rmSync(sessDir, { recursive: true, force: true });
 
 	// -------------------------------------------------------------------------
-	// D4 — second name-taken shape (DESIGN.md §19.2)
+	// D4 — second name-taken shape
 	// -------------------------------------------------------------------------
 	const startReq: StartReq = {
 		name: "routing-rev",

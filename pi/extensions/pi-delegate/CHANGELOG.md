@@ -64,6 +64,10 @@ The healing release: the four-way 2026-09-11 audit of the 1.16.1 line turned int
   exchange/path layer is Windows-portable in 1.17.0; running the host backend on Windows
   requires herdr for Windows.
 
+### Removed
+
+- **DESIGN.md** — the frozen historical design log (v1 → v1.17.0) — removed from the repo and the npm package; decision history lives in git.
+
 ## [Unreleased]
 
 ### Changed

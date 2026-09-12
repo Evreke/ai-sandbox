@@ -2,7 +2,7 @@
  * pi-delegate — extension entry point.
  *
  * Installs the transport once and registers the delegate tool layer on it.
- * Also mounts the ambient fleet UI (DESIGN.md §19.4) on session_start —
+ * Also mounts the ambient fleet UI on session_start —
  * guarded by ctx.hasUI so headless runs stay inert. Command wiring
  * (/delegate-fleet, /delegate-teardown) lives in src/observe.ts
  * (registerCommands, moved there in W6) — index only calls it.
@@ -10,8 +10,8 @@
  * Install (local-only repo, symlinked into pi's auto-discovery dir):
  *   ln -s /root/projects/pi-delegate ~/.pi/agent/extensions/pi-delegate
  *
- * See DESIGN.md for the architecture and the dependency rule: no src/ module
- * imports the transport implementation — the transport is injected here.
+ * Architecture and the dependency rule (no src/ module imports the transport
+ * implementation — the transport is injected here): ARCHITECTURE.md Law 4.
  */
 
 import { readFileSync } from "node:fs";
@@ -193,7 +193,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		const self: SelfIdentity = { sessionFile, cwd: ctx.cwd };
 
-		// Ambient fleet UI (DESIGN.md §19.4): mount on session_start (fires on
+		// Ambient fleet UI: mount on session_start (fires on
 		// startup AND on new/resume/fork). Replace-on-reload stays the
 		// documented contract for the widget — mountFleetUI disposes the old
 		// handle when replacing (never leaks); inert headless — the hasUI guard
@@ -216,7 +216,7 @@ export default function (pi: ExtensionAPI) {
 			fleetDispose = mountFleetUI(ctx, deps);
 		}
 
-		// Event-driven watcher (DESIGN.md §21): the replacement for the
+		// Event-driven watcher: the replacement for the
 		// improvised bash sleep after E_TIMEOUT. Mounted for EVERY session —
 		// deliberately NOT behind ctx.hasUI: the wake-up matters headless too
 		// (rpc/print). The composer returns the stop handle (Law 3: mounts
