@@ -266,21 +266,30 @@ Rules:
 
 ### 3.3 What stays POSIX-only on Windows v1 (explicitly unsupported)
 
-- **herdr unix-socket transport**: named-pipe support is herdr's scope. On
-  Windows v1 runs with `HERDR_SOCKET_TRANSPORT=cli` (the kill-switch exists);
-  pi-delegate auto-selects `cli` when `process.platform === "win32"` and no
-  pipe socket is configured.
-- **Session-file fallback munge** (`usage.ts:215`): gated on unix; on Windows
-  the fallback returns `[]` (usage gauges degrade gracefully — they are
-  already best-effort) until pi's Windows layout is confirmed (§5 Phase 3).
-- **SIGTERM/SIGKILL escalation** is replaced (not "unsupported") — see
-  Phase 4; there is no honest "graceful SIGTERM" on Windows.
+> Status note (1.17.0): the exchange/path layer above this list LANDED in
+> 1.17.0; the items here did not.
 
-Dependency note vs branches: `exchangeRoot()` override, the WorkerHost seam
-(`src/host.ts`, `src/herdr/host.ts`, `src/host/fake.ts`) and the
-backend-aware manifest scan exist only on `delegate/host-impl`. Phases 1–2
-(builders, root derivation) apply cleanly on either branch; Phases 3–6 build
-on the seam and should land on/after `delegate/host-impl`.
+- **herdr unix-socket transport**: named-pipe support is herdr's scope. The
+  pi-delegate-side kill-switch `HERDR_SOCKET_TRANSPORT=cli` exists, but the
+  read-only socket path itself is platform-agnostic in the code — there is NO
+  automatic `cli` selection on `process.platform === "win32"`; a Windows
+  deployment must either give herdr a reachable socket path or set the env
+  explicitly. (Correction of the original design intent, which assumed
+  auto-selection; verified against `src/herdr/host.ts` in 1.17.0.)
+- **Session-file fallback munge** (`src/usage.ts`): there is no explicit
+  platform gate in the code; on Windows the POSIX-shaped cwd munge simply
+  finds no matching session directory and the fallback returns `[]` — the
+  usage gauges degrade gracefully (they are already best-effort). Still
+  pending pi's Windows session layout confirmation (§5 Phase 3).
+- **SIGTERM/SIGKILL escalation** is replaced (not "unsupported") — see
+  Phase 4; there is no honest "graceful SIGTERM" on Windows. (Landed in
+  1.17.0: the Windows escalation is `taskkill /pid … /T /F`.)
+
+Dependency note vs branches (historical, at design time): `exchangeRoot()`
+override, the WorkerHost seam (`src/host.ts`, `src/herdr/host.ts`,
+`src/host/fake.ts`) and the backend-aware manifest scan existed only on
+`delegate/host-impl` then; the seam and the override are on main since 1.16.0,
+and the path layer landed in 1.17.0.
 
 ---
 

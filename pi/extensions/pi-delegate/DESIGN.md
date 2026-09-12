@@ -46,8 +46,8 @@ overlay (#5).
 
 ### 4.1 Module layout
 
-Verified against the file tree on 2026-09-12 (layout v3 — the healing split; the
-base version line is still 1.16.1, the release PR bumps it). Canonical term for the backend
+Verified against the file tree on 2026-09-12 (layout v3 — the healing split;
+shipped as release 1.17.0). Canonical term for the backend
 seam is **WorkerHost**; the TypeScript interface keeps its historical frozen type name
 `Transport` — same thing, an alias, not a second concept.
 

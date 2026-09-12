@@ -116,8 +116,10 @@ release. SECTION banners inside a file are extraction seams designed to be
 executed, not admired (audit: `exchange.ts` contains an entire planned module
 inlined verbatim and never split).
 
-The target shape (from the decomposition plan, to be reached across the
-stabilization waves and the next cycle):
+The target shape (from the decomposition plan; the `exchange.ts`, `observe.ts`
+and `spawn.ts` splits LANDED in 1.17.0 — layout v3; the `fleet.ts` and
+`herdr/host.ts` splits and the remaining `execute()` shrink stay planned for
+the next cycle):
 
 - `exchange.ts` splits into: `archive.ts`, `manifest-store.ts`,
   `report-schema.ts`, `mailbox-store.ts`, `watch-store.ts`, with `exchange.ts`
@@ -141,10 +143,11 @@ byte-identical through every split.
 Every dependency rule this document states must have a pin in
 `test/static-check.ts` (or an equivalent automated check), because prose rules
 rot. Current pins to keep: only `index.ts` imports a backend adapter; the
-observe→fleet one-way edge; the one-parser law. Pins to add after the split
-wave: no `src/` module imports `observe.ts` except `compose.ts`/`index.ts`;
-`spawn.ts` must not import `observe.ts` at all (config moves to
-`watch-config.ts`); the exchange-layer leaves (`expaths.ts`, `host.ts`) stay
+observe→fleet one-way edge; the one-parser law. Pins added with the split
+wave (1.17.0): T1.8 — no `src/` module imports `observe.ts` except
+`compose.ts` (the spawn→observe edge stays dead — config lives in
+`watch-config.ts`); T1.9 — `src/` builds exchange-layer paths only through
+`expaths.ts`; the exchange-layer leaves (`expaths.ts`, `host.ts`) stay
 leaves.
 
 A new cross-module edge requires either a new pin or an explicit waiver

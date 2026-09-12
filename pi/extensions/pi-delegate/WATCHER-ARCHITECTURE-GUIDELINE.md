@@ -1,9 +1,9 @@
 # Архитектурный гайдлайн: исправление причин багов watcher в pi-delegate
 
 **Статус:** нормативный гайдлайн для правок control-plane доставки событий  
-**Объект:** pi-delegate (ориентир — поведение и модули ветки уровня v1.16.x)  
+**Объект:** pi-delegate — живой нормативный документ, актуален для 1.17.0 (layout v3; watcher stages A–C на main — коммиты `538f9b1` / `9b8fde5` / `ef33ec9`)  
 **Вне scope (явно):** системный daemon на всю машину; non-blocking redesign tool `delegate`; смена Transport/herdr; «delegate без файлов» как обязательный первый шаг  
-**Дата:** 2026-09-11  
+**Дата:** 2026-09-11 (обновлён для 1.17.0)  
 
 Этот документ задаёт **обязательные правила** для изменений, которые чинят классы багов:
 
@@ -11,7 +11,7 @@
 - сообщение ушло **повторно**;
 - сообщения **не было**, хотя факт на диске/host был.
 
-Гайдлайн **не** заменяет DESIGN.md целиком. При конфликте с устаревшим описанием layout в DESIGN приоритет у фактического кода + этого гайдлайна в части **delivery policy**, пока DESIGN не синхронизирован.
+Гайдлайн **не** заменяет DESIGN.md целиком. С 1.17.0 DESIGN.md синхронизирован с layout v3; при конфликте приоритет у фактического кода + этого гайдлайна в части **delivery policy**.
 
 ---
 
@@ -92,6 +92,7 @@
 
 - **Канон:** `orchestratorSessionPath` на **worker entry** в manifest (значение = session file path оркестратора на момент spawn, тот же идентификатор, что использует mount gate).  
 - **Дополнительно:** `masterSessionPath` на task-level может существовать для fleet accounting; для **wake routing** канон — worker-level Owner.  
+- **Сравнение session-путей (с 1.17.0, TZ windows §3.4):** любое сравнение «owner vs self» / «self vs worker entry» идёт через ЕДИНСТВЕННЫЙ хелпер `sameSessionPath(a, b, platform)` (`src/watch-role.ts`), не через raw-сравнение строк: POSIX — байт-идентичное `===` (без casefold и свёртки разделителей — на case-sensitive ФС это разные файлы); win32 — casefold + свёртка `/` и `\` (дрейф регистра/разделителей между писателем и читателем не делает пути разными). Call sites: `workerAudienceMatch`, `sessionRole` (isWorker + ownsChildren), watch-detect isSelf, leaf-worker gate в `watcher.ts`. Регрессии: `test/ownership-check.ts` W1–W5, `test/watcher-check.ts` W21.1 (posix: различие регистра глушит доставку) / W21.2 (win32: дрейф регистра всё ещё доставляет).  
 - Запрещено вводить третий «почти owner» без удаления старых правил из detect.
 
 ### 3.3. Кто пишет Owner
@@ -279,12 +280,12 @@ Memory `seen` допустим **только** как кэш одного пр�
 
 ### 7.1. Где живёт policy
 
-| Concern | Модуль |
+| Concern | Модуль (layout v3, DESIGN.md §4.1) |
 |---------|--------|
-| Delivery key, outbox read/write, tick algorithm | `observe.ts` (или выделенный `watch/` **без** нарушения dependency rule) |
-| Manifest fields Owner, collectedAt, schema paths | `exchange.ts` |
-| Запись Owner при spawn; collectedAt при collect | `spawn.ts` |
-| Mount/stop, role gate | `index.ts` + helpers в `observe.ts` |
+| Delivery key, durable delivered store, tick algorithm | `watch-detect.ts` (события + detection), `watch-store.ts` (durable `delivered-<key>.json`), `watcher.ts` (тик-цикл и доставка); `observe.ts` — только facade |
+| Manifest fields Owner, collectedAt, schema paths | `manifest-store.ts` (facade `exchange.ts` сохранён для пере-экспортов) |
+| Запись Owner при spawn; collectedAt при collect | `spawn.ts` (+ `manifest-store.ts`) |
+| Mount/stop, role gate | канонический верdict — `watch-role.ts` (`sessionRole` + `workerAudienceMatch` + `sameSessionPath`); mount-решение — `compose.ts`; lifecycle — `watcher.ts` |
 | Отображение ownership в UI | `fleet.ts` — **те же** правила Owner, без своей fail-open семантики |
 | Host status / teardown | `host` / adapter — без knowledge о Audience |
 
@@ -320,6 +321,7 @@ Tool/observe/fleet **не** импортируют herdr adapter напряму�
   "watch": {
     "intervalMs": 10000,
     "legacyFailOpen": false,
+    "durableDelivery": true,
     "retire": false,
     "retireTtlMs": 900000
   }
@@ -328,7 +330,8 @@ Tool/observe/fleet **не** импортируют herdr adapter напряму�
 
 Правила:
 
-1. `legacyFailOpen` default **false** в целевом состоянии гайдлайна.  
+1. `legacyFailOpen` default **false** в целевом состоянии гайдлайна (с 1.17.0 — фактический default; stage A, коммит `538f9b1`).  
+1a. `durableDelivery` (с 1.17.0, stage B, коммит `9b8fde5`) default **true** — durable store `delivered-<key>.json` в task dir; аварийный rollback без новой версии: `false` (не-boolean значение предупреждает один раз и остаётся true).  
 2. Неизвестный ключ — ignore или warn-once; не enable опасных путей.  
 3. Любой новый kind, требующий config, документируется до merge.
 
@@ -359,6 +362,13 @@ Tool/observe/fleet **не** импортируют herdr adapter напряму�
 ---
 
 ## 11. Поэтапный план внедрения (рекомендуемый порядок)
+
+> **Статус (1.17.0):** этапы A, B и C выполнены — коммиты `538f9b1` (stage A:
+> fail-closed ownership по умолчанию, единая role table, rollback
+> `watch.legacyFailOpen`), `9b8fde5` (stage B: durable delivery store
+> `delivered-<key>.json`, commit после успешного send), `ef33ec9` (stage C:
+> явные result-plane состояния missing/invalid/ready + mount-gate identity
+> fix). Остался этап D (будущее).
 
 ### Этап A — зафиксировать правила без большого storage redesign
 
