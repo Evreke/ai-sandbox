@@ -1,73 +1,31 @@
 # ai-sandbox — repo instructions
 
-## pi-delegate — the binding constitution
+## pi-delegate moved out
 
-Every agent working on this repository — on the extension, its tests, its docs or
-the bundle around them — is bound by
-`pi/extensions/pi-delegate/ARCHITECTURE.md`. It is the layer above DESIGN.md:
-DESIGN says how the system is built, ARCHITECTURE says what we will and will not
-do to it, and why. Its ten laws (details and enforcement in the document itself,
-no restatement here): the platform is the API — import, never reimplement;
-contracts must be true; session lifetime owns everything mounted in it; the seam
-stays deep and backend-blind; modules are responsibilities, not parking lots;
-layering is enforced by machine, not by prose; on-disk formats are versioned
-contracts; errors are structured and deviations from pi conventions are
-documented; one artifact, one source of truth; every fixed bug buys a regression
-check.
+pi-delegate lives in its own standalone repository now:
+**https://github.com/Evreke/delegate** (extracted from this repo, 2026-09).
+All pi-delegate work — extension code, tests, docs, releases — happens there
+and is bound by that repo's own constitution (`AGENTS.md` + `ARCHITECTURE.md`
+inside it; ten laws, details and enforcement in the documents themselves).
+This repo keeps no copy of it: one artifact, one source of truth.
 
 ## Workflow — trunk-based development (TBD)
 
-`main` is the trunk: always green, always releasable. **No direct commits to
-`main`** (the only exception: bootstrap/meta commits that establish these
-rules themselves). All work happens in short-lived branches:
+`main` is the trunk: always green. **No direct commits to `main`** (the only
+exception: bootstrap/meta commits that establish these rules themselves). All
+work happens in short-lived branches:
 
 - `feature/<topic>` — new behavior,
 - `fix/<topic>` — bug fixes.
 
 Merge to `main` **only via PR, squash-merge only** (one clean commit per
-PR; the branch dies after the merge). CI gates every PR (bun check suite +
-package.json version sync). History rewrites of `main` are FORBIDDEN — the
+PR; the branch dies after the merge). History rewrites of `main` are FORBIDDEN — the
 one-time NDA scrub (orphan squash, 2026-09) was an explicit operator
 exception and sets no precedent.
 
-## Release command
-
-When the user says **"release"** (in this repo), run the release ritual — no
-further confirmation needed.
-
-**Gate first — what is actually being released.** Diff the last release
-commit against HEAD and look at WHAT changed:
-
-- **Application changes** (anything under `pi/extensions/pi-delegate/src`,
-  `test`, `index.ts`, skills/bundle manifest, root `package.json`) → full
-  ritual below.
-- **Docs / repo-meta only** (`AGENTS.md`, `README*`, prose `*.md`, scratch
-  files) → **NO version inc, NO changelog** — the application did not
-  change. Report "nothing to release" and stop.
-
-Full ritual (TBD edition — release is a PR, not a push):
-
-1. **Branch** `feature/release-x.y.z` from `main`.
-2. **Inc version** in BOTH files — they ship together and must never diverge:
-   - `pi/extensions/pi-delegate/package.json`
-   - `package.json` (bundle root)
-   Bump level follows the changelog content: new behavior → minor (`1.x.0`),
-   fixes only → patch (`1.14.x`).
-3. **Changelog**: prepend a `## [x.y.z] — YYYY-MM-DD` section to
-   `pi/extensions/pi-delegate/CHANGELOG.md` (Keep a Changelog format; the
-   section covers exactly the changes going out in this release).
-4. **Commit, push the branch, open a PR** into `main`, let CI pass, then
-   **squash-merge**.
-5. **Tagging is CI's job, not yours**: the release workflow on `main` reruns
-   the suite, sees the version is higher than the latest `v*` tag, creates
-   the semver tag `v{x.y.z}` and a GitHub Release whose notes come from the
-   fresh CHANGELOG section. If the version was not bumped, no tag is
-   created (safe default — the merge just lands without a release).
-
-Never open a release PR with uncommitted unrelated changes mixed into the
-release commit — park them in a separate commit first. A mistaken release
-is corrected by a forward `git revert` (via its own `fix/` PR), never a
-force-push.
+There is no CI in this repo: the workflows it used to have gated pi-delegate
+and moved out with it (grill-deck was never gated). "Always green" is
+enforced by convention — run the relevant checks locally before merging a PR.
 
 ## Zero-Context Survival (self-sufficient files) — MANDATORY for production code
 
@@ -102,35 +60,33 @@ Skeleton:
 
 ```ts
 /**
- * Schedules delegate worker spawns and collects their reports.
+ * Renders interactive question decks and collects structured answers.
  * <p>
- * MODULE_CONTRACT: spawn/settle/report lifecycle for pi-delegate workers.
- * Dependencies: herdr socket API (panes), exchange dir on disk (briefs,
- * manifests, reports).
- * Critical invariants: one report file per worker; manifest entries are
- * never removed while a pane may still be live.
+ * MODULE_CONTRACT: deck lifetime — build, present, collect answers.
+ * Dependencies: TUI components, exchange dir on disk (deck state files).
+ * Critical invariants: one answers file per deck; a deck is never mutated
+ * after presentation begins.
  */
 import { ... } from "...";
 
 /**
- * Spawns one worker pane and waits for its report.
+ * Presents one deck and blocks until the user answers every question.
  * <p>
  * FUNCTION_CONTRACT:
  * Input:
- *   - name: worker name, matches [a-z][a-z0-9_-]{0,31}, unique among live
- *     workers
- *   - briefPath: path to an existing brief file under /tmp/exchange/<task>/
- * Output: the worker's validated report (parsed JSON)
+ *   - questions: non-empty array; every question has a stable id unique
+ *     within the deck
+ * Output: the collected answers, keyed by question id, DEFERRED marks
+ *   preserved
  * Guarantees:
- *   - the report is schema-validated before being returned
- *   - the manifest entry exists while the pane may still be live
+ *   - the answers file is written before the call returns
+ *   - re-presentation after a crash resumes from the persisted state
  * Raises:
- *   - E_START if herdr cannot start the agent (name taken, no pane)
- *   - E_REPORT_INVALID if the report fails schema validation
+ *   - E_INVALID_DECK if two questions share an id or the array is empty
  */
-export async function spawnWorker(name: string, briefPath: string) {
-  // EXTERNAL_DEPENDENCY: HERDR socket at $HERDR_SOCK (herdr agent prompt)
-  const sock = process.env.HERDR_SOCK;
+export async function presentDeck(questions: Question[]) {
+  // EXTERNAL_DEPENDENCY: deck state dir at $DECK_STATE_DIR (filesystem)
+  const stateDir = process.env.DECK_STATE_DIR;
   // ...
 }
 ```
