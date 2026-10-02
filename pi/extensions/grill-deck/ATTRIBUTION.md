@@ -10,7 +10,7 @@ Engineers. Straight from my .agents directory." by Matt Pocock, MIT licensed.
   Adapted from the upstream `grilling` skill (renamed with the `-fork`
   suffix to coexist with an upstream install); no longer byte-for-byte
   upstream — the fallback round-presentation contract is fork-specific
-  (see CHANGELOG 1.15.0).
+  (see CHANGELOG 1.6.0).
 - `skills/grill-me/` — the user-facing entry point that starts a grilling
   session (`disable-model-invocation: true`).
 

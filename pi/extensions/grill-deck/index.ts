@@ -56,7 +56,7 @@ import {
 
 const rounds: RoundRecord[] = [];
 
-// Text-path (1.15.0) guards: repair attempts are per-run (reset on
+// Text-path (1.6.0) guards: repair attempts are per-run (reset on
 // agent_start); a user-cancelled deck disables block parsing until the run
 // ends (docs/design-stage2-text-path.md §4).
 let repairsThisRun = 0;

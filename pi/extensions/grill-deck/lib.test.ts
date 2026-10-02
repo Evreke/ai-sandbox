@@ -246,7 +246,7 @@ describe("round shape contract (v1.5.0)", () => {
 	});
 });
 
-describe("answersToText — transport-dependent tail (v1.15.0)", () => {
+describe("answersToText — transport-dependent tail (v1.6.0)", () => {
 	const questions = [{ id: "Q1", title: "t", choices: ["a"] }];
 	const answers = [{ id: "Q1", kind: "accepted" as const, label: "a" }];
 
