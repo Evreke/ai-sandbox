@@ -17,6 +17,7 @@
   "files": [
     "index.ts",
     "lib.ts",
+    "CHANGELOG.md",
     "onboarding.md",
     "README.md",
     "ATTRIBUTION.md",
