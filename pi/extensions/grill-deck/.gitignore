@@ -1,0 +1,5 @@
+.npmrc
+node_modules/
+*.tgz
+.env
+SECURITY-AUDIT.md

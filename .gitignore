@@ -1,0 +1,10 @@
+
+# personal scratch, never publish
+# OS / editor artifacts — never publish (found during demo-readiness hygiene sweep)
+*:Zone.Identifier
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*~
+.#*
