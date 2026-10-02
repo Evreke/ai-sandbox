@@ -232,7 +232,7 @@ export function answersToText(
 	].join("\n");
 }
 
-// ---------------------------------------------------------------- text-path round block (1.15.0)
+// ---------------------------------------------------------------- text-path round block (1.6.0)
 
 /**
  * The fallback (text) transport: the model ends a round with ONE fenced

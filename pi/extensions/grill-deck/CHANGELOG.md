@@ -3,7 +3,7 @@
 All notable changes to `@evreke/pi-grill-deck` are documented here.
 Format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [1.15.0] — 2026-10-02
+## [1.6.0] — 2026-10-02
 
 ### Added
 
@@ -111,7 +111,7 @@ the user confirms shared understanding").
 | Question fields | free-form markdown text | typed fields `topic` / `id` / `title` / `body` / `choices` / `recommendation`, each with rendering rules | 1.2.1 (initial adaptation) |
 | Deferred answers | not modelled | a DEFERRED answer is a still-open decision and re-enters a later round's frontier | 1.2.1 (initial adaptation) |
 | Round shape contract | — | `choices` is required: a non-empty array for a choice question, an empty array marks an open question; options are never embedded in the body; a `recommendation` is only allowed with choices and is worded exactly as one of them | 1.5.0 |
-| Compound decisions | — | mutually dependent decisions merge into one question whose options are the coherent combinations; a decision enters the frontier only when every one of its prerequisites is settled | 1.15.0 |
-| Termination guard | the session is done when the frontier is empty | …and no exploration is still running — a sub-agent fact-finding run must not race the session close | 1.15.0 |
-| Fallback presentation (tool unavailable) | markdown (`❓` / `➡️`) | one fenced ` ```grill-round ` XML block: every question carries `<choice>` entries or `<open/>` (never both), XML entity escaping, no nested fences; an empty frontier emits no block | 1.15.0 |
-| Skill name | `grilling` | `grilling-fork` — coexists with an upstream install; the description carries an explicit precedence marker | 1.15.0 |
+| Compound decisions | — | mutually dependent decisions merge into one question whose options are the coherent combinations; a decision enters the frontier only when every one of its prerequisites is settled | 1.6.0 |
+| Termination guard | the session is done when the frontier is empty | …and no exploration is still running — a sub-agent fact-finding run must not race the session close | 1.6.0 |
+| Fallback presentation (tool unavailable) | markdown (`❓` / `➡️`) | one fenced ` ```grill-round ` XML block: every question carries `<choice>` entries or `<open/>` (never both), XML entity escaping, no nested fences; an empty frontier emits no block | 1.6.0 |
+| Skill name | `grilling` | `grilling-fork` — coexists with an upstream install; the description carries an explicit precedence marker | 1.6.0 |
