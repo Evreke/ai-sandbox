@@ -11,8 +11,14 @@
     "requirements"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Evreke/ai-sandbox.git",
+    "directory": "pi/extensions/grill-deck"
+  },
   "scripts": {
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepublishOnly": "npm test"
   },
   "files": [
     "index.ts",
@@ -23,6 +29,9 @@
     "ATTRIBUTION.md",
     "skills"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "pi": {
     "extensions": [
       "./index.ts"
